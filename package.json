@@ -16,9 +16,9 @@
     "typeorm": "ts-node -r reflect-metadata ./node_modules/typeorm/cli.js -d src/db/data-source.ts",
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:create": "node ./node_modules/typeorm/cli.js migration:create",
-    "migration:run": "npm run typeorm -- migration:run",
+    "migration:run": "npm run typeorm -- migration:run --transaction each",
     "migration:revert": "npm run typeorm -- migration:revert",
-    "migration:run:prod": "node -r reflect-metadata ./node_modules/typeorm/cli.js migration:run -d dist/db/data-source.js",
+    "migration:run:prod": "node -r reflect-metadata ./node_modules/typeorm/cli.js migration:run --transaction each -d dist/db/data-source.js",
     "infra:up": "docker compose -f docker/docker-compose.yml up -d --wait",
     "infra:down": "docker compose -f docker/docker-compose.yml down"
   },

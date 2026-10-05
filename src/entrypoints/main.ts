@@ -17,7 +17,8 @@ import { stopTelemetry } from '../shared/telemetry';
 import { startApiRole } from './api.role';
 import { startRealtimeRole } from './realtime.role';
 import { startSchedulerRole } from './scheduler.role';
-import { startPollerRole, startProcessorRole } from './worker-placeholder.role';
+import { startProcessorRole } from './processor.role';
+import { startPollerRole } from './worker-placeholder.role';
 
 const STARTERS: Record<Role, RoleStarter> = {
   scheduler: startSchedulerRole,

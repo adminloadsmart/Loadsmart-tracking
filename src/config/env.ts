@@ -36,6 +36,17 @@ export const env = {
   corsOrigins,
   databaseUrl: required('DATABASE_URL'),
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6380',
+  // The main loadsmart backend's Redis: source of the `loadsmart.events` snapshot stream (sync
+  // module) and, from Phase 2, its access-token blocklist. Defaults to our own Redis so the
+  // service runs standalone in dev/tests.
+  mainRedisUrl: process.env.MAIN_REDIS_URL || process.env.REDIS_URL || 'redis://localhost:6380',
+  // Point stream partitions (docs/ROADMAP.md §7). Fixed for the life of the stream — changing it
+  // needs a drain-and-rehash, so it's sized generously up front.
+  pointPartitions: numberWithDefault('POINT_PARTITIONS', 16),
+  // Approximate per-partition stream cap (XADD MAXLEN ~) — ~48h of replay at 2k vehicles.
+  pointStreamMaxLen: numberWithDefault('POINT_STREAM_MAXLEN', 1_500_000),
+  // Deliveries before a failing stream entry is moved to its dead-letter stream.
+  streamMaxDeliveries: numberWithDefault('STREAM_MAX_DELIVERIES', 5),
   logLevel: process.env.LOG_LEVEL ?? (nodeEnv === 'production' ? 'info' : 'debug'),
   // Hard upper bound on graceful shutdown — a stuck close() must never hang a deploy.
   shutdownTimeoutMs: numberWithDefault('SHUTDOWN_TIMEOUT_MS', 10_000),

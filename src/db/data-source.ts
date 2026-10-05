@@ -16,6 +16,9 @@ export const AppDataSource = new DataSource({
   entities: [], // every new module adds its entity here
   // __dirname-relative + dual-ext so this resolves under ts-node (src/db) and compiled node (dist/db).
   migrations: [`${__dirname}/migrations/*.{js,ts}`],
+  // Per-migration transactions: Timescale DDL like continuous aggregates must run outside one,
+  // and those migrations opt out with `transaction = false`.
+  migrationsTransactionMode: 'each',
   extra: {
     // Bounded pool — the hot ingest paths never touch Postgres synchronously (they XADD to Redis),
     // so a small pool per process is enough and protects the DB as roles scale out horizontally.
