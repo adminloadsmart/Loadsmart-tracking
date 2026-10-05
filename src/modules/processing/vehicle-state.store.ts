@@ -10,6 +10,8 @@ export const tripMetricsKey = (tripId: string) => `trk:trip:${tripId}:metrics`;
 export const tripFraudKey = (tripId: string) => `trk:trip:${tripId}:fraud`;
 
 export interface LatestPosition {
+  tenantId: string;
+  vehicleId: string;
   lat: number;
   lng: number;
   recordedAt: string;
@@ -64,6 +66,49 @@ export class VehicleStateStore {
     return states;
   }
 
+  /** Latest positions for many vehicles in one round trip; vehicles never seen are omitted. */
+  async readLatest(vehicleIds: string[]): Promise<Map<string, LatestPosition>> {
+    if (vehicleIds.length === 0) return new Map();
+    const pipeline = this.redis.pipeline();
+    for (const id of vehicleIds) pipeline.hgetall(vehicleLatestKey(id));
+    const results = (await pipeline.exec()) ?? [];
+    const latest = new Map<string, LatestPosition>();
+    vehicleIds.forEach((vehicleId, i) => {
+      const [err, raw] = results[i] ?? [];
+      if (err) throw err;
+      const hash = raw as Record<string, string>;
+      if (!hash?.recordedAt) return;
+      latest.set(vehicleId, {
+        tenantId: hash.tenantId ?? '',
+        vehicleId,
+        lat: Number(hash.lat),
+        lng: Number(hash.lng),
+        recordedAt: hash.recordedAt,
+        source: hash.source as PointSource,
+        speedKmh: hash.speedKmh ? Number(hash.speedKmh) : null,
+        heading: hash.heading ? Number(hash.heading) : null,
+        motion: hash.motion,
+        tripId: hash.tripId || null,
+      });
+    });
+    return latest;
+  }
+
+  /** Accumulated distance per source (metres) and fraud flags for a trip. */
+  async readTripMetrics(
+    tripId: string,
+  ): Promise<{ distanceMBySource: Record<string, number>; fraudFlags: string[] }> {
+    const [metrics, fraud] = await Promise.all([
+      this.redis.hgetall(tripMetricsKey(tripId)),
+      this.redis.smembers(tripFraudKey(tripId)),
+    ]);
+    const distanceMBySource: Record<string, number> = {};
+    for (const [field, value] of Object.entries(metrics)) {
+      if (field.startsWith('distance_m:')) distanceMBySource[field.slice(11)] = Number(value);
+    }
+    return { distanceMBySource, fraudFlags: fraud.sort() };
+  }
+
   async persist({ states, latest, distance, mockLocationTrips }: PersistInput): Promise<void> {
     if (
       states.size === 0 &&
@@ -88,6 +133,7 @@ export class VehicleStateStore {
     }
     for (const [vehicleId, position] of latest) {
       multi.hset(vehicleLatestKey(vehicleId), {
+        tenantId: position.tenantId,
         lat: position.lat,
         lng: position.lng,
         recordedAt: position.recordedAt,

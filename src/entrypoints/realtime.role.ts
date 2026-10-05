@@ -4,15 +4,12 @@ import { env } from '../config/env';
 import { redisManager } from '../db/redis';
 import { createRedisConnection } from '../db/redis-connection';
 import { createIngestPhoneModule } from '../modules/ingest-phone';
+import { createLiveModule } from '../modules/live';
 import { createPointsModule } from '../modules/points';
 import { createSyncModule } from '../modules/sync';
+import { createTrackingApiModule } from '../modules/tracking-api';
 import { closeServer, listen } from '../shared/lifecycle/http-server';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
-
-// Namespaces still to come (docs/ROADMAP.md §3.1 / Phase 3); they reject connections until then.
-const PENDING_NAMESPACES = {
-  '/live': 'Phase 3 (live map viewers)',
-} as const;
 
 export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logger }) => {
   // Driver tokens are issued by the main backend; without its secret nobody could connect.
@@ -32,11 +29,6 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
 
   // Nothing is served on the default namespace.
   io.use((_socket, next) => next(new Error('Use a named namespace')));
-  for (const [name, phase] of Object.entries(PENDING_NAMESPACES)) {
-    io.of(name).use((_socket, next) =>
-      next(new Error(`Namespace ${name} not implemented yet — ${phase}`)),
-    );
-  }
 
   const redis = redisManager.getClient();
   const mainRedis = createRedisConnection(env.mainRedisUrl, 'main-backend-blocklist');
@@ -55,6 +47,16 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
     options: { minLocIntervalMs: env.phoneMinIntervalMs, minBatchIntervalMs: 1000 },
   }).attach(io.of('/driver'));
 
+  // /live: web map viewers. Fed by the processors over Redis pub/sub (every pod subscribes).
+  const liveSubscriber = createRedisConnection(env.redisUrl, 'live-subscriber');
+  const fanout = await createLiveModule({
+    subscriber: liveSubscriber,
+    mainRedis,
+    service: createTrackingApiModule(dataSource, redis).service,
+    jwtSecret: env.jwtSecret,
+    logger,
+  }).attach(io.of('/live'));
+
   await listen(httpServer, env.realtimePort);
   logger.info({ port: env.realtimePort }, 'socket.io server listening');
 
@@ -69,7 +71,8 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
       // Disconnects every client (they reconnect to another pod) and closes the http server.
       await new Promise<void>((resolve) => io.close(() => resolve()));
       await closeServer(httpServer);
-      await mainRedis.quit();
+      await fanout.stop();
+      await Promise.all([mainRedis.quit(), liveSubscriber.quit()]);
     },
   };
 };

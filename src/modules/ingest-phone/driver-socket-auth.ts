@@ -1,6 +1,4 @@
-import type Redis from 'ioredis';
 import jwt, { JwtPayload } from 'jsonwebtoken';
-import type { Logger } from 'pino';
 import type { Socket } from 'socket.io';
 
 /** Who is on the other end of a /driver socket — set on socket.data by the handshake. */
@@ -10,26 +8,6 @@ export interface DriverIdentity {
   jti: string | null;
   /** Epoch seconds the token expires. */
   exp: number;
-}
-
-// Same key the main backend writes on logout (its shared/utils/token-blocklist.ts).
-const BLOCKLIST_PREFIX = 'access-token-blocklist:';
-
-/**
- * Revocation check against the MAIN backend's Redis. Fails open like the main backend does:
- * a Redis blip shouldn't drop every driver's connection; the exposure is bounded by the
- * (15-minute) access-token lifetime.
- */
-export function createTokenBlocklist(mainRedis: Redis, logger: Logger) {
-  return async (jti: string | null): Promise<boolean> => {
-    if (!jti) return false;
-    try {
-      return (await mainRedis.get(`${BLOCKLIST_PREFIX}${jti}`)) !== null;
-    } catch (err) {
-      logger.warn({ err }, 'Token blocklist check failed; allowing (fail-open)');
-      return false;
-    }
-  };
 }
 
 interface DriverTokenPayload extends JwtPayload {

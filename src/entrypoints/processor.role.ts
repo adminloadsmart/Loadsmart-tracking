@@ -1,6 +1,7 @@
 import { env } from '../config/env';
 import { createRedisConnection } from '../db/redis-connection';
 import { redisManager } from '../db/redis';
+import { createLivePublisher } from '../modules/live';
 import { createPointsModule } from '../modules/points';
 import { createSyncModule, LOADSMART_EVENTS_STREAM } from '../modules/sync';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
@@ -31,6 +32,7 @@ export const startProcessorRole: RoleStarter = async ({ dataSource, health, logg
       maxLen: env.pointStreamMaxLen,
     },
     { maxAccuracyM: env.phoneMaxAccuracyM },
+    { onLatestPositions: createLivePublisher(redis).publish, logger },
   );
   const sync = createSyncModule(dataSource, redis, logger);
 

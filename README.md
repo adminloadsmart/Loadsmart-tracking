@@ -2,12 +2,18 @@
 
 Vehicle and trip tracking service for Loadsmart. It handles phone GPS (socket.io, every 15 s), BlackRock BR05 and SIM tracking (both pulled at intervals the org admin configures), ULIP FASTag checkpoints, the source waterfall, city and district naming via PostGIS, and the live map.
 
-The full design and phased plan are in [docs/ROADMAP.md](docs/ROADMAP.md). **Current status: Phase 2.** Phone GPS ingest is live: the `/driver` socket feeds the partitioned point stream, which feeds the processor and then Timescale. Loads, vehicles, drivers and places sync from the main backend.
+The full design and phased plan are in [docs/ROADMAP.md](docs/ROADMAP.md). **Current status: Phase 3.**
+
+- Phone GPS ingest: the `/driver` socket feeds the point stream, then the processor, then Timescale.
+- Read API: live fleet, trips, tracks and timelines under `/v1`.
+- Live map: the `/live` socket, fed by Redis pub/sub.
+- Loads, vehicles, drivers and places sync from the main backend.
 
 Contracts:
 
 - [docs/contracts/loadsmart-events.md](docs/contracts/loadsmart-events.md): main backend → tracking.
 - [docs/contracts/driver-socket.md](docs/contracts/driver-socket.md): driver app → tracking.
+- [docs/contracts/tracking-api.md](docs/contracts/tracking-api.md): web portal ↔ tracking (REST and `/live`).
 
 ## Process roles
 
@@ -15,8 +21,8 @@ One codebase and one Docker image. The `ROLE` env var picks what a process runs:
 
 | Role        | What it does                                                                                                                                           | Port                   |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
-| `api`       | REST API under `/v1`                                                                                                                                   | `PORT` (4100)          |
-| `realtime`  | socket.io, websocket-only: `/driver` for phone GPS ingest, and `/live` for map viewers (Phase 3). Requires `JWT_SECRET`                                | `REALTIME_PORT` (4101) |
+| `api`       | REST read API under `/v1` (staff token from the main backend). Requires `JWT_SECRET`                                                                   | `PORT` (4100)          |
+| `realtime`  | socket.io, websocket-only: `/driver` for phone GPS ingest, `/live` for map viewers. Requires `JWT_SECRET`                                              | `REALTIME_PORT` (4101) |
 | `poller`    | Pulls from BlackRock, Intugine and ULIP (Phase 4+)                                                                                                     | —                      |
 | `processor` | Point stream partitions (leased, rebalanced across instances): clean → movement → motion → distance → Timescale. Also consumes `loadsmart.events` sync | —                      |
 | `scheduler` | Single leader through a Redis lock; runs the dispatcher, retention and outbox jobs                                                                     | —                      |

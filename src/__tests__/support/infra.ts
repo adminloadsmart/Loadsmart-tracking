@@ -91,3 +91,25 @@ export async function waitFor(
   }
   throw new Error(`condition not met within ${timeoutMs}ms`);
 }
+
+/** Runs everything currently on the point stream through a processing handler once (no consumer
+ *  group) — deterministic processing for integration tests. */
+export async function drainPointStreams(
+  redis: Redis,
+  keys: string[],
+  handle: (
+    stream: string,
+    entries: Array<{ id: string; fields: Record<string, string> }>,
+  ) => Promise<unknown>,
+): Promise<number> {
+  let processed = 0;
+  for (const key of keys) {
+    const raw = (await redis.xrange(key, '-', '+')) as Array<[string, string[]]>;
+    if (raw.length === 0) continue;
+    const entries = raw.map(([id, flat]) => ({ id, fields: { [flat[0]]: flat[1] } }));
+    await handle(key, entries);
+    processed += entries.length;
+    await redis.del(key);
+  }
+  return processed;
+}

@@ -1,3 +1,4 @@
+import type { Logger } from 'pino';
 import { Counter } from 'prom-client';
 import { metricsRegistry } from '../../shared/metrics';
 import { BatchResult, StreamEntry } from '../../streams/stream-consumer';
@@ -29,6 +30,9 @@ export class PointProcessingService {
     private readonly repository: PointRepository,
     private readonly stateStore: VehicleStateStore,
     private readonly options: ProcessingOptions,
+    /** Notified with each batch's newest positions once they're persisted (live map fan-out). */
+    private readonly onLatestPositions?: (positions: LatestPosition[]) => Promise<void>,
+    private readonly logger?: Logger,
   ) {}
 
   async handleBatch(_stream: string, entries: StreamEntry[]): Promise<BatchResult> {
@@ -61,12 +65,20 @@ export class PointProcessingService {
       if (tablePoints.length > 0) await this.repository.insertMany(table, tablePoints);
     }
 
+    const latest = latestPositions(result.points);
     await this.stateStore.persist({
       states: result.states,
-      latest: latestPositions(result.points),
+      latest,
       distance: result.distance,
       mockLocationTrips: result.mockLocationTrips,
     });
+    // Best effort: a missed live update is replaced by the next one (≤ 15 s later); it must never
+    // fail — and so redeliver — a batch that is already stored.
+    if (this.onLatestPositions && latest.size > 0) {
+      await this.onLatestPositions([...latest.values()]).catch((err) =>
+        this.logger?.warn({ err }, 'Failed to publish live positions'),
+      );
+    }
 
     for (const { point, rejected } of result.points) {
       pointsProcessed.inc({
@@ -94,6 +106,8 @@ function latestPositions(points: ProcessedPoint[]): Map<string, LatestPosition> 
     const current = latest.get(point.vehicleId);
     if (current && Date.parse(current.recordedAt) >= Date.parse(point.recordedAt)) continue;
     latest.set(point.vehicleId, {
+      tenantId: point.tenantId,
+      vehicleId: point.vehicleId,
       lat: point.lat,
       lng: point.lng,
       recordedAt: point.recordedAt,

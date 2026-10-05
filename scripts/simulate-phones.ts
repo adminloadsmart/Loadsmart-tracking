@@ -33,7 +33,7 @@ const BURST = arg('burst', 0);
 const RAMP_MS = arg('ramp', 20_000);
 const URL = process.env.SIM_URL ?? `http://localhost:${process.env.REALTIME_PORT ?? 4101}/driver`;
 const SECRET = process.env.JWT_SECRET;
-const TENANT = randomUUID();
+const TENANT = process.env.SIM_TENANT ?? randomUUID();
 if (!SECRET) throw new Error('JWT_SECRET must be set (same as the service)');
 
 const latencies: number[] = [];
@@ -128,7 +128,29 @@ async function main() {
   console.log(`Creating ${PHONES} active trips via loadsmart.events …`);
   const startedAt = new Date(Date.now() - 60_000).toISOString();
   const pipeline = mainRedis.pipeline();
-  for (const phone of phones) {
+  for (const [i, phone] of phones.entries()) {
+    pipeline.xadd(
+      'loadsmart.events',
+      '*',
+      'type',
+      'vehicle',
+      'id',
+      phone.vehicleId,
+      'tenantId',
+      TENANT,
+      'version',
+      String(Date.now()),
+      'deleted',
+      'false',
+      'payload',
+      JSON.stringify({
+        registrationNumber: `SIM${String(i).padStart(6, '0')}`,
+        status: 'active',
+        gpsProvider: null,
+        gpsEnabled: false,
+        gpsDeviceImei: null,
+      }),
+    );
     pipeline.xadd(
       'loadsmart.events',
       '*',

@@ -9,7 +9,10 @@ import { requestId } from './shared/middleware/request-id.middleware';
 
 // REST API for the api role. Health/readiness/metrics are NOT here — they live on the ops server
 // (shared/lifecycle/ops-server.ts) so every role exposes them the same way.
-export function createApp({ publicRouters, routers }: Container): Express {
+export function createApp({ publicRouters, authMiddleware, routers }: Container): Express {
+  if (routers.length > 0 && !authMiddleware) {
+    throw new Error('Authenticated routers require an authMiddleware');
+  }
   const app = express();
 
   app.disable('x-powered-by');
@@ -34,10 +37,12 @@ export function createApp({ publicRouters, routers }: Container): Express {
     app.use(`${API_VERSION_PREFIX}${path}`, router);
   }
 
-  // Auth + tenant-scope middleware are inserted here in Phase 2/3 (shared JWT_SECRET with the
-  // main backend — see docs/ROADMAP.md §8.3).
-  for (const { path, router } of routers) {
-    app.use(`${API_VERSION_PREFIX}${path}`, router);
+  // Everything below needs a staff access token from the main backend (shared JWT_SECRET — see
+  // docs/ROADMAP.md §8.3); tenant scoping is enforced per query from req.tenantScope.
+  if (authMiddleware) {
+    for (const { path, router } of routers) {
+      app.use(`${API_VERSION_PREFIX}${path}`, authMiddleware, router);
+    }
   }
 
   app.use(notFoundHandler);
