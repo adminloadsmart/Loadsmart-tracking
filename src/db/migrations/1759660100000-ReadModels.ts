@@ -23,6 +23,8 @@ export class ReadModels1759660100000 implements MigrationInterface {
         status               text,
         gps_provider         text,
         gps_enabled          boolean     NOT NULL DEFAULT false,
+        -- BR05 IMEI from masters.vehicle_telemetry_meta — binds a BlackRock device to the vehicle (Phase 4).
+        gps_device_imei      text,
         deleted_at           timestamptz,
         source_version       bigint      NOT NULL,
         synced_at            timestamptz NOT NULL DEFAULT now()
@@ -30,21 +32,22 @@ export class ReadModels1759660100000 implements MigrationInterface {
     await queryRunner.query(
       `CREATE INDEX vehicles_tenant_reg_idx ON tracking.vehicles (tenant_id, registration_number)`,
     );
+    await queryRunner.query(
+      `CREATE INDEX vehicles_imei_idx ON tracking.vehicles (gps_device_imei) WHERE gps_device_imei IS NOT NULL`,
+    );
 
+    // Driver profiles are global in the main backend (one row per person, linked to tenants via
+    // driver_tenant_relations), so there is no tenant_id here; trips carry the tenant.
     await queryRunner.query(`
       CREATE TABLE tracking.drivers (
         id              uuid PRIMARY KEY,
-        tenant_id       uuid        NOT NULL,
         full_name       text        NOT NULL,
         phone_number    text        NOT NULL,
-        status          text,
         deleted_at      timestamptz,
         source_version  bigint      NOT NULL,
         synced_at       timestamptz NOT NULL DEFAULT now()
       )`);
-    await queryRunner.query(
-      `CREATE INDEX drivers_tenant_phone_idx ON tracking.drivers (tenant_id, phone_number)`,
-    );
+    await queryRunner.query(`CREATE INDEX drivers_phone_idx ON tracking.drivers (phone_number)`);
 
     // Loading points (origin) and customer delivery points (destination). Delivery points have
     // no coordinates in the main backend today — lat/lng stay null until geocoded (Phase 7).

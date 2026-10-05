@@ -53,13 +53,15 @@ export class SyncRepository {
   ): Promise<boolean> {
     const rows = await this.dataSource.query(
       `INSERT INTO tracking.vehicles AS v
-         (id, tenant_id, kind, registration_number, status, gps_provider, gps_enabled, deleted_at, source_version)
-       VALUES ($1, $2, 'fleet', $3, $4, $5, $6, CASE WHEN $7 THEN now() END, $8)
+         (id, tenant_id, kind, registration_number, status, gps_provider, gps_enabled,
+          gps_device_imei, deleted_at, source_version)
+       VALUES ($1, $2, 'fleet', $3, $4, $5, $6, $9, CASE WHEN $7 THEN now() END, $8)
        ON CONFLICT (id) DO UPDATE SET
          registration_number = CASE WHEN $7 THEN v.registration_number ELSE EXCLUDED.registration_number END,
          status = CASE WHEN $7 THEN v.status ELSE EXCLUDED.status END,
          gps_provider = CASE WHEN $7 THEN v.gps_provider ELSE EXCLUDED.gps_provider END,
          gps_enabled = CASE WHEN $7 THEN v.gps_enabled ELSE EXCLUDED.gps_enabled END,
+         gps_device_imei = CASE WHEN $7 THEN v.gps_device_imei ELSE EXCLUDED.gps_device_imei END,
          deleted_at = CASE WHEN $7 THEN COALESCE(v.deleted_at, now()) END,
          source_version = EXCLUDED.source_version,
          synced_at = now()
@@ -75,6 +77,7 @@ export class SyncRepository {
         payload?.gpsEnabled ?? false,
         payload === null,
         version,
+        payload?.gpsDeviceImei ?? null,
       ],
     );
     return rows.length > 0;
@@ -96,34 +99,20 @@ export class SyncRepository {
     );
   }
 
-  async upsertDriver(
-    id: string,
-    tenantId: string,
-    version: number,
-    payload: DriverPayload | null,
-  ): Promise<boolean> {
+  async upsertDriver(id: string, version: number, payload: DriverPayload | null): Promise<boolean> {
     const rows = await this.dataSource.query(
       `INSERT INTO tracking.drivers AS d
-         (id, tenant_id, full_name, phone_number, status, deleted_at, source_version)
-       VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, $7)
+         (id, full_name, phone_number, deleted_at, source_version)
+       VALUES ($1, $2, $3, CASE WHEN $4 THEN now() END, $5)
        ON CONFLICT (id) DO UPDATE SET
-         full_name = CASE WHEN $6 THEN d.full_name ELSE EXCLUDED.full_name END,
-         phone_number = CASE WHEN $6 THEN d.phone_number ELSE EXCLUDED.phone_number END,
-         status = CASE WHEN $6 THEN d.status ELSE EXCLUDED.status END,
-         deleted_at = CASE WHEN $6 THEN COALESCE(d.deleted_at, now()) END,
+         full_name = CASE WHEN $4 THEN d.full_name ELSE EXCLUDED.full_name END,
+         phone_number = CASE WHEN $4 THEN d.phone_number ELSE EXCLUDED.phone_number END,
+         deleted_at = CASE WHEN $4 THEN COALESCE(d.deleted_at, now()) END,
          source_version = EXCLUDED.source_version,
          synced_at = now()
        WHERE d.source_version <= EXCLUDED.source_version
        RETURNING id`,
-      [
-        id,
-        tenantId,
-        payload?.fullName ?? '',
-        payload?.phoneNumber ?? '',
-        payload?.status ?? null,
-        payload === null,
-        version,
-      ],
+      [id, payload?.fullName ?? '', payload?.phoneNumber ?? '', payload === null, version],
     );
     return rows.length > 0;
   }

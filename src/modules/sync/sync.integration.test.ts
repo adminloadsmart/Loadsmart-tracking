@@ -82,6 +82,7 @@ describe.skipIf(!available)('SyncService (real Redis + Postgres)', () => {
       status: 'active',
       gpsProvider: 'blackrock',
       gpsEnabled: true,
+      gpsDeviceImei: '359339077123456',
     };
     expect(await sync.service.apply(snapshot('vehicle', vehicleId, 2, vehicle))).toBe(true);
     expect(
@@ -91,6 +92,7 @@ describe.skipIf(!available)('SyncService (real Redis + Postgres)', () => {
 
     const [row] = await ds.query(`SELECT * FROM tracking.vehicles WHERE id = $1`, [vehicleId]);
     expect(row).toMatchObject({
+      gps_device_imei: '359339077123456',
       kind: 'fleet',
       status: 'active',
       gps_provider: 'blackrock',
@@ -120,7 +122,6 @@ describe.skipIf(!available)('SyncService (real Redis + Postgres)', () => {
       snapshot('driver', driverId, 1, {
         fullName: 'Ravi',
         phoneNumber: '9876543210',
-        status: 'active',
       }),
     );
     const [driver] = await ds.query(`SELECT full_name FROM tracking.drivers WHERE id = $1`, [
@@ -253,10 +254,9 @@ describe.skipIf(!available)('SyncService (real Redis + Postgres)', () => {
         fields: {
           type: 'driver',
           id,
-          tenantId: TENANT,
           version: '1',
           deleted: 'false',
-          payload: JSON.stringify({ fullName: 'A', phoneNumber: '1', status: null }),
+          payload: JSON.stringify({ fullName: 'A', phoneNumber: '1' }),
         },
       },
     ]);

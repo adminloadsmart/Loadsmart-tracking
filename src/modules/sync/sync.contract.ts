@@ -7,8 +7,8 @@ import { z } from 'zod';
  * `version` (epoch ms of the source row's last change). Consumers keep the highest version seen,
  * so duplicates, replays and out-of-order delivery are all harmless.
  *
- * Stream fields: type, id, tenantId, version, deleted ('true'|'false'), payload (JSON, or empty
- * when deleted).
+ * Stream fields: type, id, tenantId (omitted for drivers), version, deleted ('true'|'false'),
+ * payload (JSON, or absent when deleted).
  */
 export const LOADSMART_EVENTS_STREAM = 'loadsmart.events';
 
@@ -61,12 +61,13 @@ export const vehiclePayloadSchema = z.object({
   status: z.string().nullable(),
   gpsProvider: z.string().nullable(),
   gpsEnabled: z.boolean(),
+  gpsDeviceImei: z.string().nullable(),
 });
 
+/** Driver profiles are global in the main backend (no tenant) — see the envelope's tenantId. */
 export const driverPayloadSchema = z.object({
   fullName: z.string(),
   phoneNumber: z.string(),
-  status: z.string().nullable(),
 });
 
 /** Loading points and customer delivery points share one normalized place shape. */
@@ -85,31 +86,50 @@ export type VehiclePayload = z.infer<typeof vehiclePayloadSchema>;
 export type DriverPayload = z.infer<typeof driverPayloadSchema>;
 export type PlacePayload = z.infer<typeof placePayloadSchema>;
 
-const envelopeSchema = z.object({
-  type: z.enum(SNAPSHOT_TYPES),
-  id: z.uuid(),
-  tenantId: z.uuid(),
-  version: z.coerce.number().int().nonnegative(),
-  deleted: z.enum(['true', 'false']).transform((value) => value === 'true'),
-  payload: z.string().optional(),
-});
+const envelopeSchema = z
+  .object({
+    type: z.enum(SNAPSHOT_TYPES),
+    id: z.uuid(),
+    // Empty/absent for drivers (global profiles); required for every other type.
+    tenantId: z
+      .union([z.uuid(), z.literal('')])
+      .optional()
+      .transform((value) => value || null),
+    version: z.coerce.number().int().nonnegative(),
+    deleted: z.enum(['true', 'false']).transform((value) => value === 'true'),
+    payload: z.string().optional(),
+  })
+  .refine((envelope) => envelope.type === 'driver' || envelope.tenantId !== null, {
+    message: 'tenantId is required for this type',
+    path: ['tenantId'],
+  });
 
-interface EnvelopeBase {
+interface TenantEnvelope {
   id: string;
   tenantId: string;
   version: number;
 }
+interface DriverEnvelope {
+  id: string;
+  tenantId: null;
+  version: number;
+}
 
 export type Snapshot =
-  | (EnvelopeBase & { type: 'load'; deleted: false; payload: LoadPayload })
-  | (EnvelopeBase & { type: 'vehicle'; deleted: false; payload: VehiclePayload })
-  | (EnvelopeBase & { type: 'driver'; deleted: false; payload: DriverPayload })
-  | (EnvelopeBase & {
+  | (TenantEnvelope & { type: 'load'; deleted: false; payload: LoadPayload })
+  | (TenantEnvelope & { type: 'vehicle'; deleted: false; payload: VehiclePayload })
+  | (TenantEnvelope & {
       type: 'loading_point' | 'delivery_point';
       deleted: false;
       payload: PlacePayload;
     })
-  | (EnvelopeBase & { type: SnapshotType; deleted: true; payload: null });
+  | (TenantEnvelope & {
+      type: Exclude<SnapshotType, 'driver'>;
+      deleted: true;
+      payload: null;
+    })
+  | (DriverEnvelope & { type: 'driver'; deleted: false; payload: DriverPayload })
+  | (DriverEnvelope & { type: 'driver'; deleted: true; payload: null });
 
 const PAYLOAD_SCHEMAS = {
   load: loadPayloadSchema,
@@ -123,9 +143,11 @@ const PAYLOAD_SCHEMAS = {
 export function parseSnapshot(fields: Record<string, string>): Snapshot {
   const envelope = envelopeSchema.safeParse(fields);
   if (!envelope.success) throw new Error(`invalid envelope: ${formatIssues(envelope.error)}`);
-  const { type, id, tenantId, version, deleted, payload } = envelope.data;
+  const { type, id, version, deleted, payload } = envelope.data;
+  // Drivers are global: drop any tenantId a producer sent so the type stays honest.
+  const tenantId = type === 'driver' ? null : envelope.data.tenantId;
 
-  if (deleted) return { type, id, tenantId, version, deleted: true, payload: null };
+  if (deleted) return { type, id, tenantId, version, deleted: true, payload: null } as Snapshot;
   if (!payload) throw new Error('payload is required unless deleted=true');
 
   let json: unknown;

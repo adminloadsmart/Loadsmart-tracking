@@ -59,12 +59,13 @@ export class SyncService {
 
   /** Returns false when the snapshot was older than what's stored (ignored). */
   async apply(snapshot: Snapshot): Promise<boolean> {
+    if (snapshot.type === 'driver') {
+      return this.repository.upsertDriver(snapshot.id, snapshot.version, snapshot.payload);
+    }
     const { id, tenantId, version } = snapshot;
     switch (snapshot.type) {
       case 'vehicle':
         return this.repository.upsertVehicle(id, tenantId, version, snapshot.payload);
-      case 'driver':
-        return this.repository.upsertDriver(id, tenantId, version, snapshot.payload);
       case 'loading_point':
       case 'delivery_point':
         return this.repository.upsertPlace(id, tenantId, snapshot.type, version, snapshot.payload);
@@ -73,11 +74,15 @@ export class SyncService {
     }
   }
 
-  private async applyLoad(
-    snapshot: Extract<Snapshot, { type: 'load' }> | Extract<Snapshot, { deleted: true }>,
-  ): Promise<boolean> {
+  private async applyLoad(snapshot: {
+    id: string;
+    tenantId: string;
+    version: number;
+    deleted: boolean;
+    payload: LoadPayload | null;
+  }): Promise<boolean> {
     const { id, tenantId, version, deleted } = snapshot;
-    const load = deleted ? null : (snapshot.payload as LoadPayload);
+    const load = deleted ? null : snapshot.payload;
 
     const result = await this.repository.transaction(async (manager) => {
       const previous = await this.repository.lockTrip(manager, id);

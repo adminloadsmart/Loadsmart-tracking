@@ -21,7 +21,7 @@ Every event carries the aggregate's **full current state** plus a `version`. Tra
 |---|---|
 | `type` | `load`, `vehicle`, `driver`, `loading_point` or `delivery_point` |
 | `id` | UUID of the aggregate (load id, vehicle id, …) |
-| `tenantId` | UUID |
+| `tenantId` | UUID. Omit it for `driver`: driver profiles are global and linked to tenants through `driver_tenant_relations` |
 | `version` | Integer epoch ms, as a string |
 | `deleted` | `'true'` or `'false'`. Set `'true'` for a hard delete or a soft delete (`deleted_at` set) |
 | `payload` | JSON, per type below. Omit it when `deleted='true'` |
@@ -51,12 +51,13 @@ Every event carries the aggregate's **full current state** plus a `version`. Tra
 
 **`vehicle`.** Built from `masters.vehicles` plus `masters.vehicle_telemetry_meta`.
 ```json
-{ "registrationNumber": "MH12AB1234", "status": "string|null", "gpsProvider": "string|null", "gpsEnabled": true }
+{ "registrationNumber": "MH12AB1234", "status": "string|null", "gpsProvider": "string|null",
+  "gpsEnabled": true, "gpsDeviceImei": "string|null" }
 ```
 
-**`driver`.**
+**`driver`.** Global profile, with no tenant.
 ```json
-{ "fullName": "string", "phoneNumber": "string", "status": "string|null" }
+{ "fullName": "string", "phoneNumber": "string" }
 ```
 
 **`loading_point`** and **`delivery_point`** share one normalized place shape:

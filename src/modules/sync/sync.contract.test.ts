@@ -47,6 +47,24 @@ describe('parseSnapshot', () => {
     });
   });
 
+  it('treats drivers as global: no tenant required, any sent tenantId dropped', () => {
+    const payload = JSON.stringify({ fullName: 'Ravi', phoneNumber: '9876543210' });
+    const { tenantId: _omit, ...withoutTenant } = base;
+    expect(
+      parseSnapshot({ ...withoutTenant, type: 'driver', deleted: 'false', payload }),
+    ).toMatchObject({ type: 'driver', tenantId: null });
+    expect(
+      parseSnapshot({ ...base, type: 'driver', deleted: 'false', payload }).tenantId,
+    ).toBeNull();
+  });
+
+  it('requires tenantId for tenant-scoped types', () => {
+    const { tenantId: _omit, ...withoutTenant } = base;
+    expect(() => parseSnapshot({ ...withoutTenant, type: 'vehicle', deleted: 'true' })).toThrow(
+      /tenantId is required/,
+    );
+  });
+
   it.each([
     [{ ...base, type: 'truck', deleted: 'false', payload: '{}' }, /invalid envelope/],
     [{ ...base, type: 'load', deleted: 'false' }, /payload is required/],
