@@ -1,3 +1,4 @@
+import type { ChainableCommander } from 'ioredis';
 import type { Logger } from 'pino';
 import { Counter } from 'prom-client';
 import { metricsRegistry } from '../../shared/metrics';
@@ -7,6 +8,17 @@ import { ProcessingOptions } from '../processing/steps';
 import { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
 import { NormalizedPoint, normalizedPointSchema, POINT_FIELD } from './point.contract';
 import { PointRepository, PointTable } from './point.repository';
+
+/** Extension point run on every processed batch — implemented by the rules module. */
+export interface BatchHook {
+  run(
+    points: ProcessedPoint[],
+    nowMs: number,
+  ): Promise<{
+    writeState?: (multi: ChainableCommander) => void;
+    afterCommit?: () => Promise<void>;
+  }>;
+}
 
 const pointsProcessed = new Counter({
   name: 'tracking_points_processed_total',
@@ -33,6 +45,8 @@ export class PointProcessingService {
     /** Notified with each batch's newest positions once they're persisted (live map fan-out). */
     private readonly onLatestPositions?: (positions: LatestPosition[]) => Promise<void>,
     private readonly logger?: Logger,
+    /** Rule-sheet engine (modules/rules): runs after the insert, commits with the state. */
+    private readonly batchHook?: BatchHook,
   ) {}
 
   async handleBatch(_stream: string, entries: StreamEntry[]): Promise<BatchResult> {
@@ -51,7 +65,8 @@ export class PointProcessingService {
     if (points.length === 0) return { dead };
 
     const states = await this.stateStore.load(points);
-    const result = runPipeline(points, states, Date.now(), this.options);
+    const now = Date.now();
+    const result = runPipeline(points, states, now, this.options);
 
     // Any DB error throws → the whole batch is retried (inserts are idempotent).
     const byTable: Record<PointTable, NormalizedPoint[]> = {
@@ -66,12 +81,21 @@ export class PointProcessingService {
     }
 
     const latest = latestPositions(result.points);
+    // Rules: effects go to Postgres (idempotent) BEFORE the Redis state moves on, and rule state
+    // commits in the same MULTI as vehicle state — a crash anywhere recomputes the same effects.
+    const hook = this.batchHook ? await this.batchHook.run(result.points, now) : null;
     await this.stateStore.persist({
       states: result.states,
       latest,
       distance: result.distance,
       mockLocationTrips: result.mockLocationTrips,
+      extra: hook?.writeState,
     });
+    if (hook?.afterCommit) {
+      await hook
+        .afterCommit()
+        .catch((err) => this.logger?.warn({ err }, 'Rule after-commit failed'));
+    }
     // Best effort: a missed live update is replaced by the next one (≤ 15 s later); it must never
     // fail — and so redeliver — a batch that is already stored.
     if (this.onLatestPositions && latest.size > 0) {

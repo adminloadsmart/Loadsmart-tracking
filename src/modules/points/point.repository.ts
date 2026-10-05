@@ -1,3 +1,4 @@
+import { returningRows } from '../../db/returning';
 import { DataSource } from 'typeorm';
 import { NormalizedPoint } from './point.contract';
 
@@ -16,8 +17,9 @@ export class PointRepository {
   async insertMany(table: PointTable, points: NormalizedPoint[]): Promise<number> {
     if (points.length === 0) return 0;
 
-    const rows = await this.dataSource.query(
-      `INSERT INTO tracking.${table}
+    const rows = returningRows(
+      await this.dataSource.query(
+        `INSERT INTO tracking.${table}
          (tenant_id, vehicle_id, trip_id, source, source_ref, recorded_at, received_at,
           lat, lng, speed_kmh, heading, accuracy_m, flags)
        SELECT * FROM unnest(
@@ -26,21 +28,22 @@ export class PointRepository {
          $13::jsonb[])
        ON CONFLICT DO NOTHING
        RETURNING 1`,
-      [
-        points.map((p) => p.tenantId),
-        points.map((p) => p.vehicleId),
-        points.map((p) => p.tripId ?? null),
-        points.map((p) => p.source),
-        points.map((p) => p.sourceRef),
-        points.map((p) => p.recordedAt),
-        points.map((p) => p.receivedAt),
-        points.map((p) => p.lat),
-        points.map((p) => p.lng),
-        points.map((p) => p.speedKmh ?? null),
-        points.map((p) => p.heading ?? null),
-        points.map((p) => p.accuracyM ?? null),
-        points.map((p) => (p.flags ? JSON.stringify(p.flags) : null)),
-      ],
+        [
+          points.map((p) => p.tenantId),
+          points.map((p) => p.vehicleId),
+          points.map((p) => p.tripId ?? null),
+          points.map((p) => p.source),
+          points.map((p) => p.sourceRef),
+          points.map((p) => p.recordedAt),
+          points.map((p) => p.receivedAt),
+          points.map((p) => p.lat),
+          points.map((p) => p.lng),
+          points.map((p) => p.speedKmh ?? null),
+          points.map((p) => p.heading ?? null),
+          points.map((p) => p.accuracyM ?? null),
+          points.map((p) => (p.flags ? JSON.stringify(p.flags) : null)),
+        ],
+      ),
     );
     return rows.length;
   }

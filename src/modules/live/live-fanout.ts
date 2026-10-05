@@ -4,6 +4,9 @@ import { Counter } from 'prom-client';
 import type { Namespace } from 'socket.io';
 import { metricsRegistry } from '../../shared/metrics';
 import type { LatestPosition } from '../processing/vehicle-state.store';
+import { LIVE_ALERTS_CHANNEL } from '../rules';
+import type { AlertChange } from '../rules';
+import { toAlertView } from '../alerts';
 import { toPositionView } from '../tracking-api';
 import { LIVE_POSITIONS_CHANNEL } from './live-channel';
 import { ALL_TENANTS_ROOM, tenantRoom, tripRoom, vehicleRoom } from './live-rooms';
@@ -36,20 +39,32 @@ export class LiveFanout {
 
   async start(): Promise<void> {
     this.subscriber.on('message', (channel, message) => {
-      if (channel !== LIVE_POSITIONS_CHANNEL) return;
       try {
-        for (const position of JSON.parse(message) as LatestPosition[]) this.offer(position);
+        if (channel === LIVE_POSITIONS_CHANNEL) {
+          for (const position of JSON.parse(message) as LatestPosition[]) this.offer(position);
+        } else if (channel === LIVE_ALERTS_CHANNEL) {
+          for (const change of JSON.parse(message) as AlertChange[]) this.emitAlert(change);
+        }
       } catch (err) {
-        this.logger.warn({ err }, 'Dropping malformed live-positions message');
+        this.logger.warn({ err, channel }, 'Dropping malformed live message');
       }
     });
-    await this.subscriber.subscribe(LIVE_POSITIONS_CHANNEL);
+    await this.subscriber.subscribe(LIVE_POSITIONS_CHANNEL, LIVE_ALERTS_CHANNEL);
+  }
+
+  /** Alerts are never throttled: every open / escalate / close reaches the viewer. */
+  private emitAlert({ type, alert }: AlertChange): void {
+    const rooms = [ALL_TENANTS_ROOM, tenantRoom(alert.tenant_id), vehicleRoom(alert.vehicle_id)];
+    if (alert.trip_id) rooms.push(tripRoom(alert.trip_id));
+    this.namespace.to(rooms).emit('alert', { type, alert: toAlertView(alert) });
   }
 
   async stop(): Promise<void> {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
-    await this.subscriber.unsubscribe(LIVE_POSITIONS_CHANNEL).catch(() => undefined);
+    await this.subscriber
+      .unsubscribe(LIVE_POSITIONS_CHANNEL, LIVE_ALERTS_CHANNEL)
+      .catch(() => undefined);
   }
 
   private offer(position: LatestPosition): void {

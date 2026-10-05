@@ -131,7 +131,14 @@ export class SyncService {
       return applied
         ? {
             previous,
-            next: { tripId: id, tenantId, vehicleId, driverId, startedAt },
+            next: {
+              tripId: id,
+              tenantId,
+              vehicleId,
+              driverId,
+              startedAt,
+              loadStatus: load?.status ?? null,
+            },
             state,
           }
         : false;
@@ -193,6 +200,7 @@ export class SyncService {
         tripId: trip.id,
         tenantId: trip.tenant_id,
         startedAt: trip.tracking_started_at,
+        loadStatus: trip.load_status,
         vehicleId: trip.vehicle_id,
         driverId: trip.driver_id,
       })),

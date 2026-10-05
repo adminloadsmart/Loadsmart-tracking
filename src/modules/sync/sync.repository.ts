@@ -1,3 +1,4 @@
+import { returningRows } from '../../db/returning';
 import { DataSource, EntityManager } from 'typeorm';
 import { DriverPayload, PlacePayload, VehiclePayload } from './sync.contract';
 import { TrackingState } from './trip-state';
@@ -51,8 +52,9 @@ export class SyncRepository {
     version: number,
     payload: VehiclePayload | null,
   ): Promise<boolean> {
-    const rows = await this.dataSource.query(
-      `INSERT INTO tracking.vehicles AS v
+    const rows = returningRows(
+      await this.dataSource.query(
+        `INSERT INTO tracking.vehicles AS v
          (id, tenant_id, kind, registration_number, status, gps_provider, gps_enabled,
           gps_device_imei, deleted_at, source_version)
        VALUES ($1, $2, 'fleet', $3, $4, $5, $6, $9, CASE WHEN $7 THEN now() END, $8)
@@ -67,18 +69,19 @@ export class SyncRepository {
          synced_at = now()
        WHERE v.source_version <= EXCLUDED.source_version
        RETURNING id`,
-      [
-        id,
-        tenantId,
-        // A tombstone for a vehicle we never saw still needs a non-null plate to insert.
-        payload?.registrationNumber ?? '(deleted)',
-        payload?.status ?? null,
-        payload?.gpsProvider ?? null,
-        payload?.gpsEnabled ?? false,
-        payload === null,
-        version,
-        payload?.gpsDeviceImei ?? null,
-      ],
+        [
+          id,
+          tenantId,
+          // A tombstone for a vehicle we never saw still needs a non-null plate to insert.
+          payload?.registrationNumber ?? '(deleted)',
+          payload?.status ?? null,
+          payload?.gpsProvider ?? null,
+          payload?.gpsEnabled ?? false,
+          payload === null,
+          version,
+          payload?.gpsDeviceImei ?? null,
+        ],
+      ),
     );
     return rows.length > 0;
   }
@@ -100,8 +103,9 @@ export class SyncRepository {
   }
 
   async upsertDriver(id: string, version: number, payload: DriverPayload | null): Promise<boolean> {
-    const rows = await this.dataSource.query(
-      `INSERT INTO tracking.drivers AS d
+    const rows = returningRows(
+      await this.dataSource.query(
+        `INSERT INTO tracking.drivers AS d
          (id, full_name, phone_number, deleted_at, source_version)
        VALUES ($1, $2, $3, CASE WHEN $4 THEN now() END, $5)
        ON CONFLICT (id) DO UPDATE SET
@@ -112,7 +116,8 @@ export class SyncRepository {
          synced_at = now()
        WHERE d.source_version <= EXCLUDED.source_version
        RETURNING id`,
-      [id, payload?.fullName ?? '', payload?.phoneNumber ?? '', payload === null, version],
+        [id, payload?.fullName ?? '', payload?.phoneNumber ?? '', payload === null, version],
+      ),
     );
     return rows.length > 0;
   }
@@ -124,8 +129,9 @@ export class SyncRepository {
     version: number,
     payload: PlacePayload | null,
   ): Promise<boolean> {
-    const rows = await this.dataSource.query(
-      `INSERT INTO tracking.places AS p
+    const rows = returningRows(
+      await this.dataSource.query(
+        `INSERT INTO tracking.places AS p
          (id, tenant_id, kind, name, address, city, state, pin_code, lat, lng, deleted_at, source_version)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $11 THEN now() END, $12)
        ON CONFLICT (id) DO UPDATE SET
@@ -141,20 +147,21 @@ export class SyncRepository {
          synced_at = now()
        WHERE p.source_version <= EXCLUDED.source_version
        RETURNING id`,
-      [
-        id,
-        tenantId,
-        kind,
-        payload?.name ?? '',
-        payload?.address ?? null,
-        payload?.city ?? null,
-        payload?.state ?? null,
-        payload?.pinCode ?? null,
-        payload?.lat ?? null,
-        payload?.lng ?? null,
-        payload === null,
-        version,
-      ],
+        [
+          id,
+          tenantId,
+          kind,
+          payload?.name ?? '',
+          payload?.address ?? null,
+          payload?.city ?? null,
+          payload?.state ?? null,
+          payload?.pinCode ?? null,
+          payload?.lat ?? null,
+          payload?.lng ?? null,
+          payload === null,
+          version,
+        ],
+      ),
     );
     return rows.length > 0;
   }
@@ -169,8 +176,9 @@ export class SyncRepository {
   }
 
   async upsertTrip(manager: EntityManager, trip: TripUpsert): Promise<boolean> {
-    const rows = await manager.query(
-      `INSERT INTO tracking.trips AS t
+    const rows = returningRows(
+      await manager.query(
+        `INSERT INTO tracking.trips AS t
          (id, tenant_id, load_code, load_status, source_type, vehicle_id, vehicle_number,
           driver_id, driver_phone, driver_name, transporter_id, origin_place_id,
           destination_place_id, tracking_state, tracking_started_at, tracking_ended_at,
@@ -198,27 +206,28 @@ export class SyncRepository {
          synced_at = now()
        WHERE t.source_version <= EXCLUDED.source_version
        RETURNING id`,
-      [
-        trip.id,
-        trip.tenantId,
-        trip.loadCode,
-        trip.loadStatus,
-        trip.sourceType,
-        trip.vehicleId,
-        trip.vehicleNumber,
-        trip.driverId,
-        trip.driverPhone,
-        trip.driverName,
-        trip.transporterId,
-        trip.originPlaceId,
-        trip.destinationPlaceId,
-        trip.trackingState,
-        trip.trackingStartedAt,
-        trip.trackingEndedAt,
-        JSON.stringify(trip.milestones),
-        trip.deleted,
-        trip.version,
-      ],
+        [
+          trip.id,
+          trip.tenantId,
+          trip.loadCode,
+          trip.loadStatus,
+          trip.sourceType,
+          trip.vehicleId,
+          trip.vehicleNumber,
+          trip.driverId,
+          trip.driverPhone,
+          trip.driverName,
+          trip.transporterId,
+          trip.originPlaceId,
+          trip.destinationPlaceId,
+          trip.trackingState,
+          trip.trackingStartedAt,
+          trip.trackingEndedAt,
+          JSON.stringify(trip.milestones),
+          trip.deleted,
+          trip.version,
+        ],
+      ),
     );
     return rows.length > 0;
   }
@@ -230,13 +239,15 @@ export class SyncRepository {
     version: number,
     endedAt: Date,
   ): Promise<boolean> {
-    const rows = await manager.query(
-      `UPDATE tracking.trips
+    const rows = returningRows(
+      await manager.query(
+        `UPDATE tracking.trips
          SET tracking_state = 'ended', tracking_ended_at = COALESCE(tracking_ended_at, $2),
              deleted_at = COALESCE(deleted_at, now()), source_version = $3, synced_at = now()
        WHERE id = $1 AND source_version <= $3
        RETURNING id`,
-      [id, endedAt, version],
+        [id, endedAt, version],
+      ),
     );
     return rows.length > 0;
   }
@@ -248,10 +259,11 @@ export class SyncRepository {
       vehicle_id: string | null;
       driver_id: string | null;
       tracking_started_at: Date | null;
+      load_status: string;
     }>
   > {
     return this.dataSource.query(
-      `SELECT id, tenant_id, vehicle_id, driver_id, tracking_started_at
+      `SELECT id, tenant_id, vehicle_id, driver_id, tracking_started_at, load_status
        FROM tracking.trips WHERE tracking_state = 'active'`,
     );
   }

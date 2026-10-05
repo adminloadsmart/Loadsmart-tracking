@@ -18,6 +18,8 @@ export interface ActiveTripRefs {
   vehicleId: string | null;
   driverId: string | null;
   startedAt: Date | null;
+  /** Load status (e.g. in_transit) — rules evaluate some events only while in transit. */
+  loadStatus?: string | null;
 }
 
 export interface TripRef {
@@ -26,6 +28,7 @@ export interface TripRef {
   vehicleId: string | null;
   /** Epoch ms tracking started — points recorded before it don't belong to this trip. */
   startedAtMs: number | null;
+  loadStatus: string | null;
 }
 
 function refHash(trip: ActiveTripRefs): Record<string, string> {
@@ -34,6 +37,7 @@ function refHash(trip: ActiveTripRefs): Record<string, string> {
     vehicleId: trip.vehicleId ?? '',
     driverId: trip.driverId ?? '',
     startedAtMs: trip.startedAt ? String(trip.startedAt.getTime()) : '',
+    loadStatus: trip.loadStatus ?? '',
   };
 }
 
@@ -65,6 +69,7 @@ export class ActiveTripIndex {
       tenantId: ref.tenantId,
       vehicleId: ref.vehicleId || null,
       startedAtMs: ref.startedAtMs ? Number(ref.startedAtMs) : null,
+      loadStatus: ref.loadStatus || null,
     };
   }
 
@@ -88,6 +93,21 @@ export class ActiveTripIndex {
     if (vehicleId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, vehicleActiveTripKey(vehicleId), tripId);
     if (driverId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, driverActiveTripKey(driverId), tripId);
     await execOrThrow(pipeline);
+  }
+
+  /** Load status of many trips in one round trip (missing = trip no longer active). */
+  async getLoadStatuses(tripIds: string[]): Promise<Map<string, string>> {
+    if (tripIds.length === 0) return new Map();
+    const pipeline = this.redis.pipeline();
+    for (const id of tripIds) pipeline.hget(tripRefKey(id), 'loadStatus');
+    const results = (await pipeline.exec()) ?? [];
+    const statuses = new Map<string, string>();
+    tripIds.forEach((id, i) => {
+      const [err, value] = results[i] ?? [];
+      if (err) throw err;
+      if (typeof value === 'string' && value) statuses.set(id, value);
+    });
+    return statuses;
   }
 
   /** Makes Redis match the given active trips exactly: sets missing keys, removes stale ones. */

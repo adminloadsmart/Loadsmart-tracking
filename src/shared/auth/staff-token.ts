@@ -7,6 +7,8 @@ export interface StaffIdentity {
   userId: string;
   tenantId: string | null;
   role: string;
+  /** Effective permission keys at token issue (main backend's role ∪ grants). */
+  permissions: string[];
   portal: 'organization' | 'platform';
   jti: string | null;
   /** Epoch seconds the token expires. */
@@ -23,6 +25,7 @@ interface StaffTokenPayload extends JwtPayload {
   id?: string;
   tenantId?: string | null;
   role?: string;
+  permissions?: unknown;
   portal?: string;
   purpose?: string;
 }
@@ -47,6 +50,9 @@ export function verifyStaffToken(token: string, jwtSecret: string): StaffIdentit
     userId: decoded.id,
     tenantId: decoded.tenantId ?? null,
     role: decoded.role,
+    permissions: Array.isArray(decoded.permissions)
+      ? decoded.permissions.filter((p): p is string => typeof p === 'string')
+      : [],
     portal: decoded.portal,
     jti: decoded.jti ?? null,
     exp: decoded.exp,
@@ -57,6 +63,11 @@ export function tenantScopeFor(identity: StaffIdentity): TenantScope | null {
   if (identity.tenantId) return { tenantId: identity.tenantId };
   if (identity.role === PLATFORM_ADMIN_ROLE) return { allTenants: true };
   return null;
+}
+
+/** Permission check mirroring the main backend's requirePermission (platform_admin bypasses). */
+export function hasPermission(identity: StaffIdentity, permission: string): boolean {
+  return identity.role === PLATFORM_ADMIN_ROLE || identity.permissions.includes(permission);
 }
 
 /** True when a row owned by `tenantId` is visible within `scope`. */

@@ -2,6 +2,7 @@ import { RequestHandler, Router } from 'express';
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import { DataSource } from 'typeorm';
+import { createAlertsModule } from './modules/alerts';
 import { createTrackingApiModule } from './modules/tracking-api';
 import { createTokenBlocklist } from './shared/auth/token-blocklist';
 import { createStaffAuth } from './shared/middleware/staff-auth.middleware';
@@ -36,12 +37,16 @@ export interface ContainerDeps {
  */
 export function buildContainer(deps: ContainerDeps): Container {
   const trackingApi = createTrackingApiModule(deps.dataSource, deps.redis);
+  const alerts = createAlertsModule(deps.dataSource, deps.redis);
   return {
     publicRouters: [],
     authMiddleware: createStaffAuth({
       jwtSecret: deps.jwtSecret,
       isBlocked: createTokenBlocklist(deps.mainRedis, deps.logger),
     }),
-    routers: [{ path: '', router: trackingApi.router }],
+    routers: [
+      { path: '', router: trackingApi.router },
+      { path: '', router: alerts.router },
+    ],
   };
 }

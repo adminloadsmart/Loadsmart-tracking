@@ -1,18 +1,27 @@
 import { env } from '../config/env';
 import { redisManager } from '../db/redis';
+import { createRedisConnection } from '../db/redis-connection';
+import { createRulesModule, OutboxRelay } from '../modules/rules';
 import { createSyncModule } from '../modules/sync';
 import { LeaderLock } from '../shared/lifecycle/leader-lock';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
 
 export const SCHEDULER_LEADER_KEY = 'tracking:scheduler:leader';
 
-// Exactly one scheduler leader across replicas runs the leader-only work: today the active-trip
-// index rebuild on takeover; later the due-poll dispatcher, waterfall evaluator and outbox relay.
-// Standbys are healthy — they're ready to take over — so readiness passes either way.
-export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logger }) => {
-  const sync = createSyncModule(dataSource, redisManager.getClient(), logger);
+const RULES_TICK_MS = 60_000;
+const OUTBOX_RELAY_MS = 2_000;
 
-  const lock = new LeaderLock(redisManager.getClient(), {
+// Exactly one scheduler leader across replicas runs the leader-only work: the active-trip index
+// rebuild on takeover, the time-driven rules tick (inactivity), and the outbox relay to the main
+// backend. Standbys are healthy — they're ready to take over — so readiness passes either way.
+export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logger }) => {
+  const redis = redisManager.getClient();
+  const sync = createSyncModule(dataSource, redis, logger);
+  const rules = createRulesModule({ dataSource, redis, activeTrips: sync.activeTrips, logger });
+  const mainRedis = createRedisConnection(env.mainRedisUrl, 'main-backend-events');
+  const outbox = new OutboxRelay(dataSource, mainRedis);
+
+  const lock = new LeaderLock(redis, {
     key: SCHEDULER_LEADER_KEY,
     ttlMs: env.leaderLockTtlMs,
     logger,
@@ -26,12 +35,36 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
   });
   await lock.start();
 
+  const loops = [
+    leaderLoop('rules-tick', RULES_TICK_MS, () => rules.tick()),
+    leaderLoop('outbox-relay', OUTBOX_RELAY_MS, async () => {
+      // Drain: keep relaying full batches until the outbox is empty.
+      while ((await outbox.relay()) >= 500);
+    }),
+  ];
+
+  /** Runs `work` every `everyMs` while this instance is leader; never overlaps itself. */
+  function leaderLoop(name: string, everyMs: number, work: () => Promise<unknown>) {
+    let running = false;
+    return setInterval(() => {
+      if (!lock.isLeader() || running) return;
+      running = true;
+      work()
+        .catch((err) => logger.error({ err, loop: name }, 'Scheduler loop failed'))
+        .finally(() => {
+          running = false;
+        });
+    }, everyMs);
+  }
+
   health.register('scheduler', async () => ({ leader: lock.isLeader() }));
 
   return {
     async stop() {
       health.unregister('scheduler');
+      loops.forEach(clearInterval);
       await lock.stop();
+      await mainRedis.quit();
     },
   };
 };

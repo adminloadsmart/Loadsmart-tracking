@@ -3,7 +3,7 @@ import { DataSource } from 'typeorm';
 import { DEFAULT_PROCESSING_OPTIONS, ProcessingOptions } from '../processing/steps';
 import type { Logger } from 'pino';
 import { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
-import { PointProcessingService } from './point-processing.service';
+import { BatchHook, PointProcessingService } from './point-processing.service';
 import { PointPublisher, PointPublisherOptions } from './point.publisher';
 import { PointRepository } from './point.repository';
 
@@ -13,6 +13,7 @@ export function createPointsModule(
   publisherOptions: PointPublisherOptions,
   processingOptions: Partial<ProcessingOptions> = {},
   live?: { onLatestPositions: (positions: LatestPosition[]) => Promise<void>; logger: Logger },
+  batchHook?: BatchHook,
 ) {
   const repository = new PointRepository(dataSource);
   return {
@@ -22,6 +23,7 @@ export function createPointsModule(
       { ...DEFAULT_PROCESSING_OPTIONS, ...processingOptions },
       live?.onLatestPositions,
       live?.logger,
+      batchHook,
     ),
     publisher: new PointPublisher(redis, publisherOptions),
   };
@@ -29,5 +31,5 @@ export function createPointsModule(
 
 export type { NormalizedPoint, PointSource } from './point.contract';
 export { normalizedPointSchema, POINT_SOURCES } from './point.contract';
-export type { PointProcessingService } from './point-processing.service';
+export type { BatchHook, PointProcessingService } from './point-processing.service';
 export type { PointPublisher } from './point.publisher';

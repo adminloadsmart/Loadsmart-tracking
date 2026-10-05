@@ -231,6 +231,12 @@ describe.skipIf(!available)('SyncService (real Redis + Postgres)', () => {
     expect(await redis.get(vehicleActiveTripKey(payload.vehicleId!))).toBeNull();
 
     expect(await sync.service.apply(snapshot('load', randomUUID(), 1, null))).toBe(true);
+
+    // A stale tombstone (older than what we have) is ignored, not "applied".
+    const other = randomUUID();
+    await sync.service.apply(snapshot('load', other, 5, loadPayload({ status: 'in_transit' })));
+    expect(await sync.service.apply(snapshot('load', other, 4, null))).toBe(false);
+    expect((await trip(other)).tracking_state).toBe('active');
   });
 
   it('rebuilds the Redis index from Postgres after a Redis loss', async () => {

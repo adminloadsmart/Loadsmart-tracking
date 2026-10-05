@@ -1,4 +1,5 @@
 import type Redis from 'ioredis';
+import type { ChainableCommander } from 'ioredis';
 import type { PointSource } from '../points/point.contract';
 import { StateKey, stateMapKey, VehicleState } from './vehicle-state';
 
@@ -27,6 +28,8 @@ export interface PersistInput {
   latest: Map<string, LatestPosition>;
   distance: Map<string, number>;
   mockLocationTrips: Set<string>;
+  /** More writes to commit atomically with the vehicle state (e.g. rule state). */
+  extra?: (multi: ChainableCommander) => void;
 }
 
 /**
@@ -109,16 +112,24 @@ export class VehicleStateStore {
     return { distanceMBySource, fraudFlags: fraud.sort() };
   }
 
-  async persist({ states, latest, distance, mockLocationTrips }: PersistInput): Promise<void> {
+  async persist({
+    states,
+    latest,
+    distance,
+    mockLocationTrips,
+    extra,
+  }: PersistInput): Promise<void> {
     if (
       states.size === 0 &&
       latest.size === 0 &&
       distance.size === 0 &&
-      mockLocationTrips.size === 0
+      mockLocationTrips.size === 0 &&
+      !extra
     ) {
       return;
     }
     const multi = this.redis.multi();
+    extra?.(multi);
     for (const [key, state] of states) {
       const [vehicleId, source] = key.split('|') as [string, PointSource];
       multi.hset(vehicleSourceStateKey(vehicleId, source), {
