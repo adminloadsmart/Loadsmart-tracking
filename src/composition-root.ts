@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import { DataSource } from 'typeorm';
 import { createAlertsModule } from './modules/alerts';
+import { createRoutesModule, RouteProvider } from './modules/routes';
 import { createTrackingApiModule } from './modules/tracking-api';
 import { createTokenBlocklist } from './shared/auth/token-blocklist';
 import { createStaffAuth } from './shared/middleware/staff-auth.middleware';
@@ -29,6 +30,9 @@ export interface ContainerDeps {
   mainRedis: Redis;
   jwtSecret: string;
   logger: Logger;
+  googleMapsApiKey?: string;
+  /** Test override for route planning (fixture provider). */
+  routeProvider?: RouteProvider | null;
 }
 
 /**
@@ -38,6 +42,13 @@ export interface ContainerDeps {
 export function buildContainer(deps: ContainerDeps): Container {
   const trackingApi = createTrackingApiModule(deps.dataSource, deps.redis);
   const alerts = createAlertsModule(deps.dataSource, deps.redis);
+  const routes = createRoutesModule({
+    dataSource: deps.dataSource,
+    redis: deps.redis,
+    logger: deps.logger,
+    googleMapsApiKey: deps.googleMapsApiKey,
+    provider: deps.routeProvider,
+  });
   return {
     publicRouters: [],
     authMiddleware: createStaffAuth({
@@ -47,6 +58,7 @@ export function buildContainer(deps: ContainerDeps): Container {
     routers: [
       { path: '', router: trackingApi.router },
       { path: '', router: alerts.router },
+      { path: '', router: routes.router },
     ],
   };
 }

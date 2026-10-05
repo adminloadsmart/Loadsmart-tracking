@@ -20,6 +20,7 @@ export const startApiRole: RoleStarter = async ({ dataSource, health, logger }) 
       mainRedis,
       jwtSecret: env.jwtSecret,
       logger,
+      googleMapsApiKey: env.googleMapsApiKey,
     }),
   );
   const server = createServer(app);

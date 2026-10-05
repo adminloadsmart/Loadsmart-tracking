@@ -3,6 +3,7 @@ import { createRedisConnection } from '../db/redis-connection';
 import { redisManager } from '../db/redis';
 import { createLivePublisher } from '../modules/live';
 import { createPointsModule } from '../modules/points';
+import { createRoutesModule } from '../modules/routes';
 import { createRulesModule } from '../modules/rules';
 import { createSyncModule, LOADSMART_EVENTS_STREAM } from '../modules/sync';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
@@ -26,7 +27,8 @@ const STALL_THRESHOLD_MS = 30_000;
 export const startProcessorRole: RoleStarter = async ({ dataSource, health, logger }) => {
   const redis = redisManager.getClient();
   const { activeTrips } = createSyncModule(dataSource, redis, logger);
-  const rules = createRulesModule({ dataSource, redis, activeTrips, logger });
+  const routes = createRoutesModule({ dataSource, redis, logger });
+  const rules = createRulesModule({ dataSource, redis, activeTrips, logger, routes });
   const points = createPointsModule(
     dataSource,
     redis,

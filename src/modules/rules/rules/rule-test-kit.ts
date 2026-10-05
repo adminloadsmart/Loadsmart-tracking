@@ -41,6 +41,7 @@ export function ctx(
     nowMs: T0 + 86_400_000,
     params: mergeParams(ruleId, overrides),
     vehicle: { bodyType },
+    route: null,
   };
 }
 

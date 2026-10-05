@@ -3,6 +3,8 @@ import type { ChainableCommander } from 'ioredis';
 import type { Logger } from 'pino';
 import type { PointSource } from '../points';
 import type { ProcessedPoint } from '../processing/pipeline';
+import type { RouteStore } from '../routes/route.store';
+import type { TripRoutes } from '../routes/trip-routes';
 import type { ActiveTripIndex } from '../sync';
 import { mergeParams, RULE_DEFAULTS } from './defaults';
 import { AlertChange, RulesRepository, VehicleEffects } from './rules.repository';
@@ -47,6 +49,7 @@ export class RuleEngine {
     private readonly redis: Redis,
     private readonly activeTrips: ActiveTripIndex,
     private readonly logger: Logger,
+    private readonly routes: RouteStore | null = null,
   ) {}
 
   async evaluate(points: ProcessedPoint[], nowMs: number): Promise<RuleEvaluation> {
@@ -61,11 +64,14 @@ export class RuleEngine {
 
     const vehicleIds = [...byVehicle.keys()];
     const tripIds = [...new Set(accepted.map((p) => p.tripId).filter((id): id is string => !!id))];
-    const [loadStatuses, profiles, stored, inactiveFlags] = await Promise.all([
+    const [loadStatuses, profiles, stored, inactiveFlags, tripRoutes] = await Promise.all([
       this.activeTrips.getLoadStatuses(tripIds),
       this.profiles(vehicleIds, nowMs),
       this.loadStates(vehicleIds),
       this.loadInactiveFlags(accepted.map((p) => [p.vehicleId, p.source] as const)),
+      this.routes
+        ? this.routes.get(tripIds, nowMs)
+        : Promise.resolve(new Map<string, TripRoutes>()),
     ]);
 
     const effects: VehicleEffects[] = [];
@@ -110,6 +116,7 @@ export class RuleEngine {
             nowMs,
             params: setting.params,
             vehicle: { bodyType: profiles.get(vehicleId) ?? null },
+            route: fix.tripId ? (tripRoutes.get(fix.tripId) ?? null) : null,
           };
           const previous = state[field] ? JSON.parse(state[field]) : rule.initial();
           state[field] = JSON.stringify(rule.onFix(previous, fix, ctx, vehicleEffects));

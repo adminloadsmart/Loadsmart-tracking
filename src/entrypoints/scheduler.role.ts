@@ -1,6 +1,7 @@
 import { env } from '../config/env';
 import { redisManager } from '../db/redis';
 import { createRedisConnection } from '../db/redis-connection';
+import { createRoutesModule } from '../modules/routes';
 import { createRulesModule, OutboxRelay } from '../modules/rules';
 import { createSyncModule } from '../modules/sync';
 import { LeaderLock } from '../shared/lifecycle/leader-lock';
@@ -10,14 +11,27 @@ export const SCHEDULER_LEADER_KEY = 'tracking:scheduler:leader';
 
 const RULES_TICK_MS = 60_000;
 const OUTBOX_RELAY_MS = 2_000;
+const ROUTE_PLANNER_MS = 30_000;
 
 // Exactly one scheduler leader across replicas runs the leader-only work: the active-trip index
-// rebuild on takeover, the time-driven rules tick (inactivity), and the outbox relay to the main
-// backend. Standbys are healthy — they're ready to take over — so readiness passes either way.
+// rebuild on takeover, the time-driven rules tick (inactivity, delay), route planning, and the
+// outbox relay to the main backend. Standbys are healthy — they're ready to take over — so readiness passes either way.
 export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logger }) => {
   const redis = redisManager.getClient();
   const sync = createSyncModule(dataSource, redis, logger);
-  const rules = createRulesModule({ dataSource, redis, activeTrips: sync.activeTrips, logger });
+  const routes = createRoutesModule({
+    dataSource,
+    redis,
+    logger,
+    googleMapsApiKey: env.googleMapsApiKey,
+  });
+  const rules = createRulesModule({
+    dataSource,
+    redis,
+    activeTrips: sync.activeTrips,
+    logger,
+    routes,
+  });
   const mainRedis = createRedisConnection(env.mainRedisUrl, 'main-backend-events');
   const outbox = new OutboxRelay(dataSource, mainRedis);
 
@@ -37,6 +51,7 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
 
   const loops = [
     leaderLoop('rules-tick', RULES_TICK_MS, () => rules.tick()),
+    leaderLoop('route-planner', ROUTE_PLANNER_MS, () => routes.planner.planPending()),
     leaderLoop('outbox-relay', OUTBOX_RELAY_MS, async () => {
       // Drain: keep relaying full batches until the outbox is empty.
       while ((await outbox.relay()) >= 500);

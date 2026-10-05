@@ -34,6 +34,8 @@ export interface TripRow {
   tracking_started_at: Date | null;
   tracking_ended_at: Date | null;
   milestones: Record<string, string | null>;
+  route_status: string | null;
+  promised_delivery_at: Date | null;
   origin: PlaceRow | null;
   destination: PlaceRow | null;
 }
@@ -215,7 +217,8 @@ export class TrackingApiRepository {
   private tripSelect(): string {
     return `SELECT t.id, t.tenant_id, t.load_code, t.load_status, t.source_type, t.vehicle_id,
               t.vehicle_number, t.driver_id, t.driver_name, t.driver_phone, t.tracking_state,
-              t.tracking_started_at, t.tracking_ended_at, t.milestones,
+              t.tracking_started_at, t.tracking_ended_at, t.milestones, t.route_status,
+              t.promised_delivery_at,
               ${PLACE_JSON('o')} AS origin, ${PLACE_JSON('d')} AS destination
        FROM tracking.trips t
        LEFT JOIN tracking.places o ON o.id = t.origin_place_id

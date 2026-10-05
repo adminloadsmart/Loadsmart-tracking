@@ -123,6 +123,8 @@ export class SyncService {
             trackingStartedAt: startedAt,
             trackingEndedAt: endedAt,
             milestones: load.milestones,
+            customerId: load.customerId ?? null,
+            promisedDeliveryAt: toDate(load.promisedDeliveryAt),
             deleted: false,
             version,
           })

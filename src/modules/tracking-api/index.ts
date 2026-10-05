@@ -10,6 +10,7 @@ export function createTrackingApiModule(dataSource: DataSource, redis: Redis) {
   const service = new TrackingApiService(
     new TrackingApiRepository(dataSource),
     new VehicleStateStore(redis),
+    (tripId) => redis.hgetall(`trk:trip:${tripId}:eta`),
   );
   return { service, router: createTrackingApiRoutes(new TrackingApiController(service)) };
 }

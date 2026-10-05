@@ -30,6 +30,8 @@ export interface TripUpsert {
   trackingStartedAt: Date | null;
   trackingEndedAt: Date | null;
   milestones: Record<string, string | null>;
+  customerId: string | null;
+  promisedDeliveryAt: Date | null;
   deleted: boolean;
   version: number;
 }
@@ -56,14 +58,15 @@ export class SyncRepository {
       await this.dataSource.query(
         `INSERT INTO tracking.vehicles AS v
          (id, tenant_id, kind, registration_number, status, gps_provider, gps_enabled,
-          gps_device_imei, deleted_at, source_version)
-       VALUES ($1, $2, 'fleet', $3, $4, $5, $6, $9, CASE WHEN $7 THEN now() END, $8)
+          gps_device_imei, body_type, deleted_at, source_version)
+       VALUES ($1, $2, 'fleet', $3, $4, $5, $6, $9, $10, CASE WHEN $7 THEN now() END, $8)
        ON CONFLICT (id) DO UPDATE SET
          registration_number = CASE WHEN $7 THEN v.registration_number ELSE EXCLUDED.registration_number END,
          status = CASE WHEN $7 THEN v.status ELSE EXCLUDED.status END,
          gps_provider = CASE WHEN $7 THEN v.gps_provider ELSE EXCLUDED.gps_provider END,
          gps_enabled = CASE WHEN $7 THEN v.gps_enabled ELSE EXCLUDED.gps_enabled END,
          gps_device_imei = CASE WHEN $7 THEN v.gps_device_imei ELSE EXCLUDED.gps_device_imei END,
+         body_type = CASE WHEN $7 THEN v.body_type ELSE EXCLUDED.body_type END,
          deleted_at = CASE WHEN $7 THEN COALESCE(v.deleted_at, now()) END,
          source_version = EXCLUDED.source_version,
          synced_at = now()
@@ -80,6 +83,7 @@ export class SyncRepository {
           payload === null,
           version,
           payload?.gpsDeviceImei ?? null,
+          payload?.bodyType ?? null,
         ],
       ),
     );
@@ -182,9 +186,9 @@ export class SyncRepository {
          (id, tenant_id, load_code, load_status, source_type, vehicle_id, vehicle_number,
           driver_id, driver_phone, driver_name, transporter_id, origin_place_id,
           destination_place_id, tracking_state, tracking_started_at, tracking_ended_at,
-          milestones, deleted_at, source_version)
+          milestones, deleted_at, source_version, customer_id, promised_delivery_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-               CASE WHEN $18 THEN now() END, $19)
+               CASE WHEN $18 THEN now() END, $19, $20, $21)
        ON CONFLICT (id) DO UPDATE SET
          load_code = EXCLUDED.load_code,
          load_status = EXCLUDED.load_status,
@@ -201,6 +205,8 @@ export class SyncRepository {
          tracking_started_at = EXCLUDED.tracking_started_at,
          tracking_ended_at = EXCLUDED.tracking_ended_at,
          milestones = EXCLUDED.milestones,
+         customer_id = EXCLUDED.customer_id,
+         promised_delivery_at = EXCLUDED.promised_delivery_at,
          deleted_at = CASE WHEN $18 THEN COALESCE(t.deleted_at, now()) END,
          source_version = EXCLUDED.source_version,
          synced_at = now()
@@ -226,6 +232,8 @@ export class SyncRepository {
           JSON.stringify(trip.milestones),
           trip.deleted,
           trip.version,
+          trip.customerId,
+          trip.promisedDeliveryAt,
         ],
       ),
     );

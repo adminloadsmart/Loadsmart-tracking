@@ -59,6 +59,9 @@ export const env = {
   // OpenTelemetry tracing is only started when an OTLP endpoint is configured.
   otelExporterEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || undefined,
   serviceName: process.env.OTEL_SERVICE_NAME ?? 'loadsmart-tracking',
+  // Google Routes + Geocoding (planned routes for DELAY/DEV rules). Optional: without it trips get
+  // no planned route and the route-based rules stay inactive.
+  googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || undefined,
   // Shared with the main loadsmart backend so this service can verify its access/driver tokens.
   // Optional until Phase 2 (driver socket auth) — nothing verifies tokens yet.
   jwtSecret: process.env.JWT_SECRET || undefined,

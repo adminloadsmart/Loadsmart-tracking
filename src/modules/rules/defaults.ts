@@ -60,6 +60,37 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
       endStationaryS: 600,
     },
   },
+  'DEV-GPS': {
+    enabled: true,
+    audience: ['shipper', 'trip_ops', 'fleet_owner'],
+    params: {
+      corridorM: 1000, // outside = more than 1 km from every planned/approved route
+      ignoreNearEndsM: 5000, // yards, parking and the last mile around origin and drop
+      startAfterS: 900, // outside for 15 min…
+      startAfterOutsideM: 5000, // …or driven 5 km outside the corridor
+      rejoinFactor: 0.8, // back inside 0.8 × corridor…
+      rejoinHoldS: 120, // …for 2 min
+      gapS: 600, // never interpolate across a gap to START a deviation
+      haltSpeedKmh: 5, // halted while off route → Critical
+      haltHoldS: 600,
+    },
+  },
+  'DELAY-GPS': {
+    enabled: true,
+    audience: ['shipper', 'trip_ops'],
+    params: {
+      evaluateEveryMin: 15,
+      speedWindowH: 3, // speed = route km covered over the last 3 h (halts included)…
+      minCoveredKm: 50, // …once 50 km is covered; before that the planned speed
+      fallbackKmPerDay: 350, // promised = start + route km / 350 km per day when not given
+      warningDelayMin: 60,
+      criticalDelayMin: 240,
+      clearDelayMin: 30,
+      consecutive: 2, // evaluations needed to raise and to clear
+      staleAfterMin: 60, // last fix older → keep the last ETA, marked stale
+      maxSnapDistanceM: 5000, // fixes further from the route don't move progress
+    },
+  },
   'INACT-GPS': {
     enabled: true,
     audience: ['fleet_owner', 'loadsmart_ops', 'shipper'],

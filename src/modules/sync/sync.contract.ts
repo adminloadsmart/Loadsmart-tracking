@@ -47,6 +47,10 @@ export const loadPayloadSchema = z.object({
   transporterId: z.uuid().nullable(),
   loadingPointId: z.uuid().nullable(),
   deliveryPointId: z.uuid().nullable(),
+  // Added for the rules engine (DELAY/OVER); optional so older producers stay valid.
+  customerId: z.uuid().nullable().optional(),
+  /** When the customer was promised delivery (requisition expected date, 23:59 IST). */
+  promisedDeliveryAt: isoOrNull.optional(),
   milestones: z.object({
     loadingConfirmedAt: isoOrNull,
     atPlantAt: isoOrNull,
@@ -62,6 +66,8 @@ export const vehiclePayloadSchema = z.object({
   gpsProvider: z.string().nullable(),
   gpsEnabled: z.boolean(),
   gpsDeviceImei: z.string().nullable(),
+  /** e.g. 'Tanker' — tankers get the 60 km/h limit and the 30-min inactivity rule. */
+  bodyType: z.string().nullable().optional(),
 });
 
 /** Driver profiles are global in the main backend (no tenant) — see the envelope's tenantId. */

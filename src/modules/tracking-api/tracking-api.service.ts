@@ -91,6 +91,8 @@ export class TrackingApiService {
   constructor(
     private readonly repository: TrackingApiRepository,
     private readonly positions: VehicleStateStore,
+    /** Reads the latest ETA the DELAY rule computed (trk:trip:{id}:eta). */
+    private readonly readEta: (tripId: string) => Promise<Record<string, string>>,
   ) {}
 
   async fleetLive(scope: TenantScope) {
@@ -180,9 +182,10 @@ export class TrackingApiService {
 
   async trip(scope: TenantScope, tripId: string) {
     const trip = await this.requireTrip(scope, tripId);
-    const [metrics, latest] = await Promise.all([
+    const [metrics, latest, eta] = await Promise.all([
       this.positions.readTripMetrics(tripId),
       trip.vehicle_id ? this.positions.readLatest([trip.vehicle_id]) : Promise.resolve(new Map()),
+      this.readEta(tripId),
     ]);
     const position = trip.vehicle_id ? latest.get(trip.vehicle_id) : undefined;
     // Until the waterfall (Phase 6) picks an authoritative source, report the largest source's
@@ -199,6 +202,20 @@ export class TrackingApiService {
       ),
       fraudFlags: metrics.fraudFlags,
       position: position && position.tripId === trip.id ? toPositionView(position) : null,
+      routeStatus: trip.route_status,
+      promisedDeliveryAt: trip.promised_delivery_at?.toISOString() ?? null,
+      eta: eta.etaAt
+        ? {
+            etaAt: new Date(Number(eta.etaAt)).toISOString(),
+            promisedAt: eta.promisedAt ? new Date(Number(eta.promisedAt)).toISOString() : null,
+            projectedDelayMin: Number(eta.projectedDelayMin),
+            remainingKm: Number(eta.remainingKm),
+            speedKmh: Number(eta.speedKmh),
+            basis: eta.basis,
+            stale: eta.stale === '1',
+            evaluatedAt: new Date(Number(eta.evaluatedAt)).toISOString(),
+          }
+        : null,
     };
   }
 

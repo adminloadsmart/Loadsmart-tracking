@@ -1,4 +1,5 @@
 import type { PointSource } from '../points';
+import type { TripRoutes } from '../routes/trip-routes';
 
 export const RULE_IDS = [
   'HALT-GPS',
@@ -123,6 +124,8 @@ export interface RuleContext {
   /** Merged sheet defaults + tenant overrides for this rule. */
   params: Record<string, number | boolean | string>;
   vehicle: { bodyType: string | null };
+  /** The fix's trip routes (planned + approved), for DEV/DELAY; null when not planned yet. */
+  route: TripRoutes | null;
 }
 
 /**
