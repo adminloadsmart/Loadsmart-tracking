@@ -7,7 +7,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *  - alerts:        what a person is told about, with severity, audience and an
  *                   open → acknowledged → closed lifecycle; one OPEN alert per dedupe key
  *  - rule_settings: per-tenant overrides of the sheet's default thresholds / switches
- *  - outbox:        alert events relayed to the main backend (`tracking.events`) for push/SMS
+ *  - alert_outbox:  alert events relayed to the main backend (`tracking.events`) for push/SMS
  * Episode and alert ids are deterministic (UUIDv5 of vehicle + rule + start), so a redelivered
  * stream batch upserts the same rows instead of duplicating them.
  */
@@ -93,7 +93,7 @@ export class RulesAndAlerts1759670000000 implements MigrationInterface {
       )`);
 
     await queryRunner.query(`
-      CREATE TABLE tracking.outbox (
+      CREATE TABLE tracking.alert_outbox (
         id          bigserial PRIMARY KEY,
         event_type  text        NOT NULL,
         payload     jsonb       NOT NULL,
@@ -112,7 +112,7 @@ export class RulesAndAlerts1759670000000 implements MigrationInterface {
     await queryRunner.query(`ALTER TABLE tracking.trips DROP COLUMN promised_delivery_at`);
     await queryRunner.query(`ALTER TABLE tracking.trips DROP COLUMN customer_id`);
     await queryRunner.query(`ALTER TABLE tracking.vehicles DROP COLUMN body_type`);
-    await queryRunner.query(`DROP TABLE IF EXISTS tracking.outbox`);
+    await queryRunner.query(`DROP TABLE IF EXISTS tracking.alert_outbox`);
     await queryRunner.query(`DROP TABLE IF EXISTS tracking.rule_settings`);
     await queryRunner.query(`DROP TABLE IF EXISTS tracking.alerts`);
     await queryRunner.query(`DROP TABLE IF EXISTS tracking.episodes`);

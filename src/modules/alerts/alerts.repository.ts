@@ -89,7 +89,7 @@ export class AlertsRepository {
       );
       if (rows[0]) {
         await manager.query(
-          `INSERT INTO tracking.outbox (event_type, payload) VALUES ('alert.closed', $1)`,
+          `INSERT INTO tracking.alert_outbox (event_type, payload) VALUES ('alert.closed', $1)`,
           [JSON.stringify(rows[0])],
         );
       }

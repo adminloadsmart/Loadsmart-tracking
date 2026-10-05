@@ -78,7 +78,7 @@ export class RoutesRepository {
     );
   }
 
-  /** Appends a route version (PostGIS decodes the polyline for the geometry column). */
+  /** Appends a route version. */
   async insertRoute(input: {
     tripId: string;
     kind: 'planned' | 'approved_alternate';
@@ -91,10 +91,10 @@ export class RoutesRepository {
   }): Promise<TripRouteRow> {
     const rows: TripRouteRow[] = await this.dataSource.query(
       `INSERT INTO tracking.trip_routes
-         (id, trip_id, version, kind, polyline, geom, distance_m, duration_s, provider, promised_at, created_by)
+         (id, trip_id, version, kind, polyline, distance_m, duration_s, provider, promised_at, created_by)
        VALUES ($1, $2,
                COALESCE((SELECT max(version) FROM tracking.trip_routes WHERE trip_id = $2), 0) + 1,
-               $3, $4, ST_LineFromEncodedPolyline($4, 5), $5, $6, $7, $8, $9)
+               $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, trip_id, version, kind, polyline, distance_m, duration_s, promised_at, created_at`,
       [
         randomUUID(),

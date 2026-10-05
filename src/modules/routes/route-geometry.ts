@@ -125,3 +125,45 @@ function segmentLength(a: LatLng, b: LatLng): number {
     Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
   return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)));
 }
+
+/**
+ * Douglas-Peucker simplification with the tolerance in degrees — the same algorithm and units
+ * as PostGIS ST_Simplify on SRID 4326, done in-process so tracks need no PostGIS. Iterative (no
+ * recursion depth limit on multi-day tracks). Endpoints are always kept.
+ */
+export function simplifyPolyline(points: LatLng[], toleranceDeg: number): LatLng[] {
+  if (points.length <= 2 || toleranceDeg <= 0) return points;
+  const keep = new Uint8Array(points.length);
+  keep[0] = 1;
+  keep[points.length - 1] = 1;
+  const stack: Array<[number, number]> = [[0, points.length - 1]];
+  while (stack.length > 0) {
+    const [first, last] = stack.pop()!;
+    const a = points[first];
+    const b = points[last];
+    const dx = b.lng - a.lng;
+    const dy = b.lat - a.lat;
+    const len2 = dx * dx + dy * dy;
+    let maxDistance = 0;
+    let index = -1;
+    for (let i = first + 1; i < last; i += 1) {
+      const p = points[i];
+      const t =
+        len2 === 0
+          ? 0
+          : Math.max(0, Math.min(1, ((p.lng - a.lng) * dx + (p.lat - a.lat) * dy) / len2));
+      const ex = p.lng - (a.lng + t * dx);
+      const ey = p.lat - (a.lat + t * dy);
+      const distance = Math.sqrt(ex * ex + ey * ey);
+      if (distance > maxDistance) {
+        maxDistance = distance;
+        index = i;
+      }
+    }
+    if (index !== -1 && maxDistance > toleranceDeg) {
+      keep[index] = 1;
+      stack.push([first, index], [index, last]);
+    }
+  }
+  return points.filter((_, i) => keep[i] === 1);
+}

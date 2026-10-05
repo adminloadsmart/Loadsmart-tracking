@@ -1,4 +1,6 @@
 import { DataSource } from 'typeorm';
+import { detectFeatures, DbFeatures } from '../../db/db-features';
+import { encodePolyline, simplifyPolyline } from '../routes/route-geometry';
 import type { TenantScope } from '../../shared/auth/staff-token';
 import type { PointSource } from '../points';
 
@@ -50,6 +52,23 @@ export interface TrackPoint {
   motion: string | null;
 }
 
+interface LineRow {
+  recorded_at: Date;
+  lat: number;
+  lng: number;
+}
+
+function buildPolyline(rows: LineRow[], toleranceDeg: number): TrackPolyline {
+  if (rows.length === 0) return { polyline: null, point_count: 0, first_at: null, last_at: null };
+  const points = rows.map((row) => ({ lat: row.lat, lng: row.lng }));
+  return {
+    polyline: encodePolyline(simplifyPolyline(points, toleranceDeg)),
+    point_count: rows.length,
+    first_at: new Date(rows[0].recorded_at),
+    last_at: new Date(rows[rows.length - 1].recorded_at),
+  };
+}
+
 export interface TrackPolyline {
   polyline: string | null;
   point_count: number;
@@ -74,9 +93,9 @@ function scopeParams(scope: TenantScope): string[] {
  * Read side of the tracking data. Every lookup takes the caller's TenantScope so a row outside it
  * simply isn't found (callers turn that into 404 — no "exists but forbidden" oracle).
  *
- * Tracks are built in PostGIS: ST_MakeLine over the trip's points, simplified with
- * ST_SimplifyPreserveTopology and returned as a Google encoded polyline (precision 5), so a
- * multi-day trip ships as a few KB instead of tens of thousands of JSON points.
+ * Tracks are returned as a Google encoded polyline (precision 5), simplified with Douglas-Peucker,
+ * so a multi-day trip ships as a few KB instead of tens of thousands of JSON points. Built
+ * in-process from (lat, lng) rows, so no PostGIS is needed.
  */
 export class TrackingApiRepository {
   constructor(private readonly dataSource: DataSource) {}
@@ -154,22 +173,20 @@ export class TrackingApiRepository {
     source: PointSource | null,
     toleranceDeg: number,
   ): Promise<TrackPolyline> {
-    const rows = await this.dataSource.query(
-      `WITH pts AS (
-         SELECT recorded_at, ST_SetSRID(ST_MakePoint(lng, lat), 4326) AS geom
-         FROM tracking.location_points
-         WHERE trip_id = $1 AND ($2::text IS NULL OR source = $2)
-       )
-       ${this.polylineSelect('$3')}`,
-      [tripId, source, toleranceDeg],
+    const rows: LineRow[] = await this.dataSource.query(
+      `SELECT recorded_at, lat, lng FROM tracking.location_points
+       WHERE trip_id = $1 AND ($2::text IS NULL OR source = $2)
+       ORDER BY recorded_at`,
+      [tripId, source],
     );
-    return rows[0];
+    return buildPolyline(rows, toleranceDeg);
   }
 
   /**
    * A vehicle's path over a time window across both retention tables (trip and idle points,
-   * rejected fixes excluded). Raw points for windows up to a day; older/longer windows read the
-   * 1-minute rollups, which outlive the 7-day raw retention of idle points.
+   * rejected fixes excluded). Raw points for windows up to a day; older/longer windows one point
+   * per minute — from the TimescaleDB 1-minute rollups when available (they outlive the 7-day raw
+   * retention of idle points), else by aggregating the raw rows.
    */
   async vehicleTimelinePolyline(
     vehicleId: string,
@@ -178,40 +195,37 @@ export class TrackingApiRepository {
     toleranceDeg: number,
     useRollups: boolean,
   ): Promise<TrackPolyline> {
-    const pointsCte = useRollups
-      ? `SELECT bucket AS recorded_at, ST_SetSRID(ST_MakePoint(lng, lat), 4326) AS geom
-           FROM tracking.location_points_1min WHERE vehicle_id = $1 AND bucket >= $2 AND bucket < $3
-         UNION ALL
-         SELECT bucket, ST_SetSRID(ST_MakePoint(lng, lat), 4326)
-           FROM tracking.location_points_short_1min WHERE vehicle_id = $1 AND bucket >= $2 AND bucket < $3`
-      : `SELECT recorded_at, ST_SetSRID(ST_MakePoint(lng, lat), 4326) AS geom
-           FROM tracking.location_points
-           WHERE vehicle_id = $1 AND recorded_at >= $2 AND recorded_at < $3
-         UNION ALL
-         SELECT recorded_at, ST_SetSRID(ST_MakePoint(lng, lat), 4326)
-           FROM tracking.location_points_short
-           WHERE vehicle_id = $1 AND recorded_at >= $2 AND recorded_at < $3
-             AND NOT (flags ? 'rejected')`;
-    const rows = await this.dataSource.query(
-      `WITH pts AS (${pointsCte}) ${this.polylineSelect('$4')}`,
-      [vehicleId, from, to, toleranceDeg],
-    );
-    return rows[0];
+    const raw = `SELECT recorded_at, lat, lng FROM tracking.location_points
+                   WHERE vehicle_id = $1 AND recorded_at >= $2 AND recorded_at < $3
+                 UNION ALL
+                 SELECT recorded_at, lat, lng FROM tracking.location_points_short
+                   WHERE vehicle_id = $1 AND recorded_at >= $2 AND recorded_at < $3
+                     AND NOT (flags ? 'rejected')`;
+    let sql: string;
+    if (!useRollups) {
+      sql = `${raw} ORDER BY recorded_at`;
+    } else if ((await this.features()).timescale) {
+      sql = `SELECT bucket AS recorded_at, lat, lng FROM tracking.location_points_1min
+               WHERE vehicle_id = $1 AND bucket >= $2 AND bucket < $3
+             UNION ALL
+             SELECT bucket, lat, lng FROM tracking.location_points_short_1min
+               WHERE vehicle_id = $1 AND bucket >= $2 AND bucket < $3
+             ORDER BY 1`;
+    } else {
+      // Last fix of each minute.
+      sql = `SELECT DISTINCT ON (date_trunc('minute', recorded_at))
+                    date_trunc('minute', recorded_at) AS recorded_at, lat, lng
+             FROM (${raw}) pts
+             ORDER BY date_trunc('minute', recorded_at), pts.recorded_at DESC`;
+    }
+    const rows: LineRow[] = await this.dataSource.query(sql, [vehicleId, from, to]);
+    return buildPolyline(rows, toleranceDeg);
   }
 
-  private polylineSelect(toleranceParam: string): string {
-    // ST_MakeLine needs ≥ 2 points; a single fix is returned as a one-point polyline.
-    return `SELECT
-         CASE
-           WHEN count(*) = 0 THEN NULL
-           WHEN count(*) = 1 THEN ST_AsEncodedPolyline(ST_MakeLine(ARRAY[min(geom), min(geom)]), 5)
-           ELSE ST_AsEncodedPolyline(
-             ST_SimplifyPreserveTopology(ST_MakeLine(geom ORDER BY recorded_at), ${toleranceParam}::float8), 5)
-         END AS polyline,
-         count(*)::int AS point_count,
-         min(recorded_at) AS first_at,
-         max(recorded_at) AS last_at
-       FROM pts`;
+  private featuresPromise: Promise<DbFeatures> | null = null;
+  private features(): Promise<DbFeatures> {
+    this.featuresPromise ??= detectFeatures(this.dataSource);
+    return this.featuresPromise;
   }
 
   private tripSelect(): string {

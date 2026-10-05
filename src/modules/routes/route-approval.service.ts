@@ -108,7 +108,7 @@ export class RouteApprovalService {
       );
       for (const row of rows) {
         await manager.query(
-          `INSERT INTO tracking.outbox (event_type, payload) VALUES ('alert.closed', $1)`,
+          `INSERT INTO tracking.alert_outbox (event_type, payload) VALUES ('alert.closed', $1)`,
           [JSON.stringify(row)],
         );
       }

@@ -19,6 +19,10 @@ export const AppDataSource = new DataSource({
   // Per-migration transactions: Timescale DDL like continuous aggregates must run outside one,
   // and those migrations opt out with `transaction = false`.
   migrationsTransactionMode: 'each',
+  // Own history table: this service may share a database with the main loadsmart backend, whose
+  // TypeORM uses the default `migrations` table — sharing it would let either service's
+  // migration:revert undo the other's migrations.
+  migrationsTableName: 'tracking_migrations',
   extra: {
     // Bounded pool — the hot ingest paths never touch Postgres synchronously (they XADD to Redis),
     // so a small pool per process is enough and protects the DB as roles scale out horizontally.

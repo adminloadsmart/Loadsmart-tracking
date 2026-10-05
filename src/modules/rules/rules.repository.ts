@@ -66,10 +66,10 @@ export class RulesRepository {
         }
       }
       for (const change of changes) {
-        await manager.query(`INSERT INTO tracking.outbox (event_type, payload) VALUES ($1, $2)`, [
-          change.type,
-          JSON.stringify(change.alert),
-        ]);
+        await manager.query(
+          `INSERT INTO tracking.alert_outbox (event_type, payload) VALUES ($1, $2)`,
+          [change.type, JSON.stringify(change.alert)],
+        );
       }
       return changes;
     });

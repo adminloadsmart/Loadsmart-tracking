@@ -45,27 +45,54 @@ function loadMigrations(): Array<new () => MigrationInterface> {
   return Object.values(modules).flatMap((mod) => Object.values(mod));
 }
 
-let dataSource: DataSource | null = null;
+const dataSources = new Map<string, DataSource>();
 
 /** Migrated test database, shared by every suite in the run. */
-export async function testDataSource(): Promise<DataSource> {
-  if (dataSource?.isInitialized) return dataSource;
+export function testDataSource(): Promise<DataSource> {
+  return migratedDatabase(TEST_DB);
+}
+
+/**
+ * A fresh, migrated database by name. With `plain: true` the migrations run as on a server
+ * without TimescaleDB/PostGIS (TRACKING_DB_EXTENSIONS=none) — the shared-main-database setup.
+ */
+export async function migratedDatabase(name: string, { plain = false } = {}): Promise<DataSource> {
+  const existing = dataSources.get(name);
+  if (existing?.isInitialized) return existing;
 
   const admin = new Client({ connectionString: `${PG_BASE}/postgres` });
   await admin.connect();
-  const exists = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [TEST_DB]);
-  if (exists.rowCount === 0) await admin.query(`CREATE DATABASE ${TEST_DB}`);
+  const exists = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [name]);
+  if (exists.rowCount === 0) await admin.query(`CREATE DATABASE ${name}`);
   await admin.end();
 
-  dataSource = new DataSource({
+  const dataSource = new DataSource({
     type: 'postgres',
-    url: `${PG_BASE}/${TEST_DB}`,
+    url: `${PG_BASE}/${name}`,
     migrations: loadMigrations(),
     migrationsTransactionMode: 'each',
+    migrationsTableName: 'tracking_migrations',
     logging: false,
   });
   await dataSource.initialize();
-  await dataSource.runMigrations();
+  if (plain) {
+    // The timescaledb-ha image pre-installs extensions in template1, so new databases inherit
+    // them; remove them to look like a plain PostgreSQL server.
+    await dataSource.query(
+      `DROP EXTENSION IF EXISTS timescaledb_toolkit, timescaledb, postgis_topology, postgis CASCADE`,
+    );
+  }
+  const previous = process.env.TRACKING_DB_EXTENSIONS;
+  if (plain) process.env.TRACKING_DB_EXTENSIONS = 'none';
+  try {
+    await dataSource.runMigrations();
+  } finally {
+    if (plain) {
+      if (previous === undefined) delete process.env.TRACKING_DB_EXTENSIONS;
+      else process.env.TRACKING_DB_EXTENSIONS = previous;
+    }
+  }
+  dataSources.set(name, dataSource);
   return dataSource;
 }
 
@@ -73,7 +100,7 @@ export async function truncateTrackingTables(ds: DataSource): Promise<void> {
   await ds.query(
     `TRUNCATE tracking.location_points, tracking.location_points_short, tracking.trips,
               tracking.vehicles, tracking.drivers, tracking.places, tracking.episodes,
-              tracking.alerts, tracking.rule_settings, tracking.outbox`,
+              tracking.alerts, tracking.rule_settings, tracking.alert_outbox`,
   );
 }
 

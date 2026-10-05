@@ -188,7 +188,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
     await waitFor(async () =>
       liveAlerts.some((a) => a.type === 'alert.opened' && a.alert.rule_id === 'HALT-GPS'),
     );
-    const outbox = await ds.query(`SELECT event_type FROM tracking.outbox`);
+    const outbox = await ds.query(`SELECT event_type FROM tracking.alert_outbox`);
     expect(outbox).toEqual([{ event_type: 'alert.opened' }]);
 
     // REST sees it; the timeline endpoint shows the episode.
@@ -248,7 +248,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
       closeReason: 'Driver confirmed tea break',
     });
     expect(
-      (await ds.query(`SELECT event_type FROM tracking.outbox ORDER BY id`)).map(
+      (await ds.query(`SELECT event_type FROM tracking.alert_outbox ORDER BY id`)).map(
         (r: { event_type: string }) => r.event_type,
       ),
     ).toEqual(['alert.opened', 'alert.closed']);
@@ -263,7 +263,9 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
       [string, string[]]
     >;
     expect(fields).toEqual(expect.arrayContaining(['type', 'alert.opened', 'tenantId', TENANT]));
-    expect(await ds.query(`SELECT count(*)::int AS n FROM tracking.outbox`)).toEqual([{ n: 0 }]);
+    expect(await ds.query(`SELECT count(*)::int AS n FROM tracking.alert_outbox`)).toEqual([
+      { n: 0 },
+    ]);
   });
 
   it('INACT: phone silent 60+ min on a trip → "No data" episode + Medium alert; closes when data resumes', async () => {

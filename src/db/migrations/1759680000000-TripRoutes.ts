@@ -15,8 +15,9 @@ export class TripRoutes1759680000000 implements MigrationInterface {
         trip_id      uuid        NOT NULL,
         version      int         NOT NULL,
         kind         text        NOT NULL CHECK (kind IN ('planned', 'approved_alternate')),
+        -- Google encoded polyline (precision 5); geometry is computed in-process (RouteGeometry),
+        -- so no PostGIS is required.
         polyline     text        NOT NULL,
-        geom         geometry(LineString, 4326) NOT NULL,
         distance_m   double precision NOT NULL,
         duration_s   double precision,
         provider     text        NOT NULL,

@@ -1,6 +1,7 @@
 import { env } from '../config/env';
 import { redisManager } from '../db/redis';
 import { createRedisConnection } from '../db/redis-connection';
+import { PointRetentionJob } from '../modules/points/retention.job';
 import { createRoutesModule } from '../modules/routes';
 import { createRulesModule, OutboxRelay } from '../modules/rules';
 import { createSyncModule } from '../modules/sync';
@@ -12,6 +13,7 @@ export const SCHEDULER_LEADER_KEY = 'tracking:scheduler:leader';
 const RULES_TICK_MS = 60_000;
 const OUTBOX_RELAY_MS = 2_000;
 const ROUTE_PLANNER_MS = 30_000;
+const RETENTION_MS = 60 * 60_000;
 
 // Exactly one scheduler leader across replicas runs the leader-only work: the active-trip index
 // rebuild on takeover, the time-driven rules tick (inactivity, delay), route planning, and the
@@ -34,6 +36,7 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
   });
   const mainRedis = createRedisConnection(env.mainRedisUrl, 'main-backend-events');
   const outbox = new OutboxRelay(dataSource, mainRedis);
+  const retention = new PointRetentionJob(dataSource, logger);
 
   const lock = new LeaderLock(redis, {
     key: SCHEDULER_LEADER_KEY,
@@ -52,6 +55,7 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
   const loops = [
     leaderLoop('rules-tick', RULES_TICK_MS, () => rules.tick()),
     leaderLoop('route-planner', ROUTE_PLANNER_MS, () => routes.planner.planPending()),
+    leaderLoop('point-retention', RETENTION_MS, () => retention.run()),
     leaderLoop('outbox-relay', OUTBOX_RELAY_MS, async () => {
       // Drain: keep relaying full batches until the outbox is empty.
       while ((await outbox.relay()) >= 500);

@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { detectFeatures } from '../db-features';
 
 /**
  * Location time series (docs/ROADMAP.md §6).
@@ -14,6 +15,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * Idempotent writes: UNIQUE (vehicle_id, source, recorded_at) + INSERT ... ON CONFLICT DO NOTHING
  * (the time column must be part of any unique index on a hypertable).
+ *
+ * Without TimescaleDB (plain PostgreSQL) the same tables are created as ordinary tables with the
+ * same indexes; retention then runs as a scheduled batch DELETE (points/retention.job.ts) and the
+ * rollup views don't exist (timelines aggregate the raw rows instead).
  */
 const TABLES = [
   { name: 'location_points', rawRetention: '90 days' },
@@ -28,6 +33,7 @@ export class LocationPoints1759660000000 implements MigrationInterface {
   transaction = false as const;
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    const { timescale } = await detectFeatures(queryRunner);
     for (const { name, rawRetention } of TABLES) {
       await queryRunner.query(`
         CREATE TABLE IF NOT EXISTS tracking.${name} (
@@ -46,15 +52,25 @@ export class LocationPoints1759660000000 implements MigrationInterface {
           flags        jsonb,
           CONSTRAINT ${name}_dedup UNIQUE (vehicle_id, source, recorded_at)
         )`);
-      await queryRunner.query(
-        `SELECT create_hypertable('tracking.${name}', by_range('recorded_at', INTERVAL '1 day'), if_not_exists => true)`,
-      );
+      if (timescale) {
+        await queryRunner.query(
+          `SELECT create_hypertable('tracking.${name}', by_range('recorded_at', INTERVAL '1 day'), if_not_exists => true)`,
+        );
+      }
       await queryRunner.query(
         `CREATE INDEX IF NOT EXISTS ${name}_vehicle_time_idx ON tracking.${name} (vehicle_id, recorded_at DESC)`,
       );
       await queryRunner.query(
         `CREATE INDEX IF NOT EXISTS ${name}_trip_time_idx ON tracking.${name} (trip_id, recorded_at) WHERE trip_id IS NOT NULL`,
       );
+
+      // Plain PostgreSQL: an index for the retention job's range deletes, and nothing more.
+      if (!timescale) {
+        await queryRunner.query(
+          `CREATE INDEX IF NOT EXISTS ${name}_time_idx ON tracking.${name} (recorded_at)`,
+        );
+        continue;
+      }
 
       // Compression after 2 days: segment by vehicle so per-vehicle reads stay cheap.
       await queryRunner.query(`
