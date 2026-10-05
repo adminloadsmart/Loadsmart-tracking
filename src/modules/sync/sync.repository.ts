@@ -242,10 +242,17 @@ export class SyncRepository {
   }
 
   async findActiveTrips(): Promise<
-    Array<{ id: string; vehicle_id: string | null; driver_id: string | null }>
+    Array<{
+      id: string;
+      tenant_id: string;
+      vehicle_id: string | null;
+      driver_id: string | null;
+      tracking_started_at: Date | null;
+    }>
   > {
     return this.dataSource.query(
-      `SELECT id, vehicle_id, driver_id FROM tracking.trips WHERE tracking_state = 'active'`,
+      `SELECT id, tenant_id, vehicle_id, driver_id, tracking_started_at
+       FROM tracking.trips WHERE tracking_state = 'active'`,
     );
   }
 }

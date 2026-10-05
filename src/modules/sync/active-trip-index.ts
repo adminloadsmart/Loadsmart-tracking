@@ -9,17 +9,39 @@ return 0`;
 
 export const vehicleActiveTripKey = (vehicleId: string) => `trk:veh:${vehicleId}:active_trip`;
 export const driverActiveTripKey = (driverId: string) => `trk:drv:${driverId}:active_trip`;
+/** Hash {tenantId, vehicleId, driverId} for an active trip — what ingest needs to stamp a point. */
+export const tripRefKey = (tripId: string) => `trk:trip:${tripId}:ref`;
 
 export interface ActiveTripRefs {
   tripId: string;
+  tenantId: string;
   vehicleId: string | null;
   driverId: string | null;
+  startedAt: Date | null;
+}
+
+export interface TripRef {
+  tripId: string;
+  tenantId: string;
+  vehicleId: string | null;
+  /** Epoch ms tracking started — points recorded before it don't belong to this trip. */
+  startedAtMs: number | null;
+}
+
+function refHash(trip: ActiveTripRefs): Record<string, string> {
+  return {
+    tenantId: trip.tenantId,
+    vehicleId: trip.vehicleId ?? '',
+    driverId: trip.driverId ?? '',
+    startedAtMs: trip.startedAt ? String(trip.startedAt.getTime()) : '',
+  };
 }
 
 /**
- * Redis lookup of "which trip is this vehicle / driver on right now" — read on every ingested
- * point (phone socket, pollers) to stamp tripId without touching Postgres. Derived state: the
- * trips table is the source of truth and rebuild() restores it after a Redis loss.
+ * Redis lookup of "which trip is this vehicle / driver on right now, and whose is it" — read on
+ * every ingested point (phone socket, pollers) to stamp tripId/vehicleId/tenantId without touching
+ * Postgres. Derived state: the trips table is the source of truth and rebuild() restores it after
+ * a Redis loss.
  */
 export class ActiveTripIndex {
   constructor(private readonly redis: Redis) {}
@@ -32,15 +54,37 @@ export class ActiveTripIndex {
     return this.redis.get(driverActiveTripKey(driverId));
   }
 
-  async activate({ tripId, vehicleId, driverId }: ActiveTripRefs): Promise<void> {
+  /** The driver's active trip with its tenant and vehicle, or null if they're not on one. */
+  async getTripRefForDriver(driverId: string): Promise<TripRef | null> {
+    const tripId = await this.getTripForDriver(driverId);
+    if (!tripId) return null;
+    const ref = await this.redis.hgetall(tripRefKey(tripId));
+    if (!ref.tenantId) return null;
+    return {
+      tripId,
+      tenantId: ref.tenantId,
+      vehicleId: ref.vehicleId || null,
+      startedAtMs: ref.startedAtMs ? Number(ref.startedAtMs) : null,
+    };
+  }
+
+  async activate(trip: ActiveTripRefs): Promise<void> {
+    const { tripId, vehicleId, driverId } = trip;
     const pipeline = this.redis.pipeline();
+    pipeline.del(tripRefKey(tripId));
+    pipeline.hset(tripRefKey(tripId), refHash(trip));
     if (vehicleId) pipeline.set(vehicleActiveTripKey(vehicleId), tripId);
     if (driverId) pipeline.set(driverActiveTripKey(driverId), tripId);
     await execOrThrow(pipeline);
   }
 
-  async deactivate({ tripId, vehicleId, driverId }: ActiveTripRefs): Promise<void> {
+  /** Releases the given vehicle/driver from the trip; `endTrip` also drops the trip's ref hash. */
+  async deactivate(
+    { tripId, vehicleId, driverId }: ActiveTripRefs,
+    { endTrip = true }: { endTrip?: boolean } = {},
+  ): Promise<void> {
     const pipeline = this.redis.pipeline();
+    if (endTrip) pipeline.del(tripRefKey(tripId));
     if (vehicleId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, vehicleActiveTripKey(vehicleId), tripId);
     if (driverId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, driverActiveTripKey(driverId), tripId);
     await execOrThrow(pipeline);
@@ -49,25 +93,30 @@ export class ActiveTripIndex {
   /** Makes Redis match the given active trips exactly: sets missing keys, removes stale ones. */
   async rebuild(activeTrips: ActiveTripRefs[]): Promise<{ set: number; removed: number }> {
     const expected = new Map<string, string>();
+    const expectedRefs = new Map<string, ActiveTripRefs>();
     for (const trip of activeTrips) {
       if (trip.vehicleId) expected.set(vehicleActiveTripKey(trip.vehicleId), trip.tripId);
       if (trip.driverId) expected.set(driverActiveTripKey(trip.driverId), trip.tripId);
+      expectedRefs.set(tripRefKey(trip.tripId), trip);
     }
 
     let removed = 0;
-    for (const pattern of ['trk:veh:*:active_trip', 'trk:drv:*:active_trip']) {
+    for (const pattern of ['trk:veh:*:active_trip', 'trk:drv:*:active_trip', 'trk:trip:*:ref']) {
       let cursor = '0';
       do {
         const [next, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
         cursor = next;
-        const stale = keys.filter((key) => !expected.has(key));
+        const stale = keys.filter((key) => !expected.has(key) && !expectedRefs.has(key));
         if (stale.length > 0) removed += await this.redis.del(...stale);
       } while (cursor !== '0');
     }
 
-    if (expected.size > 0) {
+    if (expected.size > 0 || expectedRefs.size > 0) {
       const pipeline = this.redis.pipeline();
       for (const [key, tripId] of expected) pipeline.set(key, tripId);
+      for (const [key, trip] of expectedRefs) {
+        pipeline.hset(key, refHash(trip));
+      }
       await execOrThrow(pipeline);
     }
     return { set: expected.size, removed };

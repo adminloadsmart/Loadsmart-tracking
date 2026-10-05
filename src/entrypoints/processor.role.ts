@@ -23,10 +23,15 @@ const STALL_THRESHOLD_MS = 30_000;
  */
 export const startProcessorRole: RoleStarter = async ({ dataSource, health, logger }) => {
   const redis = redisManager.getClient();
-  const points = createPointsModule(dataSource, redis, {
-    partitions: env.pointPartitions,
-    maxLen: env.pointStreamMaxLen,
-  });
+  const points = createPointsModule(
+    dataSource,
+    redis,
+    {
+      partitions: env.pointPartitions,
+      maxLen: env.pointStreamMaxLen,
+    },
+    { maxAccuracyM: env.phoneMaxAccuracyM },
+  );
   const sync = createSyncModule(dataSource, redis, logger);
 
   const leases = new PartitionLeaseManager({

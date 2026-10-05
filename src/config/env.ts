@@ -45,6 +45,10 @@ export const env = {
   pointPartitions: numberWithDefault('POINT_PARTITIONS', 16),
   // Approximate per-partition stream cap (XADD MAXLEN ~) — ~48h of replay at 2k vehicles.
   pointStreamMaxLen: numberWithDefault('POINT_STREAM_MAXLEN', 1_500_000),
+  // Phone GPS (docs/contracts/driver-socket.md): fixes worse than this are rejected, and a socket
+  // may send at most one `loc` per PHONE_MIN_INTERVAL_MS (the app's cadence is 15s).
+  phoneMaxAccuracyM: numberWithDefault('PHONE_MAX_ACCURACY_M', 50),
+  phoneMinIntervalMs: numberWithDefault('PHONE_MIN_INTERVAL_MS', 4000),
   // Deliveries before a failing stream entry is moved to its dead-letter stream.
   streamMaxDeliveries: numberWithDefault('STREAM_MAX_DELIVERIES', 5),
   logLevel: process.env.LOG_LEVEL ?? (nodeEnv === 'production' ? 'info' : 'debug'),

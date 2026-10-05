@@ -128,7 +128,13 @@ export class SyncService {
           })
         : await this.repository.endDeletedTrip(manager, id, version, endedAt ?? now);
 
-      return applied ? { previous, next: { tripId: id, vehicleId, driverId }, state } : false;
+      return applied
+        ? {
+            previous,
+            next: { tripId: id, tenantId, vehicleId, driverId, startedAt },
+            state,
+          }
+        : false;
     });
 
     if (result === null) return true;
@@ -164,11 +170,16 @@ export class SyncService {
       previous &&
       (previous.vehicle_id !== next.vehicleId || previous.driver_id !== next.driverId)
     ) {
-      await this.activeTrips.deactivate({
-        tripId: next.tripId,
-        vehicleId: previous.vehicle_id,
-        driverId: previous.driver_id,
-      });
+      await this.activeTrips.deactivate(
+        {
+          tripId: next.tripId,
+          tenantId: next.tenantId,
+          startedAt: next.startedAt,
+          vehicleId: previous.vehicle_id,
+          driverId: previous.driver_id,
+        },
+        { endTrip: false },
+      );
     }
     if (state === 'active') await this.activeTrips.activate(next);
     else await this.activeTrips.deactivate(next);
@@ -180,6 +191,8 @@ export class SyncService {
     const result = await this.activeTrips.rebuild(
       trips.map((trip) => ({
         tripId: trip.id,
+        tenantId: trip.tenant_id,
+        startedAt: trip.tracking_started_at,
         vehicleId: trip.vehicle_id,
         driverId: trip.driver_id,
       })),

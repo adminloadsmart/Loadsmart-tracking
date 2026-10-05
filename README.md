@@ -2,21 +2,27 @@
 
 Vehicle and trip tracking service for Loadsmart. It handles phone GPS (socket.io, every 15 s), BlackRock BR05 and SIM tracking (both pulled at intervals the org admin configures), ULIP FASTag checkpoints, the source waterfall, city and district naming via PostGIS, and the live map.
 
-The full design and phased plan are in [docs/ROADMAP.md](docs/ROADMAP.md). **Current status: Phase 0 (foundations).**
+The full design and phased plan are in [docs/ROADMAP.md](docs/ROADMAP.md). **Current status: Phase 2.** Phone GPS ingest is live: the `/driver` socket feeds the partitioned point stream, which feeds the processor and then Timescale. Loads, vehicles, drivers and places sync from the main backend.
+
+Contracts:
+
+- [docs/contracts/loadsmart-events.md](docs/contracts/loadsmart-events.md): main backend → tracking.
+- [docs/contracts/driver-socket.md](docs/contracts/driver-socket.md): driver app → tracking.
 
 ## Process roles
 
 One codebase and one Docker image. The `ROLE` env var picks what a process runs: `all`, or a comma list.
 
-| Role | What it does | Port |
-|---|---|---|
-| `api` | REST API under `/v1` | `PORT` (4100) |
-| `realtime` | socket.io: `/driver` for phone ingest (Phase 2) and `/live` for map viewers (Phase 3), websocket-only | `REALTIME_PORT` (4101) |
-| `poller` | Pulls from BlackRock, Intugine and ULIP (Phase 4+) | — |
-| `processor` | Consumes the point stream and runs the processing pipeline (Phase 1–2) | — |
-| `scheduler` | Single leader through a Redis lock; runs the dispatcher, retention and outbox jobs | — |
+| Role        | What it does                                                                                                                                           | Port                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
+| `api`       | REST API under `/v1`                                                                                                                                   | `PORT` (4100)          |
+| `realtime`  | socket.io, websocket-only: `/driver` for phone GPS ingest, and `/live` for map viewers (Phase 3). Requires `JWT_SECRET`                                | `REALTIME_PORT` (4101) |
+| `poller`    | Pulls from BlackRock, Intugine and ULIP (Phase 4+)                                                                                                     | —                      |
+| `processor` | Point stream partitions (leased, rebalanced across instances): clean → movement → motion → distance → Timescale. Also consumes `loadsmart.events` sync | —                      |
+| `scheduler` | Single leader through a Redis lock; runs the dispatcher, retention and outbox jobs                                                                     | —                      |
 
 Every process also serves these on `OPS_PORT` (9100):
+
 - `/healthz`: liveness.
 - `/readyz`: Postgres, Redis and per-role checks; returns 503 with details when one fails.
 - `/metrics`: Prometheus.
@@ -40,14 +46,15 @@ To run a single role, start it with `ROLE` set, for example: `ROLE=scheduler OPS
 
 ## Scripts
 
-| Script | |
-|---|---|
-| `npm run build` / `npm start` | Compile with the TS7 native compiler / run `dist` |
-| `npm run lint` / `npm test` | ESLint, same rules as the main backend / vitest. The Redis tests skip if Redis isn't up |
-| `npm run migration:create -- src/db/migrations/Name` | New empty migration. Use raw SQL for Timescale/PostGIS DDL |
-| `npm run migration:run` / `migration:revert` | Apply or revert migrations (ts-node) |
-| `npm run migration:run:prod` | Apply migrations from compiled `dist` (deploys and CI) |
-| `npm run infra:up` / `infra:down` | Start or stop the local Postgres and Redis |
+| Script                                                                        |                                                                                         |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `npm run build` / `npm start`                                                 | Compile with the TS7 native compiler / run `dist`                                       |
+| `npm run lint` / `npm test`                                                   | ESLint, same rules as the main backend / vitest. The Redis tests skip if Redis isn't up |
+| `npm run migration:create -- src/db/migrations/Name`                          | New empty migration. Use raw SQL for Timescale/PostGIS DDL                              |
+| `npm run migration:run` / `migration:revert`                                  | Apply or revert migrations (ts-node)                                                    |
+| `npm run migration:run:prod`                                                  | Apply migrations from compiled `dist` (deploys and CI)                                  |
+| `npm run infra:up` / `infra:down`                                             | Start or stop the local Postgres and Redis                                              |
+| `npx tsx scripts/simulate-phones.ts --phones 2000 --duration 600 --burst 0.2` | Load-test the `/driver` socket against a running service                                |
 
 ## Docker
 
@@ -61,10 +68,12 @@ Migrations are a separate step and never run on boot: `docker run --rm <image> n
 ## Conventions
 
 These mirror the main `loadsmart` backend:
+
 - Express 5, TypeORM with migrations only (`synchronize: false`), zod validation.
 - `AppError` subclasses, with the `{ data }` / `{ error }` response shapes.
 - `createXModule(dataSource, deps)` factories wired by hand in `src/composition-root.ts`.
 
 Additions specific to this service:
+
 - pino for structured logs, prom-client for metrics, and OpenTelemetry (enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` is set).
 - GPS points will travel on partitioned Redis Streams. BullMQ is only for unordered jobs.

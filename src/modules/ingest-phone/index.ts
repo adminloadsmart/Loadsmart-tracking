@@ -1,0 +1,42 @@
+import type Redis from 'ioredis';
+import type { Logger } from 'pino';
+import type { Namespace } from 'socket.io';
+import { DataSource } from 'typeorm';
+import type { PointPublisher } from '../points';
+import type { ActiveTripIndex } from '../sync';
+import { createDriverSocketAuth, createTokenBlocklist } from './driver-socket-auth';
+import { DriverSocketOptions, registerDriverNamespace } from './driver-socket.handler';
+import { TripResolver } from './trip-resolver';
+import { TripRepository } from './trip.repository';
+
+export interface IngestPhoneDeps {
+  dataSource: DataSource;
+  /** The main loadsmart backend's Redis (token blocklist). */
+  mainRedis: Redis;
+  activeTrips: ActiveTripIndex;
+  publisher: PointPublisher;
+  jwtSecret: string;
+  logger: Logger;
+  options: DriverSocketOptions;
+}
+
+/** Wires the /driver socket.io namespace: handshake auth + loc / loc:batch ingest. */
+export function createIngestPhoneModule(deps: IngestPhoneDeps) {
+  const resolver = new TripResolver(deps.activeTrips, new TripRepository(deps.dataSource));
+  const isBlocked = createTokenBlocklist(deps.mainRedis, deps.logger);
+
+  return {
+    attach(namespace: Namespace): void {
+      namespace.use(createDriverSocketAuth({ jwtSecret: deps.jwtSecret, isBlocked }));
+      registerDriverNamespace(namespace, {
+        publisher: deps.publisher,
+        resolver,
+        logger: deps.logger,
+        options: deps.options,
+      });
+    },
+  };
+}
+
+export type { Ack } from './driver-socket.handler';
+export type { DriverIdentity } from './driver-socket-auth';

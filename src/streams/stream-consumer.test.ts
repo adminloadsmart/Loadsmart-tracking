@@ -88,7 +88,10 @@ describe.skipIf(!available)('GroupConsumer (real Redis)', () => {
     await redis.xadd(stream, '*', 'n', 'bad');
     await redis.xadd(stream, '*', 'n', 'ok-2');
 
-    await waitFor(async () => (await redis.xlen(deadLetterKey(stream))) === 1);
+    // The three entries may arrive in one batch or several — wait for both outcomes.
+    await waitFor(
+      async () => handled.length === 2 && (await redis.xlen(deadLetterKey(stream))) === 1,
+    );
     expect(handled).toEqual(['ok-1', 'ok-2']);
     const [[, fields]] = (await redis.xrange(deadLetterKey(stream), '-', '+')) as Array<
       [string, string[]]
