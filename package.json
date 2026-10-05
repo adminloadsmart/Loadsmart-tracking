@@ -1,0 +1,80 @@
+{
+  "name": "loadsmart-tracking",
+  "version": "0.1.0",
+  "description": "Loadsmart vehicle & trip tracking service (phone GPS, BlackRock BR05, SIM tracking, ULIP)",
+  "private": true,
+  "main": "dist/entrypoints/main.js",
+  "scripts": {
+    "build": "node ./node_modules/typescript-native/bin/tsc -p tsconfig.json",
+    "start": "node -r reflect-metadata dist/entrypoints/main.js",
+    "dev": "ts-node-dev --respawn --transpile-only -r reflect-metadata src/entrypoints/main.ts",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typeorm": "ts-node -r reflect-metadata ./node_modules/typeorm/cli.js -d src/db/data-source.ts",
+    "migration:generate": "npm run typeorm -- migration:generate",
+    "migration:create": "node ./node_modules/typeorm/cli.js migration:create",
+    "migration:run": "npm run typeorm -- migration:run",
+    "migration:revert": "npm run typeorm -- migration:revert",
+    "migration:run:prod": "node -r reflect-metadata ./node_modules/typeorm/cli.js migration:run -d dist/db/data-source.js",
+    "infra:up": "docker compose -f docker/docker-compose.yml up -d --wait",
+    "infra:down": "docker compose -f docker/docker-compose.yml down"
+  },
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=24"
+  },
+  "lint-staged": {
+    "**/*.ts": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "@opentelemetry/auto-instrumentations-node": "^0.80.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
+    "bullmq": "^6.3.4",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "helmet": "^8.3.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.22.0",
+    "pino": "^10.4.0",
+    "prom-client": "^15.1.3",
+    "reflect-metadata": "^0.2.2",
+    "socket.io": "^4.8.4",
+    "typeorm": "^1.1.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.2",
+    "@types/pg": "^8.20.3",
+    "@types/supertest": "^7.2.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-boundaries": "^7.1.0",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-prettier": "^5.5.6",
+    "eslint-plugin-security": "^4.0.1",
+    "globals": "^17.9.0",
+    "pino-pretty": "^13.2.0",
+    "prettier": "^3.9.6",
+    "socket.io-client": "^4.8.4",
+    "supertest": "^7.2.2",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.66.0",
+    "typescript-native": "npm:typescript@^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

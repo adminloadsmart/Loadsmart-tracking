@@ -1,0 +1,63 @@
+# Local infrastructure for loadsmart-tracking.
+# S3-compatible storage for the raw-payload archive is added in Phase 1 (MinIO's public images are
+# no longer pullable, so pick a replacement then).
+# Host ports are offset from the main loadsmart backend's (5432/6379) so both can run side by side.
+#   docker compose -f docker/docker-compose.yml up -d --wait            # infra only
+#   docker compose -f docker/docker-compose.yml --profile app up -d     # + the service itself (ROLE=all)
+name: loadsmart-tracking
+
+services:
+  postgres:
+    # TimescaleDB + PostGIS in one image (docs/ROADMAP.md §6).
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tracking
+    ports:
+      - '5433:5432'
+    volumes:
+      - pgdata:/home/postgres/pgdata
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d tracking']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # AOF so streams/due-queues survive a container restart in dev, like the managed Redis in prod.
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '6380:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  tracking:
+    profiles: ['app']
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      NODE_ENV: production
+      ROLE: all
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/tracking
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '4100:4100'
+      - '4101:4101'
+      - '9100:9100'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
