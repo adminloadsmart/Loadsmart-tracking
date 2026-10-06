@@ -2,6 +2,7 @@ import Redis from 'ioredis';
 import pino from 'pino';
 import { Client } from 'pg';
 import { DataSource, MigrationInterface } from 'typeorm';
+import { MAIN_SCHEMA_SQL, MAIN_TABLES } from './main-schema';
 
 /**
  * Integration-test infrastructure: an isolated `tracking_test` database (created and migrated on
@@ -82,6 +83,8 @@ export async function migratedDatabase(name: string, { plain = false } = {}): Pr
       `DROP EXTENSION IF EXISTS timescaledb_toolkit, timescaledb, postgis_topology, postgis CASCADE`,
     );
   }
+  // The main backend's tables live in the same database; tests get the slice tracking reads.
+  await dataSource.query(MAIN_SCHEMA_SQL);
   const previous = process.env.TRACKING_DB_EXTENSIONS;
   if (plain) process.env.TRACKING_DB_EXTENSIONS = 'none';
   try {
@@ -98,9 +101,9 @@ export async function migratedDatabase(name: string, { plain = false } = {}): Pr
 
 export async function truncateTrackingTables(ds: DataSource): Promise<void> {
   await ds.query(
-    `TRUNCATE tracking.location_points, tracking.location_points_short, tracking.trips,
-              tracking.vehicles, tracking.drivers, tracking.places, tracking.episodes,
-              tracking.alerts, tracking.rule_settings, tracking.alert_outbox`,
+    `TRUNCATE tracking.location_points, tracking.location_points_short, tracking.episodes,
+              tracking.alerts, tracking.rule_settings, tracking.alert_outbox, tracking.trip_routes,
+              tracking.trip_route_status, tracking.place_geocodes, ${MAIN_TABLES}`,
   );
 }
 

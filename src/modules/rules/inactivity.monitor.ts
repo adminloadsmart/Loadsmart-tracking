@@ -1,7 +1,7 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import type { PointSource } from '../points';
-import { vehicleActiveTripKey } from '../sync/active-trip-index';
+import { vehicleActiveTripKey } from '../trips';
 import { RULE_DEFAULTS } from './defaults';
 import { inactiveFlagKey, lastSeenKey, RuleEngine } from './rule-engine';
 import { alertId, episodeId, num } from './rule-helpers';

@@ -27,24 +27,32 @@ export class TripRoutes1759680000000 implements MigrationInterface {
         UNIQUE (trip_id, version)
       )`);
 
-    // Route-planning status per trip, so the planner retries with back-off and the API can say
-    // why a trip has no ETA (no API key, delivery point not geocodable, …).
-    await queryRunner.query(`ALTER TABLE tracking.trips ADD COLUMN route_status text`);
-    await queryRunner.query(
-      `ALTER TABLE tracking.trips ADD COLUMN route_attempts int NOT NULL DEFAULT 0`,
-    );
-    await queryRunner.query(`ALTER TABLE tracking.trips ADD COLUMN route_checked_at timestamptz`);
+    // Route-planning status per trip (trip id = the main backend's load id), so the planner
+    // retries with back-off and the API can say why a trip has no ETA (no API key, delivery point
+    // not geocodable, …).
+    await queryRunner.query(`
+      CREATE TABLE tracking.trip_route_status (
+        trip_id     uuid PRIMARY KEY,
+        status      text        NOT NULL,
+        attempts    int         NOT NULL DEFAULT 0,
+        checked_at  timestamptz NOT NULL DEFAULT now()
+      )`);
 
-    await queryRunner.query(`ALTER TABLE tracking.places ADD COLUMN geocoded_at timestamptz`);
-    await queryRunner.query(`ALTER TABLE tracking.places ADD COLUMN geocode_source text`);
+    // The main backend stores delivery points as addresses only: geocoded coordinates are
+    // tracking's own cache, one row per place, filled once.
+    await queryRunner.query(`
+      CREATE TABLE tracking.place_geocodes (
+        place_id     uuid PRIMARY KEY,
+        lat          double precision NOT NULL,
+        lng          double precision NOT NULL,
+        source       text        NOT NULL,
+        geocoded_at  timestamptz NOT NULL DEFAULT now()
+      )`);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`ALTER TABLE tracking.places DROP COLUMN geocode_source`);
-    await queryRunner.query(`ALTER TABLE tracking.places DROP COLUMN geocoded_at`);
-    await queryRunner.query(`ALTER TABLE tracking.trips DROP COLUMN route_checked_at`);
-    await queryRunner.query(`ALTER TABLE tracking.trips DROP COLUMN route_attempts`);
-    await queryRunner.query(`ALTER TABLE tracking.trips DROP COLUMN route_status`);
+    await queryRunner.query(`DROP TABLE IF EXISTS tracking.place_geocodes`);
+    await queryRunner.query(`DROP TABLE IF EXISTS tracking.trip_route_status`);
     await queryRunner.query(`DROP TABLE IF EXISTS tracking.trip_routes`);
   }
 }

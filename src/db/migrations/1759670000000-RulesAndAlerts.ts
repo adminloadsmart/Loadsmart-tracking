@@ -99,19 +99,9 @@ export class RulesAndAlerts1759670000000 implements MigrationInterface {
         payload     jsonb       NOT NULL,
         created_at  timestamptz NOT NULL DEFAULT now()
       )`);
-
-    // Inputs some rules need from the main backend (see docs/contracts/loadsmart-events.md).
-    await queryRunner.query(`ALTER TABLE tracking.vehicles ADD COLUMN body_type text`);
-    await queryRunner.query(`ALTER TABLE tracking.trips ADD COLUMN customer_id uuid`);
-    await queryRunner.query(
-      `ALTER TABLE tracking.trips ADD COLUMN promised_delivery_at timestamptz`,
-    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`ALTER TABLE tracking.trips DROP COLUMN promised_delivery_at`);
-    await queryRunner.query(`ALTER TABLE tracking.trips DROP COLUMN customer_id`);
-    await queryRunner.query(`ALTER TABLE tracking.vehicles DROP COLUMN body_type`);
     await queryRunner.query(`DROP TABLE IF EXISTS tracking.alert_outbox`);
     await queryRunner.query(`DROP TABLE IF EXISTS tracking.rule_settings`);
     await queryRunner.query(`DROP TABLE IF EXISTS tracking.alerts`);

@@ -1,4 +1,4 @@
-import type { ActiveTripIndex } from '../sync';
+import type { ActiveTripIndex } from '../trips';
 import { TripRepository } from './trip.repository';
 
 export interface ResolvedTrip {

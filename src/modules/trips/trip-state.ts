@@ -1,9 +1,20 @@
 import { uuidV5 } from '../../shared/utils/uuid';
-import { LoadStatus } from './sync.contract';
+/** loads.loads.status in the main backend (its LOAD_STATUSES), in lifecycle order. */
+export const LOAD_STATUSES = [
+  'created',
+  'assigned',
+  'loading_confirmed',
+  'at_plant',
+  'in_transit',
+  'reached_delivery_point',
+  'delivered',
+  'closed',
+] as const;
+export type LoadStatus = (typeof LOAD_STATUSES)[number];
 
 export type TrackingState = 'pending' | 'active' | 'ended';
 
-const ACTIVE_STATUSES: readonly LoadStatus[] = [
+export const ACTIVE_STATUSES: readonly LoadStatus[] = [
   'loading_confirmed',
   'at_plant',
   'in_transit',

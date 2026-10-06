@@ -5,7 +5,7 @@ import type { PointSource } from '../points';
 import type { ProcessedPoint } from '../processing/pipeline';
 import type { RouteStore } from '../routes/route.store';
 import type { TripRoutes } from '../routes/trip-routes';
-import type { ActiveTripIndex } from '../sync';
+import type { ActiveTripIndex } from '../trips';
 import { mergeParams, RULE_DEFAULTS } from './defaults';
 import { AlertChange, RulesRepository, VehicleEffects } from './rules.repository';
 import { Effects, FixRule, RuleContext, RuleFix, RuleId } from './rule.types';

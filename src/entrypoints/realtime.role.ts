@@ -6,7 +6,7 @@ import { createRedisConnection } from '../db/redis-connection';
 import { createIngestPhoneModule } from '../modules/ingest-phone';
 import { createLiveModule } from '../modules/live';
 import { createPointsModule } from '../modules/points';
-import { createSyncModule } from '../modules/sync';
+import { createTripsModule } from '../modules/trips';
 import { createTrackingApiModule } from '../modules/tracking-api';
 import { closeServer, listen } from '../shared/lifecycle/http-server';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
@@ -36,7 +36,7 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
     partitions: env.pointPartitions,
     maxLen: env.pointStreamMaxLen,
   });
-  const { activeTrips } = createSyncModule(dataSource, redis, logger);
+  const { activeTrips } = createTripsModule(dataSource, redis, logger);
   createIngestPhoneModule({
     dataSource,
     mainRedis,

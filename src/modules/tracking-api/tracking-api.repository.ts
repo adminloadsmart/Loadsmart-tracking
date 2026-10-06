@@ -3,6 +3,8 @@ import { detectFeatures, DbFeatures } from '../../db/db-features';
 import { encodePolyline, simplifyPolyline } from '../routes/route-geometry';
 import type { TenantScope } from '../../shared/auth/staff-token';
 import type { PointSource } from '../points';
+import { MainDataRepository, MainLoad, MainVehicle } from '../main-data';
+import { ACTIVE_STATUSES, LoadStatus, trackingStateFor } from '../trips';
 
 export interface VehicleRow {
   id: string;
@@ -52,6 +54,20 @@ export interface TrackPoint {
   motion: string | null;
 }
 
+const PENDING_STATUSES: readonly LoadStatus[] = ['created', 'assigned'];
+const ENDED_STATUSES: readonly LoadStatus[] = ['delivered', 'closed'];
+
+function toVehicleRow(v: MainVehicle): VehicleRow {
+  return {
+    id: v.id,
+    tenant_id: v.tenantId,
+    kind: v.kind,
+    registration_number: v.registrationNumber,
+    gps_provider: v.gpsProvider,
+    gps_enabled: v.gpsEnabled,
+  };
+}
+
 interface LineRow {
   recorded_at: Date;
   lat: number;
@@ -76,19 +92,6 @@ export interface TrackPolyline {
   last_at: Date | null;
 }
 
-const PLACE_JSON = (alias: string) =>
-  `CASE WHEN ${alias}.id IS NULL THEN NULL ELSE json_build_object(
-     'id', ${alias}.id, 'name', ${alias}.name, 'city', ${alias}.city,
-     'lat', ${alias}.lat, 'lng', ${alias}.lng) END`;
-
-/** `AND tenant_id = $n` for a tenant-scoped caller, nothing for platform admins. */
-function scopeFilter(scope: TenantScope, column: string, param: number): string {
-  return 'allTenants' in scope ? '' : `AND ${column} = $${param}`;
-}
-function scopeParams(scope: TenantScope): string[] {
-  return 'allTenants' in scope ? [] : [scope.tenantId];
-}
-
 /**
  * Read side of the tracking data. Every lookup takes the caller's TenantScope so a row outside it
  * simply isn't found (callers turn that into 404 — no "exists but forbidden" oracle).
@@ -98,61 +101,91 @@ function scopeParams(scope: TenantScope): string[] {
  * in-process from (lat, lng) rows, so no PostGIS is needed.
  */
 export class TrackingApiRepository {
-  constructor(private readonly dataSource: DataSource) {}
+  private readonly mainData: MainDataRepository;
+
+  constructor(private readonly dataSource: DataSource) {
+    this.mainData = new MainDataRepository(dataSource);
+  }
+
+  // Loads, vehicles and places are the main backend's — read through main-data, never copied.
 
   async findVehicle(scope: TenantScope, id: string): Promise<VehicleRow | null> {
-    const rows = await this.dataSource.query(
-      `SELECT id, tenant_id, kind, registration_number, gps_provider, gps_enabled
-       FROM tracking.vehicles
-       WHERE id = $1 AND deleted_at IS NULL ${scopeFilter(scope, 'tenant_id', 2)}`,
-      [id, ...scopeParams(scope)],
-    );
-    return rows[0] ?? null;
+    const vehicle = await this.mainData.vehicle(scope, id);
+    return vehicle ? toVehicleRow(vehicle) : null;
   }
 
-  listVehicles(scope: TenantScope, limit: number): Promise<VehicleRow[]> {
-    return this.dataSource.query(
-      `SELECT id, tenant_id, kind, registration_number, gps_provider, gps_enabled
-       FROM tracking.vehicles
-       WHERE deleted_at IS NULL ${scopeFilter(scope, 'tenant_id', 2)}
-       ORDER BY registration_number
-       LIMIT $1`,
-      [limit, ...scopeParams(scope)],
-    );
+  async listVehicles(scope: TenantScope, limit: number): Promise<VehicleRow[]> {
+    return (await this.mainData.vehicles(scope, limit)).map(toVehicleRow);
   }
 
-  /** Active trip per vehicle, for the given vehicles. */
+  /** Active trip (load) per vehicle, for the given vehicles. */
   async activeTripsByVehicle(vehicleIds: string[]): Promise<Map<string, string>> {
     if (vehicleIds.length === 0) return new Map();
-    const rows: Array<{ id: string; vehicle_id: string }> = await this.dataSource.query(
-      `SELECT DISTINCT ON (vehicle_id) id, vehicle_id FROM tracking.trips
-       WHERE tracking_state = 'active' AND vehicle_id = ANY($1::uuid[])
-       ORDER BY vehicle_id, tracking_started_at DESC NULLS LAST`,
-      [vehicleIds],
-    );
-    return new Map(rows.map((row) => [row.vehicle_id, row.id]));
+    const wanted = new Set(vehicleIds);
+    const result = new Map<string, string>();
+    for (const load of await this.mainData.activeLoads()) {
+      if (load.vehicleId && wanted.has(load.vehicleId) && !result.has(load.vehicleId)) {
+        result.set(load.vehicleId, load.id);
+      }
+    }
+    return result;
   }
 
   async findTrip(scope: TenantScope, id: string): Promise<TripRow | null> {
-    const rows = await this.dataSource.query(
-      `${this.tripSelect()} WHERE t.id = $1 AND t.deleted_at IS NULL ${scopeFilter(scope, 't.tenant_id', 2)}`,
-      [id, ...scopeParams(scope)],
-    );
-    return rows[0] ?? null;
+    const load = await this.mainData.load(scope, id);
+    return load ? (await this.toTripRows([load]))[0] : null;
   }
 
-  listTrips(
+  async listTrips(
     scope: TenantScope,
     state: 'pending' | 'active' | 'ended',
     limit: number,
   ): Promise<TripRow[]> {
-    return this.dataSource.query(
-      `${this.tripSelect()}
-       WHERE t.tracking_state = $1 AND t.deleted_at IS NULL ${scopeFilter(scope, 't.tenant_id', 3)}
-       ORDER BY t.tracking_started_at DESC NULLS LAST, t.load_code DESC
-       LIMIT $2`,
-      [state, limit, ...scopeParams(scope)],
+    const statuses =
+      state === 'active'
+        ? ACTIVE_STATUSES
+        : state === 'pending'
+          ? PENDING_STATUSES
+          : ENDED_STATUSES;
+    return this.toTripRows(await this.mainData.loadsByStatus(scope, statuses, limit));
+  }
+
+  private async toTripRows(loads: MainLoad[]): Promise<TripRow[]> {
+    const places = await this.mainData.places(
+      loads.map((l) => l.loadingPointId).filter((x): x is string => !!x),
+      loads.map((l) => l.deliveryPointId).filter((x): x is string => !!x),
     );
+    const statusRows: Array<{ trip_id: string; status: string }> = loads.length
+      ? await this.dataSource.query(
+          `SELECT trip_id, status FROM tracking.trip_route_status WHERE trip_id = ANY($1::uuid[])`,
+          [loads.map((l) => l.id)],
+        )
+      : [];
+    const routeStatus = new Map(statusRows.map((r) => [r.trip_id, r.status]));
+    const place = (id: string | null): PlaceRow | null => {
+      const p = id ? places.get(id) : undefined;
+      return p ? { id: p.id, name: p.name, city: p.city, lat: p.lat, lng: p.lng } : null;
+    };
+    return loads.map((load) => ({
+      id: load.id,
+      tenant_id: load.tenantId,
+      load_code: load.code,
+      load_status: load.status,
+      source_type: load.sourceType,
+      vehicle_id: load.vehicleId,
+      vehicle_number: load.vehicleNumber,
+      driver_id: load.driverId,
+      driver_name: load.driverName,
+      driver_phone: load.driverNumber,
+      tracking_state: trackingStateFor(load.status, false),
+      tracking_started_at: load.startedAt,
+      tracking_ended_at: load.endedAt,
+      milestones: load.milestones,
+      route_status: routeStatus.get(load.id) ?? null,
+      promised_delivery_at: load.promisedDeliveryAt,
+      origin: place(load.loadingPointId),
+      destination: place(load.deliveryPointId),
+    }));
   }
 
   /** Raw trip points in time order (playback). */
@@ -226,16 +259,5 @@ export class TrackingApiRepository {
   private features(): Promise<DbFeatures> {
     this.featuresPromise ??= detectFeatures(this.dataSource);
     return this.featuresPromise;
-  }
-
-  private tripSelect(): string {
-    return `SELECT t.id, t.tenant_id, t.load_code, t.load_status, t.source_type, t.vehicle_id,
-              t.vehicle_number, t.driver_id, t.driver_name, t.driver_phone, t.tracking_state,
-              t.tracking_started_at, t.tracking_ended_at, t.milestones, t.route_status,
-              t.promised_delivery_at,
-              ${PLACE_JSON('o')} AS origin, ${PLACE_JSON('d')} AS destination
-       FROM tracking.trips t
-       LEFT JOIN tracking.places o ON o.id = t.origin_place_id
-       LEFT JOIN tracking.places d ON d.id = t.destination_place_id`;
   }
 }

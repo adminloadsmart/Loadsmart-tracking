@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
+import { MainDataRepository } from '../main-data';
 
 export interface TripNeedingRoute {
   id: string;
@@ -38,42 +39,87 @@ export interface InTransitTrip {
 const MAX_BACKOFF_MIN = 360;
 
 export class RoutesRepository {
-  constructor(private readonly dataSource: DataSource) {}
+  private readonly mainData: MainDataRepository;
 
-  /** Active trips with no route yet, whose last attempt is older than their back-off. */
-  tripsNeedingRoute(limit: number): Promise<TripNeedingRoute[]> {
-    return this.dataSource.query(
-      `SELECT t.id, t.tenant_id, t.promised_delivery_at, t.route_attempts,
-              o.id AS origin_id, o.lat AS origin_lat, o.lng AS origin_lng,
-              d.id AS destination_id, d.lat AS destination_lat, d.lng AS destination_lng,
-              concat_ws(', ', NULLIF(d.name, ''), d.address, d.city, d.state, d.pin_code) AS destination_address
-       FROM tracking.trips t
-       LEFT JOIN tracking.places o ON o.id = t.origin_place_id
-       LEFT JOIN tracking.places d ON d.id = t.destination_place_id
-       WHERE t.tracking_state = 'active' AND t.deleted_at IS NULL
-         AND NOT EXISTS (SELECT 1 FROM tracking.trip_routes r WHERE r.trip_id = t.id)
-         AND (t.route_checked_at IS NULL OR t.route_checked_at <
-              now() - make_interval(mins => LEAST(${MAX_BACKOFF_MIN}, 5 * power(2, t.route_attempts)::int)))
-       ORDER BY t.tracking_started_at NULLS LAST
-       LIMIT $1`,
-      [limit],
+  constructor(private readonly dataSource: DataSource) {
+    this.mainData = new MainDataRepository(dataSource);
+  }
+
+  /**
+   * Active trips (the main backend's loads) with no route yet, whose last planning attempt is
+   * older than their back-off — with their origin / destination from main's places.
+   */
+  async tripsNeedingRoute(limit: number): Promise<TripNeedingRoute[]> {
+    const active = await this.mainData.activeLoads();
+    if (active.length === 0) return [];
+    const ids = active.map((l) => l.id);
+    const [routed, statuses] = await Promise.all([
+      this.dataSource.query(
+        `SELECT DISTINCT trip_id FROM tracking.trip_routes WHERE trip_id = ANY($1::uuid[])`,
+        [ids],
+      ),
+      this.dataSource.query(
+        `SELECT trip_id, attempts, checked_at FROM tracking.trip_route_status WHERE trip_id = ANY($1::uuid[])`,
+        [ids],
+      ),
+    ]);
+    const hasRoute = new Set(routed.map((r: { trip_id: string }) => r.trip_id));
+    const status = new Map<string, { attempts: number; checked_at: Date }>(
+      statuses.map((r: { trip_id: string; attempts: number; checked_at: Date }) => [r.trip_id, r]),
     );
+    const now = Date.now();
+    const due = active
+      .filter((load) => {
+        if (hasRoute.has(load.id)) return false;
+        const st = status.get(load.id);
+        if (!st) return true;
+        const backoffMin = Math.min(MAX_BACKOFF_MIN, 5 * 2 ** st.attempts);
+        return now - new Date(st.checked_at).getTime() > backoffMin * 60_000;
+      })
+      .sort((a, b) => (a.startedAt?.getTime() ?? Infinity) - (b.startedAt?.getTime() ?? Infinity))
+      .slice(0, limit);
+
+    const places = await this.mainData.places(
+      due.map((l) => l.loadingPointId).filter((x): x is string => !!x),
+      due.map((l) => l.deliveryPointId).filter((x): x is string => !!x),
+    );
+    return due.map((load) => {
+      const origin = load.loadingPointId ? places.get(load.loadingPointId) : undefined;
+      const destination = load.deliveryPointId ? places.get(load.deliveryPointId) : undefined;
+      return {
+        id: load.id,
+        tenant_id: load.tenantId,
+        promised_delivery_at: load.promisedDeliveryAt,
+        route_attempts: status.get(load.id)?.attempts ?? 0,
+        origin_id: origin?.id ?? null,
+        origin_lat: origin?.lat ?? null,
+        origin_lng: origin?.lng ?? null,
+        destination_id: destination?.id ?? null,
+        destination_lat: destination?.lat ?? null,
+        destination_lng: destination?.lng ?? null,
+        destination_address: destination
+          ? [destination.name, destination.address].filter(Boolean).join(', ')
+          : null,
+      };
+    });
   }
 
   async setRouteStatus(tripId: string, status: string, attempted: boolean): Promise<void> {
     await this.dataSource.query(
-      `UPDATE tracking.trips
-         SET route_status = $2, route_checked_at = now(),
-             route_attempts = route_attempts + CASE WHEN $3 THEN 1 ELSE 0 END
-       WHERE id = $1`,
+      `INSERT INTO tracking.trip_route_status (trip_id, status, attempts, checked_at)
+       VALUES ($1, $2, CASE WHEN $3 THEN 1 ELSE 0 END, now())
+       ON CONFLICT (trip_id) DO UPDATE
+         SET status = EXCLUDED.status, checked_at = now(),
+             attempts = tracking.trip_route_status.attempts + CASE WHEN $3 THEN 1 ELSE 0 END`,
       [tripId, status, attempted],
     );
   }
 
+  /** Delivery-point coordinates are tracking's own cache (main stores only the address). */
   async saveGeocode(placeId: string, lat: number, lng: number, source: string): Promise<void> {
     await this.dataSource.query(
-      `UPDATE tracking.places SET lat = $2, lng = $3, geocoded_at = now(), geocode_source = $4
-       WHERE id = $1 AND lat IS NULL`,
+      `INSERT INTO tracking.place_geocodes (place_id, lat, lng, source) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (place_id) DO NOTHING`,
       [placeId, lat, lng, source],
     );
   }
@@ -120,25 +166,25 @@ export class RoutesRepository {
     );
   }
 
-  /** Trips the DELAY rule evaluates: active, load in transit, with a route. */
-  inTransitTripsWithRoute(): Promise<InTransitTrip[]> {
-    return this.dataSource.query(
-      `SELECT t.id, t.tenant_id, t.vehicle_id, t.tracking_started_at, t.promised_delivery_at
-       FROM tracking.trips t
-       WHERE t.tracking_state = 'active' AND t.load_status = 'in_transit' AND t.vehicle_id IS NOT NULL
-         AND EXISTS (SELECT 1 FROM tracking.trip_routes r WHERE r.trip_id = t.id)`,
+  /** Trips the DELAY rule evaluates: load in transit, with a vehicle and a planned route. */
+  async inTransitTripsWithRoute(): Promise<InTransitTrip[]> {
+    const loads = (await this.mainData.loadsByStatus(null, ['in_transit'], 50_000)).filter(
+      (l) => l.vehicleId,
     );
-  }
-
-  async tripInfo(
-    tripIds: string[],
-  ): Promise<Map<string, { tracking_state: string; load_status: string }>> {
-    if (tripIds.length === 0) return new Map();
-    const rows: Array<{ id: string; tracking_state: string; load_status: string }> =
-      await this.dataSource.query(
-        `SELECT id, tracking_state, load_status FROM tracking.trips WHERE id = ANY($1::uuid[])`,
-        [tripIds],
-      );
-    return new Map(rows.map((row) => [row.id, row]));
+    if (loads.length === 0) return [];
+    const routed: Array<{ trip_id: string }> = await this.dataSource.query(
+      `SELECT DISTINCT trip_id FROM tracking.trip_routes WHERE trip_id = ANY($1::uuid[])`,
+      [loads.map((l) => l.id)],
+    );
+    const hasRoute = new Set(routed.map((r) => r.trip_id));
+    return loads
+      .filter((l) => hasRoute.has(l.id))
+      .map((l) => ({
+        id: l.id,
+        tenant_id: l.tenantId,
+        vehicle_id: l.vehicleId!,
+        tracking_started_at: l.startedAt,
+        promised_delivery_at: l.promisedDeliveryAt,
+      }));
   }
 }

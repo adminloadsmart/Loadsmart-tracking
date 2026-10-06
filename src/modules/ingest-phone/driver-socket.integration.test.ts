@@ -18,8 +18,8 @@ import {
 import { allPointStreamKeys } from '../../streams/partitioner';
 import { createPointsModule } from '../points';
 import { tripFraudKey, tripMetricsKey, vehicleLatestKey } from '../processing/vehicle-state.store';
-import { createSyncModule } from '../sync';
-import { parseSnapshot } from '../sync/sync.contract';
+import { seedLoad, updateLoad } from '../../__tests__/support/main-schema';
+import { createTripsModule } from '../trips';
 import { createIngestPhoneModule } from './index';
 
 const available = await infraAvailable();
@@ -34,21 +34,21 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
   let io: Server;
   let url: string;
   let points: ReturnType<typeof createPointsModule>;
-  let sync: ReturnType<typeof createSyncModule>;
+  let trips: ReturnType<typeof createTripsModule>;
   const clients: ClientSocket[] = [];
 
   beforeAll(async () => {
     ds = await testDataSource();
     redis = testRedis();
     points = createPointsModule(ds, redis, { partitions: PARTITIONS, maxLen: 10_000 });
-    sync = createSyncModule(ds, redis, silentLogger);
+    trips = createTripsModule(ds, redis, silentLogger);
 
     httpServer = createServer();
     io = new Server(httpServer, { transports: ['websocket'] });
     createIngestPhoneModule({
       dataSource: ds,
       mainRedis: redis,
-      activeTrips: sync.activeTrips,
+      activeTrips: trips.activeTrips,
       publisher: points.publisher,
       jwtSecret: SECRET,
       logger: silentLogger,
@@ -96,51 +96,21 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     });
   }
 
-  /** Puts the driver on an active trip via the real sync path (as the main backend would). */
+  /** Puts the driver on an active load in the main tables; the trip watcher indexes it. */
   async function startTrip(driverId: string, startedMinutesAgo = 60) {
-    const tripId = randomUUID();
-    const vehicleId = randomUUID();
-    const startedAt = new Date(Date.now() - startedMinutesAgo * 60_000).toISOString();
-    const payload = {
-      code: 'LOAD-1',
-      status: 'in_transit',
-      sourceType: 'own_fleet',
-      vehicleId,
-      vehicleNumber: 'MH12AB1234',
+    const seeded = await seedLoad(ds, {
+      tenantId: TENANT,
       driverId,
-      driverNumber: null,
-      driverName: null,
-      transporterId: null,
-      loadingPointId: null,
-      deliveryPointId: null,
-      milestones: {
-        loadingConfirmedAt: startedAt,
-        atPlantAt: null,
-        inTransitAt: null,
-        reachedDeliveryPointAt: null,
-        deliveredAt: null,
-      },
-    };
-    const apply = (version: number, extra: object = {}) =>
-      sync.service.apply(
-        parseSnapshot({
-          type: 'load',
-          id: tripId,
-          tenantId: TENANT,
-          version: String(version),
-          deleted: 'false',
-          payload: JSON.stringify({ ...payload, ...extra }),
-        }),
-      );
-    await apply(1);
+      startedAt: new Date(Date.now() - startedMinutesAgo * 60_000),
+    });
+    await trips.watcher.poll();
     return {
-      tripId,
-      vehicleId,
-      end: () =>
-        apply(2, {
-          status: 'delivered',
-          milestones: { ...payload.milestones, deliveredAt: new Date().toISOString() },
-        }),
+      tripId: seeded.loadId,
+      vehicleId: seeded.vehicleId!,
+      end: async () => {
+        await updateLoad(ds, seeded.loadId, { status: 'delivered', delivered_at: new Date() });
+        await trips.watcher.poll();
+      },
     };
   }
 

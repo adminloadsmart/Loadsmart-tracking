@@ -4,13 +4,17 @@ import { createRedisConnection } from '../db/redis-connection';
 import { PointRetentionJob } from '../modules/points/retention.job';
 import { createRoutesModule } from '../modules/routes';
 import { createRulesModule, OutboxRelay } from '../modules/rules';
-import { createSyncModule } from '../modules/sync';
+import { createTripsModule } from '../modules/trips';
 import { LeaderLock } from '../shared/lifecycle/leader-lock';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
 
 export const SCHEDULER_LEADER_KEY = 'tracking:scheduler:leader';
 
 const RULES_TICK_MS = 60_000;
+// Loads (= trips) are read from the main backend's table: poll changes, plus a periodic full
+// rebuild as a safety net for writes that don't touch updated_at.
+const TRIP_WATCH_MS = 5_000;
+const TRIP_REBUILD_MS = 10 * 60_000;
 const OUTBOX_RELAY_MS = 2_000;
 const ROUTE_PLANNER_MS = 30_000;
 const RETENTION_MS = 60 * 60_000;
@@ -20,7 +24,7 @@ const RETENTION_MS = 60 * 60_000;
 // outbox relay to the main backend. Standbys are healthy — they're ready to take over — so readiness passes either way.
 export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logger }) => {
   const redis = redisManager.getClient();
-  const sync = createSyncModule(dataSource, redis, logger);
+  const trips = createTripsModule(dataSource, redis, logger);
   const routes = createRoutesModule({
     dataSource,
     redis,
@@ -30,7 +34,7 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
   const rules = createRulesModule({
     dataSource,
     redis,
-    activeTrips: sync.activeTrips,
+    activeTrips: trips.activeTrips,
     logger,
     routes,
   });
@@ -45,14 +49,16 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
     // The Redis index is derived from Postgres; reconciling on every takeover repairs it after a
     // Redis flush/failover or any missed update while no leader was running.
     onAcquired: () => {
-      sync.service
-        .rebuildActiveTripIndex()
+      trips.watcher
+        .rebuild()
         .catch((err) => logger.error({ err }, 'Active-trip index rebuild failed'));
     },
   });
   await lock.start();
 
   const loops = [
+    leaderLoop('trip-watcher', TRIP_WATCH_MS, () => trips.watcher.poll()),
+    leaderLoop('trip-index-rebuild', TRIP_REBUILD_MS, () => trips.watcher.rebuild()),
     leaderLoop('rules-tick', RULES_TICK_MS, () => rules.tick()),
     leaderLoop('route-planner', ROUTE_PLANNER_MS, () => routes.planner.planPending()),
     leaderLoop('point-retention', RETENTION_MS, () => retention.run()),

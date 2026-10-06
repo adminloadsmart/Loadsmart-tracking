@@ -5,7 +5,7 @@
   "private": true,
   "main": "dist/entrypoints/main.js",
   "scripts": {
-    "build": "node ./node_modules/typescript-native/bin/tsc -p tsconfig.json",
+    "build": "rm -rf dist && node ./node_modules/typescript-native/bin/tsc -p tsconfig.json",
     "start": "node -r reflect-metadata dist/entrypoints/main.js",
     "dev": "ts-node-dev --respawn --transpile-only -r reflect-metadata src/entrypoints/main.ts",
     "lint": "eslint .",

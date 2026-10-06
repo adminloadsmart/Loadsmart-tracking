@@ -1,5 +1,6 @@
 import { returningRows } from '../../db/returning';
 import { DataSource, EntityManager } from 'typeorm';
+import { MainDataRepository } from '../main-data';
 import { AlertOp, EpisodeOp, RuleId, SEVERITY_RANK, Severity } from './rule.types';
 
 export interface VehicleEffects {
@@ -52,7 +53,11 @@ const ts = (ms: number) => new Date(ms);
  * (deterministic ids, conditional updates), so a redelivered stream batch changes nothing.
  */
 export class RulesRepository {
-  constructor(private readonly dataSource: DataSource) {}
+  private readonly mainData: MainDataRepository;
+
+  constructor(private readonly dataSource: DataSource) {
+    this.mainData = new MainDataRepository(dataSource);
+  }
 
   async applyEffects(batch: VehicleEffects[]): Promise<AlertChange[]> {
     if (batch.every((v) => v.episodes.length === 0 && v.alerts.length === 0)) return [];
@@ -241,14 +246,12 @@ export class RulesRepository {
     );
   }
 
+  /** Vehicle facts the rules need (tanker → lower speed limit, stricter inactivity), read from
+   *  the main backend's vehicle master; market trucks aren't in it and get the defaults. */
   async loadVehicleProfiles(
     vehicleIds: string[],
   ): Promise<Map<string, { bodyType: string | null }>> {
-    if (vehicleIds.length === 0) return new Map();
-    const rows: Array<{ id: string; body_type: string | null }> = await this.dataSource.query(
-      `SELECT id, body_type FROM tracking.vehicles WHERE id = ANY($1::uuid[])`,
-      [vehicleIds],
-    );
-    return new Map(rows.map((row) => [row.id, { bodyType: row.body_type }]));
+    const bodyTypes = await this.mainData.bodyTypes(vehicleIds);
+    return new Map([...bodyTypes].map(([id, bodyType]) => [id, { bodyType }]));
   }
 }

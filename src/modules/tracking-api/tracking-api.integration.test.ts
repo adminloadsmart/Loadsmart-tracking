@@ -22,8 +22,8 @@ import { buildContainer } from '../../composition-root';
 import { allPointStreamKeys } from '../../streams/partitioner';
 import { createLiveModule, createLivePublisher } from '../live';
 import { createPointsModule, NormalizedPoint } from '../points';
-import { createSyncModule } from '../sync';
-import { parseSnapshot } from '../sync/sync.contract';
+import { seedLoad } from '../../__tests__/support/main-schema';
+import { createTripsModule } from '../trips';
 import { createTrackingApiModule } from './index';
 
 const available = await infraAvailable();
@@ -62,7 +62,7 @@ describe.skipIf(!available)('tracking read API + /live (real Redis + Postgres)',
   let redis: Redis;
   let subscriber: Redis;
   let points: ReturnType<typeof createPointsModule>;
-  let sync: ReturnType<typeof createSyncModule>;
+  let trips: ReturnType<typeof createTripsModule>;
   let app: ReturnType<typeof createApp>;
   let httpServer: HttpServer;
   let io: Server;
@@ -74,7 +74,7 @@ describe.skipIf(!available)('tracking read API + /live (real Redis + Postgres)',
     ds = await testDataSource();
     redis = testRedis();
     subscriber = testRedis();
-    sync = createSyncModule(ds, redis, silentLogger);
+    trips = createTripsModule(ds, redis, silentLogger);
     points = createPointsModule(
       ds,
       redis,
@@ -139,55 +139,16 @@ describe.skipIf(!available)('tracking read API + /live (real Redis + Postgres)',
   const get = (path: string, token = staffToken()) =>
     request(app).get(path).set('Authorization', `Bearer ${token}`);
 
+  /** A load in the main tables (with its vehicle), indexed by the trip watcher. */
   async function seedTrip(tenantId: string, plate: string) {
-    const tripId = randomUUID();
-    const vehicleId = randomUUID();
-    await sync.service.apply(
-      parseSnapshot({
-        type: 'vehicle',
-        id: vehicleId,
-        tenantId,
-        version: '1',
-        deleted: 'false',
-        payload: JSON.stringify({
-          registrationNumber: plate,
-          status: 'active',
-          gpsProvider: null,
-          gpsEnabled: false,
-          gpsDeviceImei: null,
-        }),
-      }),
-    );
-    await sync.service.apply(
-      parseSnapshot({
-        type: 'load',
-        id: tripId,
-        tenantId,
-        version: '1',
-        deleted: 'false',
-        payload: JSON.stringify({
-          code: `LOAD-${plate}`,
-          status: 'in_transit',
-          sourceType: 'own_fleet',
-          vehicleId,
-          vehicleNumber: plate,
-          driverId: randomUUID(),
-          driverNumber: null,
-          driverName: 'Ravi',
-          transporterId: null,
-          loadingPointId: null,
-          deliveryPointId: null,
-          milestones: {
-            loadingConfirmedAt: new Date(Date.now() - 3_600_000).toISOString(),
-            atPlantAt: null,
-            inTransitAt: null,
-            reachedDeliveryPointAt: null,
-            deliveredAt: null,
-          },
-        }),
-      }),
-    );
-    return { tripId, vehicleId };
+    const seeded = await seedLoad(ds, {
+      tenantId,
+      registrationNumber: plate,
+      code: `LOAD-${plate}`,
+      driverName: 'Ravi',
+    });
+    await trips.watcher.poll();
+    return { tripId: seeded.loadId, vehicleId: seeded.vehicleId! };
   }
 
   /** Drives a zig-zag route (so simplification has something to remove) and processes it. */

@@ -58,6 +58,15 @@ export class ActiveTripIndex {
     return this.redis.get(driverActiveTripKey(driverId));
   }
 
+  /** The vehicle/driver a trip is currently indexed under (to release them on reassignment). */
+  async getRef(
+    tripId: string,
+  ): Promise<{ vehicleId: string | null; driverId: string | null } | null> {
+    const ref = await this.redis.hgetall(tripRefKey(tripId));
+    if (!ref.tenantId) return null;
+    return { vehicleId: ref.vehicleId || null, driverId: ref.driverId || null };
+  }
+
   /** The driver's active trip with its tenant and vehicle, or null if they're not on one. */
   async getTripRefForDriver(driverId: string): Promise<TripRef | null> {
     const tripId = await this.getTripForDriver(driverId);

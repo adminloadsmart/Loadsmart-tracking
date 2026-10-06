@@ -17,8 +17,8 @@ import { buildContainer } from '../../composition-root';
 import { allPointStreamKeys } from '../../streams/partitioner';
 import { createPointsModule, NormalizedPoint } from '../points';
 import { createRulesModule } from '../rules';
-import { createSyncModule } from '../sync';
-import { parseSnapshot } from '../sync/sync.contract';
+import { seedLoad } from '../../__tests__/support/main-schema';
+import { createTripsModule } from '../trips';
 import type { Geocoder, RouteProvider } from './google.client';
 import { encodePolyline } from './route-geometry';
 import { createRoutesModule } from './index';
@@ -58,14 +58,14 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
   let redis: Redis;
   let routes: ReturnType<typeof createRoutesModule>;
   let rules: ReturnType<typeof createRulesModule>;
-  let sync: ReturnType<typeof createSyncModule>;
+  let trips: ReturnType<typeof createTripsModule>;
   let points: ReturnType<typeof createPointsModule>;
   let app: ReturnType<typeof createApp>;
 
   beforeAll(async () => {
     ds = await testDataSource();
     redis = testRedis();
-    sync = createSyncModule(ds, redis, silentLogger);
+    trips = createTripsModule(ds, redis, silentLogger);
     routes = createRoutesModule({
       dataSource: ds,
       redis,
@@ -76,7 +76,7 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     rules = createRulesModule({
       dataSource: ds,
       redis,
-      activeTrips: sync.activeTrips,
+      activeTrips: trips.activeTrips,
       logger: silentLogger,
       routes,
     });
@@ -102,7 +102,6 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
   beforeEach(async () => {
     await redis.flushdb();
     await truncateTrackingTables(ds);
-    await ds.query(`TRUNCATE tracking.trip_routes`);
     geocoded.length = 0;
   });
   afterAll(async () => {
@@ -124,65 +123,41 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
       { algorithm: 'HS256', expiresIn: 900 },
     );
 
+  /** A load in the main tables (plant with coordinates, drop with an address only). */
   async function setup(promisedInMin: number, startedMinAgo: number) {
-    const [plant, drop, tripId, vehicleId] = [
-      randomUUID(),
-      randomUUID(),
-      randomUUID(),
-      randomUUID(),
-    ];
-    const place = (id: string, type: string, payload: object) =>
-      sync.service.apply(
-        parseSnapshot({
-          type,
-          id,
-          tenantId: TENANT,
-          version: '1',
-          deleted: 'false',
-          payload: JSON.stringify(payload),
-        }),
-      );
-    await place(plant, 'loading_point', {
-      name: 'Plant',
-      address: 'Plot 1',
-      city: 'Delhi',
-      state: 'DL',
-      pinCode: '110001',
-      lat: 28.6,
-      lng: 77.2,
-    });
-    await place(drop, 'delivery_point', {
-      name: 'ACME DC',
-      address: 'NH-58',
-      city: 'Roorkee',
-      state: 'UK',
-      pinCode: '247667',
-      lat: null,
-      lng: null,
-    });
-    await place(tripId, 'load', {
+    const seeded = await seedLoad(ds, {
+      tenantId: TENANT,
       code: 'LOAD-RT',
-      status: 'in_transit',
-      sourceType: 'own_fleet',
-      vehicleId,
-      vehicleNumber: 'UK07AB0001',
-      driverId: randomUUID(),
-      driverNumber: null,
-      driverName: null,
-      transporterId: null,
-      loadingPointId: plant,
-      deliveryPointId: drop,
-      customerId: randomUUID(),
-      promisedDeliveryAt: new Date(Date.now() + promisedInMin * 60_000).toISOString(),
-      milestones: {
-        loadingConfirmedAt: new Date(Date.now() - startedMinAgo * 60_000).toISOString(),
-        atPlantAt: null,
-        inTransitAt: null,
-        reachedDeliveryPointAt: null,
-        deliveredAt: null,
+      registrationNumber: 'UK07AB0001',
+      startedAt: new Date(Date.now() - startedMinAgo * 60_000),
+      origin: { lat: 28.6, lng: 77.2 },
+      destination: {
+        location: 'ACME DC',
+        address: 'NH-58',
+        city: 'Roorkee',
+        state: 'UK',
+        pinCode: '247667',
       },
     });
-    return { tripId, vehicleId, drop };
+    await trips.watcher.poll();
+    return {
+      tripId: seeded.loadId,
+      vehicleId: seeded.vehicleId!,
+      drop: seeded.deliveryPointId,
+      promisedInMin,
+    };
+  }
+
+  /**
+   * Main stores a promised delivery DATE (end of day); these scenarios need a promise minutes
+   * away, so set it on the planned route — the same override an ops approval makes.
+   */
+  async function promise(tripId: string, inMin: number) {
+    await ds.query(`UPDATE tracking.trip_routes SET promised_at = $2 WHERE trip_id = $1`, [
+      tripId,
+      new Date(Date.now() + inMin * 60_000),
+    ]);
+    routes.store.invalidate(tripId);
   }
 
   async function feed(
@@ -214,12 +189,14 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     // Promised in 60 min, but 3 h in the truck has only done 30 km at ~10 km/h → badly late soon.
     const trip = await setup(60, 180);
     expect(await routes.planner.planPending()).toBe(1);
+    await promise(trip.tripId, trip.promisedInMin);
     expect(geocoded).toEqual(['ACME DC, NH-58, Roorkee, UK, 247667']);
     expect(await routes.planner.planPending()).toBe(0); // planned once
-    const [status] = await ds.query(`SELECT route_status FROM tracking.trips WHERE id = $1`, [
-      trip.tripId,
-    ]);
-    expect(status.route_status).toBe('ok');
+    const [status] = await ds.query(
+      `SELECT status FROM tracking.trip_route_status WHERE trip_id = $1`,
+      [trip.tripId],
+    );
+    expect(status.status).toBe('ok');
 
     // Fixes every 5 min over the last 3 h: 0 → 30 km along the road.
     await feed(
@@ -252,6 +229,7 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
   it('"already late" alerts at once, Critical', async () => {
     const trip = await setup(-30, 300); // promised 30 min ago
     await routes.planner.planPending();
+    await promise(trip.tripId, trip.promisedInMin);
     await feed(trip, [{ minAgo: 1, alongM: 90_000 }]);
     await rules.tick(Date.now());
     const [alert] = await ds.query(
@@ -310,7 +288,7 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     const trip = await setup(600, 60);
     await offline.planner.planPending();
     const [row] = await ds.query(
-      `SELECT route_status, route_attempts FROM tracking.trips WHERE id = $1`,
+      `SELECT status AS route_status, attempts AS route_attempts FROM tracking.trip_route_status WHERE trip_id = $1`,
       [trip.tripId],
     );
     expect(row).toEqual({ route_status: 'no_api_key', route_attempts: 1 });

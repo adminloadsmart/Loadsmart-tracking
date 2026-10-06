@@ -43,16 +43,21 @@ describe.skipIf(!available)('plain PostgreSQL (no TimescaleDB / PostGIS)', () =>
       expect.arrayContaining([
         'location_points',
         'location_points_short',
-        'trips',
+        'trip_route_status',
+        'place_geocodes',
         'alerts',
         'alert_outbox',
         'trip_routes',
       ]),
     );
     expect(await ds.query(`SELECT count(*)::int AS n FROM public.tracking_migrations`)).toEqual([
-      { n: 5 },
+      { n: 4 },
     ]);
     expect(await ds.query(`SELECT to_regclass('public.migrations') AS t`)).toEqual([{ t: null }]);
+    // Tracking keeps no copies of the main backend's data (it reads main's tables directly).
+    for (const copy of ['trips', 'vehicles', 'drivers', 'places']) {
+      expect(await ds.query(`SELECT to_regclass('tracking.${copy}') AS t`)).toEqual([{ t: null }]);
+    }
   });
 
   it('stores points, builds a simplified track, and aggregates long timelines per minute', async () => {

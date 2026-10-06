@@ -1,5 +1,6 @@
 import type Redis from 'ioredis';
 import { DataSource } from 'typeorm';
+import { MainDataRepository } from '../main-data';
 import { returningRows } from '../../db/returning';
 import type { StaffIdentity, TenantScope } from '../../shared/auth/staff-token';
 import { hasPermission } from '../../shared/auth/staff-token';
@@ -21,13 +22,17 @@ const LIVE_ALERTS_CHANNEL = 'trk:live:alerts';
  * position to the drop. Open deviation alerts close; the delay rule re-evaluates at once.
  */
 export class RouteApprovalService {
+  private readonly mainData: MainDataRepository;
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly repository: RoutesRepository,
     private readonly provider: RouteProvider | null,
     private readonly routeStore: RouteStore,
     private readonly redis: Redis,
-  ) {}
+  ) {
+    this.mainData = new MainDataRepository(dataSource);
+  }
 
   async approve(
     scope: TenantScope,
@@ -38,18 +43,9 @@ export class RouteApprovalService {
     if (!hasPermission(user, TRACKING_ROUTES_APPROVE)) {
       throw new AuthorizationError(`Requires permission ${TRACKING_ROUTES_APPROVE}`);
     }
-    const trips: Array<{
-      id: string;
-      tenant_id: string;
-      vehicle_id: string | null;
-      tracking_state: string;
-    }> = await this.dataSource.query(
-      `SELECT id, tenant_id, vehicle_id, tracking_state FROM tracking.trips
-         WHERE id = $1 ${'allTenants' in scope ? '' : 'AND tenant_id = $2'}`,
-      'allTenants' in scope ? [tripId] : [tripId, scope.tenantId],
-    );
-    const trip = trips[0];
-    if (!trip) throw new NotFoundError(`Trip ${tripId} not found`);
+    const load = await this.mainData.load(scope, tripId);
+    if (!load) throw new NotFoundError(`Trip ${tripId} not found`);
+    const trip = { id: load.id, vehicle_id: load.vehicleId };
     const existing = await this.repository.routesFor([tripId]);
     if (existing.length === 0) throw new ValidationError('Trip has no planned route yet');
     const current = existing[existing.length - 1];

@@ -17,8 +17,8 @@ import { createApp } from '../../app';
 import { buildContainer } from '../../composition-root';
 import { allPointStreamKeys } from '../../streams/partitioner';
 import { createPointsModule, NormalizedPoint } from '../points';
-import { createSyncModule } from '../sync';
-import { parseSnapshot } from '../sync/sync.contract';
+import { seedLoad } from '../../__tests__/support/main-schema';
+import { createTripsModule } from '../trips';
 import {
   LIVE_ALERTS_CHANNEL,
   OutboxRelay,
@@ -36,7 +36,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
   let ds: DataSource;
   let redis: Redis;
   let subscriber: Redis;
-  let sync: ReturnType<typeof createSyncModule>;
+  let trips: ReturnType<typeof createTripsModule>;
   let rules: ReturnType<typeof createRulesModule>;
   let points: ReturnType<typeof createPointsModule>;
   let app: ReturnType<typeof createApp>;
@@ -46,11 +46,11 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
     ds = await testDataSource();
     redis = testRedis();
     subscriber = testRedis();
-    sync = createSyncModule(ds, redis, silentLogger);
+    trips = createTripsModule(ds, redis, silentLogger);
     rules = createRulesModule({
       dataSource: ds,
       redis,
-      activeTrips: sync.activeTrips,
+      activeTrips: trips.activeTrips,
       logger: silentLogger,
     });
     points = createPointsModule(
@@ -101,38 +101,13 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
     request(app)[method](path).set('Authorization', `Bearer ${auth}`);
 
   async function startTrip(tenantId = TENANT) {
-    const tripId = randomUUID();
-    const vehicleId = randomUUID();
-    await sync.service.apply(
-      parseSnapshot({
-        type: 'load',
-        id: tripId,
-        tenantId,
-        version: '1',
-        deleted: 'false',
-        payload: JSON.stringify({
-          code: 'LOAD-R1',
-          status: 'in_transit',
-          sourceType: 'own_fleet',
-          vehicleId,
-          vehicleNumber: 'MH12AB0001',
-          driverId: randomUUID(),
-          driverNumber: null,
-          driverName: null,
-          transporterId: null,
-          loadingPointId: null,
-          deliveryPointId: null,
-          milestones: {
-            loadingConfirmedAt: new Date(Date.now() - 3 * 3_600_000).toISOString(),
-            atPlantAt: null,
-            inTransitAt: null,
-            reachedDeliveryPointAt: null,
-            deliveredAt: null,
-          },
-        }),
-      }),
-    );
-    return { tripId, vehicleId, tenantId };
+    const seeded = await seedLoad(ds, {
+      tenantId,
+      code: 'LOAD-R1',
+      startedAt: new Date(Date.now() - 3 * 3_600_000),
+    });
+    await trips.watcher.poll();
+    return { tripId: seeded.loadId, vehicleId: seeded.vehicleId!, tenantId };
   }
 
   /** Sends fixes (seconds relative to now) through the real stream + processor + rules. */

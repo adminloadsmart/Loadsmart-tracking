@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import type { Namespace } from 'socket.io';
 import { DataSource } from 'typeorm';
 import type { PointPublisher } from '../points';
-import type { ActiveTripIndex } from '../sync';
+import type { ActiveTripIndex } from '../trips';
 import { createTokenBlocklist } from '../../shared/auth/token-blocklist';
 import { createDriverSocketAuth } from './driver-socket-auth';
 import { DriverSocketOptions, registerDriverNamespace } from './driver-socket.handler';

@@ -7,13 +7,21 @@ The full design and phased plan are in [docs/ROADMAP.md](docs/ROADMAP.md). **Cur
 - Phone GPS ingest: the `/driver` socket feeds the point stream, then the processor, then Timescale.
 - Read API: live fleet, trips, tracks and timelines under `/v1`.
 - Live map: the `/live` socket, fed by Redis pub/sub.
-- Loads, vehicles, drivers and places sync from the main backend.
+- Loads (trips), vehicles and places are read directly from the main backend's tables.
 
 Contracts:
 
-- [docs/contracts/loadsmart-events.md](docs/contracts/loadsmart-events.md): main backend → tracking.
 - [docs/contracts/driver-socket.md](docs/contracts/driver-socket.md): driver app → tracking.
 - [docs/contracts/tracking-api.md](docs/contracts/tracking-api.md): web portal ↔ tracking (REST and `/live`).
+
+## What lives here (and what doesn't)
+
+This service holds **only tracking data**: GPS points, vehicle and rule state, alerts and their episodes, planned routes, geocodes and rule settings. Everything else belongs to the main loadsmart backend, and this service doesn't copy it:
+
+- **Main data.** It shares the main database and reads `loads.loads` (one load is one trip), `loads.requisitions`, `masters.vehicles` (with `truck_types` and `vehicle_telemetry_meta`), `masters.loading_points` and `customers.customer_delivery_points` directly. All of that SQL lives in one module, `src/modules/main-data`, so a main schema change has one place to land.
+  - A trip watcher on the scheduler polls `loads` for changes. It keeps the Redis active-trip index that ingest and the rules read on every point.
+- **Auth.** The main backend issues and revokes tokens. Tracking only checks them: the shared `JWT_SECRET` signature, the token's purpose and tenant, the main backend's revocation key in Redis, and permissions from the token.
+- **Notifications.** Tracking publishes alert events to `tracking.events`, and the main backend sends the push and SMS.
 
 ## Process roles
 

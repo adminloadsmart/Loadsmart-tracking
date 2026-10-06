@@ -4,7 +4,7 @@ import { DataSource } from 'typeorm';
 import type { BatchHook } from '../points';
 import type { RouteStore } from '../routes/route.store';
 import type { RoutesRepository } from '../routes/routes.repository';
-import type { ActiveTripIndex } from '../sync';
+import type { ActiveTripIndex } from '../trips';
 import { InactivityMonitor } from './inactivity.monitor';
 import { RuleEngine } from './rule-engine';
 import { AlertChange, RulesRepository } from './rules.repository';
