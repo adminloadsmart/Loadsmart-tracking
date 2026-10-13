@@ -11,7 +11,7 @@ import {
 } from '../../__tests__/support/infra';
 import { seedLoad, updateLoad } from '../../__tests__/support/main-schema';
 import { driverActiveTripKey, tripRefKey, vehicleActiveTripKey } from './active-trip-index';
-import { createTripsModule } from './index';
+import { createTripsModule, TripWatcher } from './index';
 import { marketVehicleId } from './trip-state';
 
 const available = await infraAvailable();
@@ -63,6 +63,26 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     await trips.watcher.poll();
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBeNull();
     expect(await redis.exists(tripRefKey(load.loadId))).toBe(0);
+  });
+
+  it('pages through more loads than one page holds, even when they share an updated_at', async () => {
+    const loads = await Promise.all(
+      [1, 2, 3, 4, 5].map((i) =>
+        seedLoad(ds, { tenantId: TENANT, code: `LOAD-P${i}`, registrationNumber: `MH12PG000${i}` }),
+      ),
+    );
+    // A bulk update in main: every row gets the same updated_at, with microseconds (finer than
+    // the JS Date the watcher pages with).
+    await ds.query(
+      `UPDATE loads.loads SET updated_at = '2026-10-06T08:00:00.123456Z' WHERE tenant_id = $1`,
+      [TENANT],
+    );
+
+    const watcher = new TripWatcher(trips.mainData, trips.activeTrips, redis, silentLogger, 2);
+    expect(await watcher.poll()).toBe(5);
+    for (const load of loads) {
+      expect(await redis.get(driverActiveTripKey(load.driverId!))).toBe(load.loadId);
+    }
   });
 
   it('releases the old driver when a load is reassigned', async () => {

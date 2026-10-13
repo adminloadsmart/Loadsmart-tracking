@@ -27,13 +27,13 @@ This service holds **only tracking data**: GPS points, vehicle and rule state, a
 
 One codebase and one Docker image. The `ROLE` env var picks what a process runs: `all`, or a comma list.
 
-| Role        | What it does                                                                                                                                           | Port                   |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
-| `api`       | REST read API under `/v1` (staff token from the main backend). Requires `JWT_SECRET`                                                                   | `PORT` (4100)          |
-| `realtime`  | socket.io, websocket-only: `/driver` for phone GPS ingest, `/live` for map viewers. Requires `JWT_SECRET`                                              | `REALTIME_PORT` (4101) |
-| `poller`    | Pulls from BlackRock, Intugine and ULIP (Phase 4+)                                                                                                     | —                      |
-| `processor` | Point stream partitions (leased, rebalanced across instances): clean → movement → motion → distance → Timescale. Also consumes `loadsmart.events` sync | —                      |
-| `scheduler` | Single leader through a Redis lock; runs the dispatcher, retention and outbox jobs                                                                     | —                      |
+| Role        | What it does                                                                                                                                                       | Port                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
+| `api`       | REST read API under `/v1` (staff token from the main backend). Requires `JWT_SECRET`                                                                               | `PORT` (4100)          |
+| `realtime`  | socket.io, websocket-only: `/driver` for phone GPS ingest, `/live` for map viewers. Requires `JWT_SECRET`                                                          | `REALTIME_PORT` (4101) |
+| `poller`    | Pulls from BlackRock, Intugine and ULIP (Phase 4+)                                                                                                                 | —                      |
+| `processor` | Point stream partitions (leased, rebalanced across instances): clean → movement → motion → distance → Timescale                                                    | —                      |
+| `scheduler` | Single leader through a Redis lock; runs the dispatcher, retention and outbox jobs, and the TripWatcher that polls main's `loads` table into the active-trip index | —                      |
 
 Every process also serves these on `OPS_PORT` (9100):
 

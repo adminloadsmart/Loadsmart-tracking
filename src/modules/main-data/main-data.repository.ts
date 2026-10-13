@@ -139,12 +139,29 @@ export class MainDataRepository {
 
   // ---- loads (= trips) ---------------------------------------------------------------------
 
-  /** Loads changed since `since` (any status), oldest first — the trip watcher's feed. */
-  async loadsChangedSince(since: Date, limit: number): Promise<MainLoad[]> {
-    const rows: LoadRow[] = await this.dataSource.query(
-      `${LOAD_SELECT} WHERE l.updated_at > $1 ORDER BY l.updated_at, l.id LIMIT $2`,
-      [since, limit],
-    );
+  /**
+   * Loads changed since `since` (any status), oldest first — the trip watcher's feed. Pass the
+   * last row of the previous page as `after` to page on (updated_at, id): many loads can share
+   * one updated_at (a bulk update), so paging on updated_at alone could repeat a page forever.
+   * The page key is truncated to milliseconds — the precision `after.updatedAt` (a JS Date)
+   * carries back; comparing against microsecond values would re-match the same rows.
+   */
+  async loadsChangedSince(
+    since: Date,
+    limit: number,
+    after?: { updatedAt: Date; id: string },
+  ): Promise<MainLoad[]> {
+    const pageKey = `date_trunc('milliseconds', l.updated_at)`;
+    const rows: LoadRow[] = after
+      ? await this.dataSource.query(
+          `${LOAD_SELECT} WHERE (${pageKey}, l.id) > ($1::timestamptz, $2::uuid)
+           ORDER BY ${pageKey}, l.id LIMIT $3`,
+          [after.updatedAt, after.id, limit],
+        )
+      : await this.dataSource.query(
+          `${LOAD_SELECT} WHERE l.updated_at > $1 ORDER BY ${pageKey}, l.id LIMIT $2`,
+          [since, limit],
+        );
     return rows.map(toLoad);
   }
 

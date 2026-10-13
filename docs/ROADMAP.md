@@ -32,7 +32,7 @@ It follows the two architecture docs, adjusted to the confirmed data sources bel
 
 ### Decisions taken
 - **Stack:** the same as the main backend (Node 24, TypeScript, Express 5, TypeORM, zod, ioredis, BullMQ), plus socket.io.
-- **Domain data:** loads, vehicles and drivers arrive as **events into a local read model**. The service never reads the main database directly.
+- **Domain data:** tracking **shares the main database** and reads main's tables (loads, requisitions, vehicles, drivers, loading and delivery points) directly through one read-only adapter, `modules/main-data`. It never copies them: tracking tables hold only tracking data. (Changed from the original event-sync design in 4a7c563.)
 - **Size:** sized for **up to about 2,000 vehicles**. Every component has a horizontal-scale path and a trigger metric.
 
 ### Load math at 2,000 active vehicles
@@ -104,10 +104,10 @@ loadsmart-tracking/
       waterfall/         source-selector, no-signal detector, trip_source_link
       org-settings/      priority + intervals API, appliers (reschedule polls)
       location/          LocationResolver interface, PostGIS resolver, context service, boundary import
-      trips/ vehicles/   read models, lifecycle, track/timeline queries + simplification
+      main-data/         read-only adapter over main's tables (the only code that knows them)
+      trips/             active-trip index + TripWatcher (polls loads.updated_at), lifecycle
       realtime/          /live namespace, rooms, throttled publisher
       share-links/       public trip link tokens, cached public endpoint
-      sync/              consume main-backend events; outbox + relay
     entrypoints/{api,realtime,poller,processor,scheduler,all}.ts
     composition-root.ts                 # createXModule(dataSource, deps) wiring, as in main backend
   docker/{Dockerfile, docker-compose.yml}   # timescale+postgis, redis, minio
@@ -147,7 +147,7 @@ loadsmart-tracking/
 - **Connection health:**
   - socket.io ping/pong runs at a 25 s interval.
   - A disconnect alone does **not** mean no-signal. No-signal is decided only by the last **accepted** point (section 5).
-  - Before declaring the phone silent, the server sends a silent FCM push to wake the app, using `driver_session.fcmToken` from the main backend via sync.
+  - Before declaring the phone silent, the server sends a silent FCM push to wake the app, by emitting an event that the main backend acts on (it owns FCM tokens and all notifications).
 - **Notes for the app team:**
   - Android: use the fused location provider in a foreground service, and ask drivers to whitelist the app from battery optimization.
   - Buffer locations in SQLite when offline.
@@ -237,9 +237,7 @@ All ids are UUIDs. Every row has `tenant_id`.
 - A scheduled prune job handles these per-row rules. `drop_chunks` cannot, because it drops whole chunks.
 
 **Metadata tables (TypeORM entities):**
-- Read models from sync:
-  - `vehicle_read_model`, `driver_read_model`
-  - `trip_read_model`: `load_id`, `vehicle_id`, `driver_id`, origin and destination, planned route and distance, status, `settings_snapshot`
+- Main's own tables (loads, vehicles, drivers, places) are read in place, never copied. Tracking-only additions: `trip_route_status`, `place_geocodes` (delivery points have no coordinates in main).
 - Devices and providers:
   - `devices`: BR05 serial or IMEI ↔ vehicle, `provider_device_id`
   - `sim_consents`: phone, trip, provider consent id, status
@@ -278,18 +276,8 @@ NormalizedPoint {
 
 ## 8. Integration with the main backend
 
-1. **Main backend → tracking:** an outbox table and a BullMQ relay in `loadsmart` publish to the stream `loadsmart.events`.
-   - Events:
-     - `load.assigned`
-     - `load.status_changed`
-     - `load.closed`
-     - `vehicle.upserted`
-     - `vehicle.telemetry_meta_changed` (BR05 bound or unbound)
-     - `driver.upserted`
-     - `driver.session_changed` (FCM token)
-     - `loading_point.upserted`
-     - `delivery_point.upserted`
-   - Tracking consumes them in `sync/` and dedupes by `eventId`.
+1. **Main backend → tracking:** no events. Tracking reads main's tables directly (shared database).
+   - The TripWatcher (scheduler leader) polls `loads.updated_at` every few seconds into the Redis active-trip index, with a full rebuild on leader takeover and every 10 min.
    - A trip starts at `loading_confirmed` / `at_plant` and ends at `delivered` / `closed`.
 2. **Tracking → main backend:** the stream `tracking.events` carries:
    - `trip.arrived_at_pickup`
@@ -317,7 +305,7 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
 
 **Phase 1: Schema, event contract, sync (1.5 weeks)**
 - Hypertables, compression, aggregates and retention; metadata tables; the stream bus (partitioner, leased consumer, DLQ); the S3 archiver.
-- Main backend: outbox and relay. Tracking: `sync` consumer and read models.
+- ~~Main backend: outbox and relay. Tracking: `sync` consumer and read models.~~ Superseded: tracking reads main's tables directly (4a7c563).
 - Exit: assigning a load creates a tracking trip within 5 s, and replaying the event is a no-op.
 
 **Phase 2: Phone GPS over socket.io, end to end (2 weeks; the first live source)**
@@ -327,6 +315,11 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
   - 2,000 simulated sockets at 15 s each: ack p99 under 100 ms and stream lag under 2 s.
   - Kill a `realtime` pod: phones reconnect and flush their offline batches with no gaps and no duplicates.
   - A stationary phone adds 0 km.
+- Result (2026-10-07, single `ROLE=all` process on a dev machine, plain Postgres, `scripts/simulate-phones.ts --phones 2000 --duration 600 --burst 0.2`):
+  - 78,789 acks in 603 s (130.7/s). Ack latency: p50 2.1 ms, p95 4.2 ms, **p99 14.3 ms**, max 148 ms. No errors.
+  - Burst: 400 phones offline for 60 s, then each flushed its queue as one `loc:batch` on reconnect.
+  - 79,996 points acked, 79,996 stored in `location_points`: **no loss**.
+  - Not measured yet: stream lag (the simulator only checks that stored ≥ acked within 30 s), the pod-kill test, and the stationary-phone distance test.
 
 **Phase 3: Read API and live map (1.5 weeks)**
 - REST endpoints:

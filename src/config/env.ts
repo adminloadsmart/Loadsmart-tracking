@@ -36,9 +36,8 @@ export const env = {
   corsOrigins,
   databaseUrl: required('DATABASE_URL'),
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6380',
-  // The main loadsmart backend's Redis: source of the `loadsmart.events` snapshot stream (sync
-  // module) and, from Phase 2, its access-token blocklist. Defaults to our own Redis so the
-  // service runs standalone in dev/tests.
+  // The main loadsmart backend's Redis: its access-token blocklist, checked on every driver and
+  // viewer handshake. Defaults to our own Redis so the service runs standalone in dev/tests.
   mainRedisUrl: process.env.MAIN_REDIS_URL || process.env.REDIS_URL || 'redis://localhost:6380',
   // Point stream partitions (docs/ROADMAP.md §7). Fixed for the life of the stream — changing it
   // needs a drain-and-rehash, so it's sized generously up front.

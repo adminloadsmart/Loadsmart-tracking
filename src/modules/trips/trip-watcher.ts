@@ -5,7 +5,7 @@ import { ActiveTripIndex } from './active-trip-index';
 import { trackingStateFor } from './trip-state';
 
 const CURSOR_KEY = 'trk:trips:cursor';
-const BATCH = 1000;
+const PAGE_SIZE = 1000;
 // Re-read loads changed slightly before the cursor: a transaction can commit after rows with a
 // later updated_at were already seen. Re-applying a load is idempotent.
 const OVERLAP_MS = 30_000;
@@ -24,18 +24,25 @@ export class TripWatcher {
     private readonly index: ActiveTripIndex,
     private readonly redis: Redis,
     private readonly logger: Logger,
+    private readonly pageSize = PAGE_SIZE,
   ) {}
 
+  /** Applies every load changed since the cursor, page by page, then advances the cursor. */
   async poll(): Promise<number> {
     const cursor = Number((await this.redis.get(CURSOR_KEY)) ?? 0);
-    const loads = await this.mainData.loadsChangedSince(
-      new Date(Math.max(0, cursor - OVERLAP_MS)),
-      BATCH,
-    );
-    for (const load of loads) await this.apply(load);
-    const newest = loads.at(-1)?.updatedAt.getTime();
+    const since = new Date(Math.max(0, cursor - OVERLAP_MS));
+    let after: MainLoad | undefined;
+    let applied = 0;
+    for (;;) {
+      const loads = await this.mainData.loadsChangedSince(since, this.pageSize, after);
+      for (const load of loads) await this.apply(load);
+      applied += loads.length;
+      after = loads.at(-1) ?? after;
+      if (loads.length < this.pageSize) break;
+    }
+    const newest = after?.updatedAt.getTime();
     if (newest && newest > cursor) await this.redis.set(CURSOR_KEY, String(newest));
-    return loads.length;
+    return applied;
   }
 
   /** Restores the index from the loads table (on takeover / periodically). */
