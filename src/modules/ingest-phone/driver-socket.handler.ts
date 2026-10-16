@@ -58,6 +58,11 @@ export function registerDriverNamespace(namespace: Namespace, deps: Deps): void 
     const driver = socket.data.driver as DriverIdentity;
     const log = deps.logger.child({ driverId: driver.driverId, socketId: socket.id });
     driverSockets.inc();
+    log.info({ tenantId: driver.tenantId }, 'Driver socket connected');
+    // Raw payloads are debug-only (LOG_LEVEL=debug); unknown event names show up here too.
+    socket.onAny((event: string, payload: unknown) =>
+      log.debug({ event, payload }, 'Driver socket event'),
+    );
 
     // The access token is short-lived but the socket isn't: drop the connection when the token
     // expires; the client reconnects with a fresh token via its `auth` callback.
@@ -80,17 +85,18 @@ export function registerDriverNamespace(namespace: Namespace, deps: Deps): void 
       const now = Date.now();
       if (now - lastLocAt < deps.options.minLocIntervalMs) {
         pointsReceived.inc({ source: 'driver_app', result: 'rate_limited' });
-        respond(ack, { ok: false, error: 'rate_limited' }, 'loc', startedAt);
+        respond(ack, { ok: false, error: 'rate_limited' }, 'loc', startedAt, log);
         return;
       }
       lastLocAt = now;
       const parsed = phonePointSchema.safeParse(payload);
       if (!parsed.success) {
         pointsReceived.inc({ source: 'driver_app', result: 'invalid' });
-        respond(ack, { ok: false, error: 'invalid_payload' }, 'loc', startedAt);
+        log.debug({ event: 'loc', issues: parsed.error.issues }, 'Invalid driver payload');
+        respond(ack, { ok: false, error: 'invalid_payload' }, 'loc', startedAt, log);
         return;
       }
-      respond(ack, await ingest(deps, driver, [parsed.data], log), 'loc', startedAt);
+      respond(ack, await ingest(deps, driver, [parsed.data], log), 'loc', startedAt, log);
     });
 
     socket.on('loc:batch', async (payload: unknown, ack?: (response: Ack) => void) => {
@@ -99,22 +105,24 @@ export function registerDriverNamespace(namespace: Namespace, deps: Deps): void 
       const now = Date.now();
       if (now - lastBatchAt < deps.options.minBatchIntervalMs) {
         pointsReceived.inc({ source: 'driver_app', result: 'rate_limited' });
-        respond(ack, { ok: false, error: 'rate_limited' }, 'loc:batch', startedAt);
+        respond(ack, { ok: false, error: 'rate_limited' }, 'loc:batch', startedAt, log);
         return;
       }
       lastBatchAt = now;
       const parsed = phoneBatchSchema.safeParse(payload);
       if (!parsed.success) {
         pointsReceived.inc({ source: 'driver_app', result: 'invalid' });
-        respond(ack, { ok: false, error: 'invalid_payload' }, 'loc:batch', startedAt);
+        log.debug({ event: 'loc:batch', issues: parsed.error.issues }, 'Invalid driver payload');
+        respond(ack, { ok: false, error: 'invalid_payload' }, 'loc:batch', startedAt, log);
         return;
       }
-      respond(ack, await ingest(deps, driver, parsed.data, log), 'loc:batch', startedAt);
+      respond(ack, await ingest(deps, driver, parsed.data, log), 'loc:batch', startedAt, log);
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason) => {
       clearTimeout(expiryTimer);
       driverSockets.dec();
+      log.info({ reason }, 'Driver socket disconnected');
     });
   });
 }
@@ -166,7 +174,9 @@ function respond(
   response: Ack,
   event: string,
   startedAt: bigint,
+  log: Logger,
 ): void {
+  log.debug({ event, response }, 'Driver socket ack');
   ack(response);
   ackSeconds.observe({ event }, Number(process.hrtime.bigint() - startedAt) / 1e9);
 }
