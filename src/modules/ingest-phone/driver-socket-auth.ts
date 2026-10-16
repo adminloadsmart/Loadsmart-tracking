@@ -1,5 +1,6 @@
 import jwt, { JwtPayload } from 'jsonwebtoken';
 import type { Socket } from 'socket.io';
+import { extractHandshakeToken } from '../../shared/auth/handshake-token';
 
 /** Who is on the other end of a /driver socket — set on socket.data by the handshake. */
 export interface DriverIdentity {
@@ -45,8 +46,7 @@ export function createDriverSocketAuth(deps: {
   isBlocked: (jti: string | null) => Promise<boolean>;
 }) {
   return async (socket: Socket, next: (err?: Error) => void): Promise<void> => {
-    const raw = socket.handshake.auth?.token;
-    const token = typeof raw === 'string' ? raw.replace(/^Bearer\s+/i, '') : null;
+    const token = extractHandshakeToken(socket.handshake);
     const identity = token ? verifyDriverToken(token, deps.jwtSecret) : null;
     if (!identity || (await deps.isBlocked(identity.jti))) {
       next(new Error('unauthorized'));

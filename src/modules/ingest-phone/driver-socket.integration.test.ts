@@ -166,6 +166,32 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     await expect(connected(client(token(driverId)))).resolves.toBeUndefined();
   });
 
+  it('falls back to the token query param or Authorization header when auth is not set', async () => {
+    const viaQuery = (t: string) => {
+      const socket = connect(url, {
+        transports: ['websocket'],
+        reconnection: false,
+        query: { token: t },
+      });
+      clients.push(socket);
+      return socket;
+    };
+    const viaHeader = (t: string) => {
+      const socket = connect(url, {
+        transports: ['websocket'],
+        reconnection: false,
+        extraHeaders: { Authorization: `Bearer ${t}` },
+      });
+      clients.push(socket);
+      return socket;
+    };
+
+    await expect(connected(viaQuery(token(randomUUID())))).resolves.toBeUndefined();
+    await expect(connected(viaHeader(token(randomUUID())))).resolves.toBeUndefined();
+    await expect(connected(viaQuery('garbage'))).rejects.toThrow('unauthorized');
+    await expect(connected(viaHeader('garbage'))).rejects.toThrow('unauthorized');
+  });
+
   it('disconnects the socket when the token expires', async () => {
     const socket = client(token(randomUUID(), {}, 1));
     const expired = new Promise<void>((resolve) => socket.once('auth:expired', () => resolve()));

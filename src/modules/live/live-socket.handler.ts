@@ -1,6 +1,7 @@
 import { Gauge } from 'prom-client';
 import type { Namespace, Socket } from 'socket.io';
 import { z } from 'zod';
+import { extractHandshakeToken } from '../../shared/auth/handshake-token';
 import type { IsTokenBlocked } from '../../shared/auth/token-blocklist';
 import {
   StaffIdentity,
@@ -38,8 +39,7 @@ interface ViewerData {
 /** Handshake: the same staff access token the REST API takes (main backend's portal login). */
 export function createLiveSocketAuth(deps: { jwtSecret: string; isBlocked: IsTokenBlocked }) {
   return async (socket: Socket, next: (err?: Error) => void): Promise<void> => {
-    const raw = socket.handshake.auth?.token;
-    const token = typeof raw === 'string' ? raw.replace(/^Bearer\s+/i, '') : null;
+    const token = extractHandshakeToken(socket.handshake);
     const identity = token ? verifyStaffToken(token, deps.jwtSecret) : null;
     const scope = identity ? tenantScopeFor(identity) : null;
     if (!identity || !scope || (await deps.isBlocked(identity.jti))) {

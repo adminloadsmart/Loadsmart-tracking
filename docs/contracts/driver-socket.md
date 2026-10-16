@@ -19,6 +19,7 @@ const socket = io(`${TRACKING_URL}/driver`, {
 ```
 
 - **Token:** use the same driver access token the app already gets from the main loadsmart backend (`purpose: driver-access`, with a tenant selected). Tracking verifies it with the shared secret and checks it hasn't been revoked.
+- **Where to send it:** `auth.token` (as above) is preferred. For clients that can't set the auth payload, the server also accepts a `token` query param (`?token=<jwt>`) or an `Authorization: Bearer <jwt>` header, checked in that order. Use the query param only as a last resort: tokens in URLs can end up in proxy and load-balancer access logs.
 - **Handshake errors:** a failed handshake raises `connect_error` with the message `unauthorized`. Refresh the token and try again; if that still fails, the driver has to log in again.
 - **Token expiry:** when the access token expires, the server emits `auth:expired` and then disconnects. socket.io reconnects automatically and calls `auth` again, which fetches a fresh token.
 
