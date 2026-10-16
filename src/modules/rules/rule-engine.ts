@@ -53,6 +53,15 @@ export class RuleEngine {
   ) {}
 
   async evaluate(points: ProcessedPoint[], nowMs: number): Promise<RuleEvaluation> {
+    const lastSeen = lastPacketTimes(points);
+    const writeLastSeen = (multi: ChainableCommander) => {
+      // GT: never move last-seen backwards (late batches).
+      for (const [key, t] of lastSeen) {
+        const [source, member] = splitOnce(key);
+        multi.zadd(lastSeenKey(source as PointSource), 'GT', t, member);
+      }
+    };
+
     const accepted = points
       .filter(({ rejected, point }) => !rejected && !point.flags?.late)
       .map(({ point }) => point);
@@ -60,7 +69,7 @@ export class RuleEngine {
     for (const point of accepted) {
       byVehicle.set(point.vehicleId, [...(byVehicle.get(point.vehicleId) ?? []), point]);
     }
-    if (byVehicle.size === 0) return { effects: [], writeState: () => undefined };
+    if (byVehicle.size === 0) return { effects: [], writeState: writeLastSeen };
 
     const vehicleIds = [...byVehicle.keys()];
     const tripIds = [...new Set(accepted.map((p) => p.tripId).filter((id): id is string => !!id))];
@@ -76,7 +85,6 @@ export class RuleEngine {
 
     const effects: VehicleEffects[] = [];
     const nextStates = new Map<string, Record<string, string>>();
-    const lastSeen: Array<{ source: PointSource; member: string; t: number }> = [];
     const clearedFlags: string[] = [];
 
     for (const [vehicleId, vehiclePoints] of byVehicle) {
@@ -139,12 +147,6 @@ export class RuleEngine {
             vehicleEffects.alert({ op: 'close', id: flag.alertId, reason: 'data_resumed' });
           clearedFlags.push(inactiveFlagKey(vehicleId, source));
         }
-        const newest = ordered.filter((p) => p.source === source).at(-1)!;
-        lastSeen.push({
-          source,
-          member: `${vehicleId}|${tenantId}`,
-          t: Date.parse(newest.recordedAt),
-        });
       }
 
       nextStates.set(vehicleId, state);
@@ -164,9 +166,7 @@ export class RuleEngine {
         for (const [vehicleId, state] of nextStates) {
           if (Object.keys(state).length > 0) multi.hset(ruleStateKey(vehicleId), state);
         }
-        // GT: never move last-seen backwards (late batches).
-        for (const { source, member, t } of lastSeen)
-          multi.zadd(lastSeenKey(source), 'GT', t, member);
+        writeLastSeen(multi);
         if (clearedFlags.length > 0) multi.del(...clearedFlags);
       },
     };
@@ -251,3 +251,23 @@ export class RuleEngine {
     return new Map(vehicleIds.map((id) => [id, this.profileCache.get(id)?.bodyType ?? null]));
   }
 }
+
+/**
+ * Newest packet time per source|vehicle|tenant. Inactivity means no packet ARRIVED (rule sheet), so
+ * rejected fixes (low accuracy, mock, GPS jump) and late ones count too — only a future timestamp
+ * doesn't, since it would push last-seen ahead and hide real silence.
+ */
+function lastPacketTimes(points: ProcessedPoint[]): Map<string, number> {
+  const newest = new Map<string, number>();
+  for (const { point, rejected } of points) {
+    if (rejected === 'future_timestamp') continue;
+    const key = `${point.source}|${point.vehicleId}|${point.tenantId}`;
+    newest.set(key, Math.max(newest.get(key) ?? 0, Date.parse(point.recordedAt)));
+  }
+  return newest;
+}
+
+const splitOnce = (key: string): [string, string] => {
+  const i = key.indexOf('|');
+  return [key.slice(0, i), key.slice(i + 1)];
+};

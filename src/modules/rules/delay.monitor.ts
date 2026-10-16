@@ -3,7 +3,7 @@ import type { Logger } from 'pino';
 import type { RouteStore } from '../routes/route.store';
 import type { InTransitTrip, RoutesRepository } from '../routes/routes.repository';
 import { RULE_DEFAULTS } from './defaults';
-import { evaluateDelay, promisedTime } from './delay';
+import { alreadyLateSeverity, evaluateDelay, promisedTime } from './delay';
 import { ruleStateKey, RuleEngine } from './rule-engine';
 import { alertId, episodeId, num } from './rule-helpers';
 import { AlertChange, RulesRepository } from './rules.repository';
@@ -144,7 +144,8 @@ export class DelayMonitor {
       : estimate.delayMin;
 
     if (alreadyLate) {
-      this.ensureSeverity(state, trip, 'critical', nowMs, delayMin, true, effects);
+      const severity = alreadyLateSeverity(delayMin, p);
+      this.ensureSeverity(state, trip, severity, nowMs, delayMin, true, effects);
     } else if (!stale) {
       const level =
         delayMin >= num(p, 'criticalDelayMin')

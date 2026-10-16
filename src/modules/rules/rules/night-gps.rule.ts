@@ -100,6 +100,10 @@ export const nightGpsRule: FixRule<NightState> = {
         if (fix.t - s.stationarySinceMs >= num(p, 'endStationaryS') * 1000) {
           s = closeEpisode(s, s.stationarySinceMs, effects);
         }
+      } else {
+        // Creeping (between stationary and moving speed): not stationary, so a later stop starts
+        // a fresh 10-minute timer instead of counting from a stop before the crawl.
+        s.stationarySinceMs = null;
       }
     } else if (moving) {
       if (s.phase === 'none') {

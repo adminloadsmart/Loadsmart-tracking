@@ -66,14 +66,15 @@ export const progressGpsRule: FixRule<ProgressState> = {
       s.furthestAlongM = Math.max(s.furthestAlongM, alongM);
     }
 
+    // A sample is the progress AT its own time and is never updated afterwards: a sample holding
+    // newer progress than its timestamp would make the speed over the window read too slow.
+    // Current progress (furthestAlongM) is the other end of the window.
     const lastSample = s.samples[s.samples.length - 1];
     if (!lastSample || fix.t - lastSample.t >= SAMPLE_EVERY_MS) {
       const windowMs = num(ctx.params, 'speedWindowH') * 3_600_000;
       s.samples = [...s.samples, { t: fix.t, alongM: s.furthestAlongM }].filter(
         (sample) => fix.t - sample.t <= windowMs + SAMPLE_EVERY_MS,
       );
-    } else {
-      s.samples = [...s.samples.slice(0, -1), { t: lastSample.t, alongM: s.furthestAlongM }];
     }
     return s;
   },

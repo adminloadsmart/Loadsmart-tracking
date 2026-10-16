@@ -226,8 +226,20 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     expect(['warning', 'critical']).toContain(alert.severity);
   });
 
-  it('"already late" alerts at once, Critical', async () => {
+  it('"already late" alerts at once: Warning when under 240 min late', async () => {
     const trip = await setup(-30, 300); // promised 30 min ago
+    await routes.planner.planPending();
+    await promise(trip.tripId, trip.promisedInMin);
+    await feed(trip, [{ minAgo: 1, alongM: 90_000 }]);
+    await rules.tick(Date.now());
+    const [alert] = await ds.query(
+      `SELECT severity, title FROM tracking.alerts WHERE rule_id = 'DELAY-GPS'`,
+    );
+    expect(alert).toEqual({ severity: 'warning', title: 'Delivery is already late' });
+  });
+
+  it('"already late" alerts at once: Critical when 240+ min late', async () => {
+    const trip = await setup(-300, 600); // promised 5 h ago
     await routes.planner.planPending();
     await promise(trip.tripId, trip.promisedInMin);
     await feed(trip, [{ minAgo: 1, alongM: 90_000 }]);

@@ -61,6 +61,17 @@ export function evaluateDelay(input: DelayInput): DelayEstimate {
   };
 }
 
+/**
+ * "Already late" (past promised, not delivered) alerts at once; its severity follows how late it
+ * is, on the same thresholds as a projected delay: Critical from 240 min, Warning before that.
+ */
+export function alreadyLateSeverity(
+  delayMin: number,
+  params: Record<string, number | boolean | string>,
+): 'warning' | 'critical' {
+  return delayMin >= num(params, 'criticalDelayMin') ? 'critical' : 'warning';
+}
+
 /** Promised delivery: the route's / load's promise, else start + route km at 350 km/day. */
 export function promisedTime(
   routePromisedMs: number | null,
