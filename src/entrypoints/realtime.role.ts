@@ -3,7 +3,7 @@ import { Server } from 'socket.io';
 import { env } from '../config/env';
 import { redisManager } from '../db/redis';
 import { createRedisConnection } from '../db/redis-connection';
-import { createIngestPhoneModule } from '../modules/ingest-phone';
+import { createIngestPhoneModule, DRIVER_SOCKET_MAX_MESSAGE_BYTES } from '../modules/ingest-phone';
 import { createLiveModule } from '../modules/live';
 import { createPointsModule } from '../modules/points';
 import { createTripsModule } from '../modules/trips';
@@ -23,8 +23,8 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
     cors: { origin: env.corsOrigins, credentials: true },
     pingInterval: 25_000,
     pingTimeout: 20_000,
-    // Fits a full `loc:batch` (≤ 200 points) with room to spare.
-    maxHttpBufferSize: 64 * 1024,
+    // Must fit a full `loc:batch` (≤ 200 full-precision points) — see the constant.
+    maxHttpBufferSize: DRIVER_SOCKET_MAX_MESSAGE_BYTES,
   });
 
   // Nothing is served on the default namespace.

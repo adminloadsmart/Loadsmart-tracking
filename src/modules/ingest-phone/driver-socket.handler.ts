@@ -31,6 +31,13 @@ const pointsReceived = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * Largest single socket message accepted. Phones report coordinates as full-precision doubles, so a
+ * full 200-point `loc:batch` is ~67 KB; anything over the limit makes socket.io drop the connection
+ * with no ack, and the app would resend the same batch forever. 256 KB leaves ~4× headroom.
+ */
+export const DRIVER_SOCKET_MAX_MESSAGE_BYTES = 256 * 1024;
+
 export type AckError = 'invalid_payload' | 'rate_limited' | 'unavailable';
 export type Ack = { ok: true; accepted: number; noTrip: number } | { ok: false; error: AckError };
 

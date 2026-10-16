@@ -40,4 +40,5 @@ export function createIngestPhoneModule(deps: IngestPhoneDeps) {
 }
 
 export type { Ack } from './driver-socket.handler';
+export { DRIVER_SOCKET_MAX_MESSAGE_BYTES } from './driver-socket.handler';
 export type { DriverIdentity } from './driver-socket-auth';

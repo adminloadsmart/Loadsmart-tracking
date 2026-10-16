@@ -20,12 +20,13 @@ import { createPointsModule } from '../points';
 import { tripFraudKey, tripMetricsKey, vehicleLatestKey } from '../processing/vehicle-state.store';
 import { seedLoad, updateLoad } from '../../__tests__/support/main-schema';
 import { createTripsModule } from '../trips';
-import { createIngestPhoneModule } from './index';
+import { createIngestPhoneModule, DRIVER_SOCKET_MAX_MESSAGE_BYTES } from './index';
 
 const available = await infraAvailable();
 const SECRET = 'integration-test-secret-integration-test';
 const PARTITIONS = 4;
 const TENANT = '11111111-1111-4111-8111-111111111111';
+const IST_OFFSET_MS = 330 * 60_000;
 
 describe.skipIf(!available)('/driver socket → stream → processing (real Redis + Postgres)', () => {
   let ds: DataSource;
@@ -44,7 +45,10 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     trips = createTripsModule(ds, redis, silentLogger);
 
     httpServer = createServer();
-    io = new Server(httpServer, { transports: ['websocket'] });
+    io = new Server(httpServer, {
+      transports: ['websocket'],
+      maxHttpBufferSize: DRIVER_SOCKET_MAX_MESSAGE_BYTES,
+    });
     createIngestPhoneModule({
       dataSource: ds,
       mainRedis: redis,
@@ -244,6 +248,37 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     expect(Number(await redis.hget(tripMetricsKey(tripId), 'distance_m:driver_app'))).toBe(
       distance,
     );
+  });
+
+  it('accepts a full 200-point batch of full-precision phone fixes', async () => {
+    const socket = client(token(randomUUID()));
+    await connected(socket);
+    // Real phones send doubles at full precision (divisions here give the same ~17 digits), so a
+    // full batch is bigger than the ~50 KB of rounded test data — over the old 64 KB limit.
+    const now = Date.now();
+    const batch = Array.from({ length: 200 }, (_, i) => ({
+      pointId: randomUUID(),
+      lat: 28.6 + (i + 1) / 98_765.4321,
+      lng: 77.2 + (i + 1) / 87_654.3219,
+      accuracy: 8 + (i + 1) / 7.77,
+      speed: 12 + (i + 1) / 33.33,
+      bearing: 90 + (i + 1) / 9.99,
+      altitude: 216 + (i + 1) / 3.33,
+      // As the app sends it: local time with milliseconds and an offset.
+      recordedAt: new Date(now - (200 - i) * 500 + IST_OFFSET_MS)
+        .toISOString()
+        .replace('Z', '+05:30'),
+      isMock: false,
+      batteryPct: 80,
+      provider: 'fused',
+      appState: 'background',
+    }));
+    expect(JSON.stringify(['loc:batch', batch]).length).toBeGreaterThan(64 * 1024);
+    expect(await socket.timeout(5000).emitWithAck('loc:batch', batch)).toEqual({
+      ok: true,
+      accepted: 0,
+      noTrip: 200,
+    });
   });
 
   it('acks noTrip and stores nothing for a driver not on a trip', async () => {
