@@ -1,9 +1,11 @@
 import { z } from 'zod';
 import { RULE_IDS } from '../rules';
 
+// .meta() only feeds the generated OpenAPI spec (the transform hides the allowed values there).
 const csv = <T extends string>(values: readonly [T, ...T[]]) =>
   z
     .string()
+    .meta({ description: `Comma-separated list of: ${values.join(', ')}` })
     .transform((value) =>
       value
         .split(',')
@@ -14,7 +16,9 @@ const csv = <T extends string>(values: readonly [T, ...T[]]) =>
 
 export const listAlertsSchema = z.object({
   query: z.object({
-    status: csv(['open', 'acknowledged', 'closed'] as const).default(['open', 'acknowledged']),
+    status: csv(['open', 'acknowledged', 'closed'] as const)
+      .default(['open', 'acknowledged'])
+      .meta({ default: 'open,acknowledged' }),
     severity: csv(['info', 'warning', 'medium', 'high', 'critical'] as const).optional(),
     tripId: z.uuid().optional(),
     vehicleId: z.uuid().optional(),

@@ -6,6 +6,7 @@ import { env } from './config/env';
 import { API_VERSION_PREFIX } from './shared/constants/api';
 import { errorHandler, notFoundHandler } from './shared/middleware/error-handler.middleware';
 import { requestId } from './shared/middleware/request-id.middleware';
+import { createDocsRouter } from './shared/openapi/docs';
 
 // REST API for the api role. Health/readiness/metrics are NOT here — they live on the ops server
 // (shared/lifecycle/ops-server.ts) so every role exposes them the same way.
@@ -32,6 +33,12 @@ export function createApp({ publicRouters, authMiddleware, routers }: Container)
   );
   app.use(express.json({ limit: '1mb' }));
   app.use(requestId);
+
+  // Ahead of auth, and only outside production: Swagger UI/spec must load without a token, and
+  // must not exist as a route at all once NODE_ENV=production.
+  if (env.nodeEnv !== 'production') {
+    app.use('/docs', createDocsRouter());
+  }
 
   for (const { path, router } of publicRouters) {
     app.use(`${API_VERSION_PREFIX}${path}`, router);
