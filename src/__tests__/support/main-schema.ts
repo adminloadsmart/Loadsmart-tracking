@@ -10,6 +10,8 @@ export const MAIN_SCHEMA_SQL = `
   CREATE SCHEMA IF NOT EXISTS loads;
   CREATE SCHEMA IF NOT EXISTS masters;
   CREATE SCHEMA IF NOT EXISTS customers;
+  CREATE TABLE IF NOT EXISTS customers.customers (
+    id uuid PRIMARY KEY, tenant_id uuid NOT NULL, name text NOT NULL);
   CREATE TABLE IF NOT EXISTS masters.truck_types (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, name text NOT NULL, body_type text,
     deleted_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now());
@@ -36,14 +38,16 @@ export const MAIN_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS loads.loads (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, code text NOT NULL, status text NOT NULL,
     source_type text NOT NULL, requisition_id uuid NOT NULL, vehicle_id uuid, vehicle_number text,
-    driver_id uuid, driver_name text, driver_number text, loading_confirmed_at timestamptz,
+    driver_id uuid, driver_name text, driver_number text, planned_capacity_tonnes numeric,
+    loading_confirmed_at timestamptz,
     at_plant_at timestamptz, in_transit_at timestamptz, reached_delivery_point_at timestamptz,
     delivered_at timestamptz, closed_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now());
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS planned_capacity_tonnes numeric;
 `;
 
 export const MAIN_TABLES =
   'loads.loads, loads.requisitions, customers.customer_delivery_points, masters.loading_points, ' +
-  'masters.vehicle_telemetry_meta, masters.vehicles, masters.truck_types';
+  'masters.vehicle_telemetry_meta, masters.vehicles, masters.truck_types, customers.customers';
 
 export interface SeedLoadInput {
   tenantId: string;
@@ -56,6 +60,9 @@ export interface SeedLoadInput {
   bodyType?: string | null;
   driverId?: string | null;
   driverName?: string | null;
+  driverNumber?: string | null;
+  customerName?: string;
+  plannedTonnes?: number | null;
   startedAt?: Date | null;
   deliveredAt?: Date | null;
   expectedDeliveryDate?: string; // YYYY-MM-DD
@@ -108,6 +115,11 @@ export async function seedLoad(ds: DataSource, input: SeedLoadInput): Promise<Se
      VALUES ($1, $2, 'Plant', 'Plot 1', 'Delhi', 'DL', '110001', $3, $4)`,
     [loadingPointId, t, origin?.lat ?? null, origin?.lng ?? null],
   );
+  await ds.query(`INSERT INTO customers.customers (id, tenant_id, name) VALUES ($1, $2, $3)`, [
+    customerId,
+    t,
+    input.customerName ?? 'ACME Ltd',
+  ]);
   const d = input.destination ?? { location: 'ACME DC' };
   await ds.query(
     `INSERT INTO customers.customer_delivery_points (id, tenant_id, customer_id, location, address_line_1, city, state, pin_code)
@@ -140,8 +152,9 @@ export async function seedLoad(ds: DataSource, input: SeedLoadInput): Promise<Se
     input.startedAt === undefined ? new Date(Date.now() - 3_600_000) : input.startedAt;
   await ds.query(
     `INSERT INTO loads.loads (id, tenant_id, code, status, source_type, requisition_id, vehicle_id, vehicle_number,
-       driver_id, driver_name, loading_confirmed_at, delivered_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, clock_timestamp())`,
+       driver_id, driver_name, driver_number, planned_capacity_tonnes, loading_confirmed_at,
+       delivered_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, clock_timestamp())`,
     [
       loadId,
       t,
@@ -153,6 +166,8 @@ export async function seedLoad(ds: DataSource, input: SeedLoadInput): Promise<Se
       input.vehicleNumber ?? input.registrationNumber ?? 'MH12AB0001',
       driverId,
       input.driverName ?? null,
+      input.driverNumber ?? null,
+      input.plannedTonnes ?? null,
       started,
       input.deliveredAt ?? null,
     ],

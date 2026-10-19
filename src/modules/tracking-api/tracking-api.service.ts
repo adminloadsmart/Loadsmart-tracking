@@ -3,6 +3,7 @@ import { NotFoundError, ValidationError } from '../../shared/errors';
 import type { PointSource } from '../points';
 import type { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
 import {
+  PlannedRouteRow,
   TrackingApiRepository,
   TrackPoint,
   TrackPolyline,
@@ -80,6 +81,62 @@ function pointView(point: TrackPoint) {
     source: point.source,
     motion: point.motion,
   };
+}
+
+type EtaView = {
+  etaAt: string;
+  promisedAt: string | null;
+  projectedDelayMin: number;
+  remainingKm: number;
+  speedKmh: number;
+  basis: string;
+  stale: boolean;
+  evaluatedAt: string;
+};
+
+/** The DELAY rule's latest ETA (Redis hash, all strings) as the API shape; null if none yet. */
+function etaView(eta: Record<string, string>): EtaView | null {
+  if (!eta.etaAt) return null;
+  return {
+    etaAt: new Date(Number(eta.etaAt)).toISOString(),
+    promisedAt: eta.promisedAt ? new Date(Number(eta.promisedAt)).toISOString() : null,
+    projectedDelayMin: Number(eta.projectedDelayMin),
+    remainingKm: Number(eta.remainingKm),
+    speedKmh: Number(eta.speedKmh),
+    basis: eta.basis,
+    stale: eta.stale === '1',
+    evaluatedAt: new Date(Number(eta.evaluatedAt)).toISOString(),
+  };
+}
+
+const round1 = (value: number) => Math.round(value * 10) / 10;
+
+function routeView(route: PlannedRouteRow | undefined) {
+  return route
+    ? {
+        kind: route.kind,
+        version: route.version,
+        distanceKm: round1(route.distance_m / 1000),
+        durationMin: route.duration_s === null ? null : Math.round(route.duration_s / 60),
+      }
+    : null;
+}
+
+/** Free-text match over what the tracking list's search box covers. */
+function matchesQuery(trip: TripRow, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return [
+    trip.load_code,
+    trip.customer_name,
+    trip.vehicle_number,
+    trip.driver_name,
+    trip.driver_phone,
+    trip.origin?.name,
+    trip.origin?.city,
+    trip.destination?.name,
+    trip.destination?.city,
+  ].some((field) => field?.toLowerCase().includes(needle));
 }
 
 /**
@@ -162,31 +219,57 @@ export class TrackingApiService {
     };
   }
 
-  async listTrips(scope: TenantScope, state: 'pending' | 'active' | 'ended', limit: number) {
-    const trips = await this.repository.listTrips(scope, state, limit);
-    const latest = await this.positions.readLatest(
-      trips.map((trip) => trip.vehicle_id).filter((id): id is string => Boolean(id)),
-    );
+  async listTrips(
+    scope: TenantScope,
+    state: 'pending' | 'active' | 'ended',
+    limit: number,
+    query?: string,
+  ) {
+    const all = await this.repository.listTrips(scope, state, limit);
+    const trips = query ? all.filter((trip) => matchesQuery(trip, query)) : all;
+    const [latest, etas] = await Promise.all([
+      this.positions.readLatest(
+        trips.map((trip) => trip.vehicle_id).filter((id): id is string => Boolean(id)),
+      ),
+      // ETAs only exist for trips the DELAY rule is evaluating (in transit).
+      Promise.all(trips.map((trip) => this.readEta(trip.id))),
+    ]);
     const now = Date.now();
     return {
-      trips: trips.map((trip) => {
+      trips: trips.map((trip, index) => {
         const position = trip.vehicle_id ? latest.get(trip.vehicle_id) : undefined;
         return {
           ...tripView(trip),
           // Only a position reported for THIS trip is the trip's position.
           position: position && position.tripId === trip.id ? toPositionView(position, now) : null,
+          eta: etaView(etas[index]),
         };
       }),
     };
   }
 
+  /** Counters for the tracking screen's header cards, over the tenant's active trips. */
+  async summary(scope: TenantScope) {
+    const { trips } = await this.listTrips(scope, 'active', 500);
+    return {
+      // "At a gate" (inside a loading/unloading geofence) needs geofence events (Phase 7).
+      onTheRoad: trips.length,
+      runningLate: trips.filter((trip) => (trip.eta?.projectedDelayMin ?? 0) > 0).length,
+      notTracked: trips.filter((trip) => trip.position === null).length,
+    };
+  }
+
   async trip(scope: TenantScope, tripId: string) {
     const trip = await this.requireTrip(scope, tripId);
-    const [metrics, latest, eta] = await Promise.all([
+    const [metrics, latest, rawEta, routes] = await Promise.all([
       this.positions.readTripMetrics(tripId),
       trip.vehicle_id ? this.positions.readLatest([trip.vehicle_id]) : Promise.resolve(new Map()),
       this.readEta(tripId),
+      this.repository.currentRoutes([tripId]),
     ]);
+    const route = routes.get(tripId);
+    const eta = etaView(rawEta);
+    const routeKm = route ? round1(route.distance_m / 1000) : null;
     const position = trip.vehicle_id ? latest.get(trip.vehicle_id) : undefined;
     // Until the waterfall (Phase 6) picks an authoritative source, report the largest source's
     // distance as the trip distance and expose the per-source breakdown.
@@ -204,18 +287,24 @@ export class TrackingApiService {
       position: position && position.tripId === trip.id ? toPositionView(position) : null,
       routeStatus: trip.route_status,
       promisedDeliveryAt: trip.promised_delivery_at?.toISOString() ?? null,
-      eta: eta.etaAt
-        ? {
-            etaAt: new Date(Number(eta.etaAt)).toISOString(),
-            promisedAt: eta.promisedAt ? new Date(Number(eta.promisedAt)).toISOString() : null,
-            projectedDelayMin: Number(eta.projectedDelayMin),
-            remainingKm: Number(eta.remainingKm),
-            speedKmh: Number(eta.speedKmh),
-            basis: eta.basis,
-            stale: eta.stale === '1',
-            evaluatedAt: new Date(Number(eta.evaluatedAt)).toISOString(),
-          }
-        : null,
+      route: routeView(route),
+      // Route km already driven = route length − what the ETA says is left (null until both exist).
+      coveredKm: routeKm !== null && eta ? round1(Math.max(0, routeKm - eta.remainingKm)) : null,
+      eta,
+    };
+  }
+
+  /** The route in force for the trip (planned, or the ops-approved alternate), for the map. */
+  async tripRoute(scope: TenantScope, tripId: string) {
+    const trip = await this.requireTrip(scope, tripId);
+    const route = (await this.repository.currentRoutes([tripId])).get(tripId);
+    return {
+      tripId,
+      routeStatus: trip.route_status,
+      route: routeView(route),
+      ...(route
+        ? { encoding: 'google-polyline-5', polyline: route.polyline }
+        : { encoding: null, polyline: null }),
     };
   }
 
@@ -270,6 +359,9 @@ function tripView(trip: TripRow) {
     vehicleNumber: trip.vehicle_number,
     driverId: trip.driver_id,
     driverName: trip.driver_name,
+    driverPhone: trip.driver_phone,
+    customerName: trip.customer_name,
+    plannedTonnes: trip.planned_tonnes,
     origin: trip.origin,
     destination: trip.destination,
     milestones: trip.milestones,

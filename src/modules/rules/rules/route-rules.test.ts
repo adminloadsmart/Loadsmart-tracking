@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { encodePolyline, RouteGeometry } from '../../routes/route-geometry';
 import { TripRoutes } from '../../routes/trip-routes';
 import type { TripRouteRow } from '../../routes/routes.repository';
-import { evaluateDelay, promisedTime } from '../delay';
+import { alreadyLateSeverity, evaluateDelay, promisedTime } from '../delay';
 import { deviationGpsRule } from './deviation-gps.rule';
 import { progressGpsRule } from './progress-gps.rule';
 import { ctx, every, fix, M, run, T0, TRIP } from './rule-test-kit';
@@ -218,6 +218,29 @@ describe('DELAY-GPS progress + projection', () => {
     expect(slow.speedKmh).toBeCloseTo(20, 0);
     expect(slow.remainingKm).toBeCloseTo(51.2, 0);
     expect(slow.delayMin).toBeGreaterThan(90);
+  });
+
+  it('measures the observed speed without bias from how progress is sampled', () => {
+    // 3 h at a steady 36 km/h (10 m/s), a fix every 60 s — the estimate must be 36, not slower.
+    const fixes = every(0, 3 * 3600, 60, (s) => ({ speedKmh: 36, ...at(s * 10) }));
+    const { state } = run(progressGpsRule, fixes, P);
+    const nowMs = fixes.at(-1)!.t;
+    const estimate = evaluateDelay({
+      nowMs,
+      routeLengthM: 111_195,
+      startMs: T0,
+      promisedMs: T0 + 6 * 3_600_000,
+      progress: state,
+      params: P.params,
+    });
+    expect(estimate.basis).toBe('observed');
+    expect(estimate.speedKmh).toBeCloseTo(36, 0);
+  });
+
+  it('"already late" is Warning until 240 min late, then Critical', () => {
+    expect(alreadyLateSeverity(5, P.params)).toBe('warning');
+    expect(alreadyLateSeverity(239, P.params)).toBe('warning');
+    expect(alreadyLateSeverity(240, P.params)).toBe('critical');
   });
 
   it('a long halt drags the speed estimate (no separate halt term) and never divides by zero', () => {

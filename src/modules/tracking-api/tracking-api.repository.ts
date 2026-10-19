@@ -19,8 +19,19 @@ export interface PlaceRow {
   id: string;
   name: string;
   city: string | null;
+  address: string | null;
   lat: number | null;
   lng: number | null;
+}
+
+export interface PlannedRouteRow {
+  trip_id: string;
+  kind: 'planned' | 'approved_alternate';
+  version: number;
+  polyline: string;
+  distance_m: number;
+  duration_s: number | null;
+  created_at: Date;
 }
 
 export interface TripRow {
@@ -34,6 +45,8 @@ export interface TripRow {
   driver_id: string | null;
   driver_name: string | null;
   driver_phone: string | null;
+  customer_name: string | null;
+  planned_tonnes: number | null;
   tracking_state: 'pending' | 'active' | 'ended';
   tracking_started_at: Date | null;
   tracking_ended_at: Date | null;
@@ -164,7 +177,9 @@ export class TrackingApiRepository {
     const routeStatus = new Map(statusRows.map((r) => [r.trip_id, r.status]));
     const place = (id: string | null): PlaceRow | null => {
       const p = id ? places.get(id) : undefined;
-      return p ? { id: p.id, name: p.name, city: p.city, lat: p.lat, lng: p.lng } : null;
+      return p
+        ? { id: p.id, name: p.name, city: p.city, address: p.address, lat: p.lat, lng: p.lng }
+        : null;
     };
     return loads.map((load) => ({
       id: load.id,
@@ -177,6 +192,8 @@ export class TrackingApiRepository {
       driver_id: load.driverId,
       driver_name: load.driverName,
       driver_phone: load.driverNumber,
+      customer_name: load.customerName,
+      planned_tonnes: load.plannedTonnes,
       tracking_state: trackingStateFor(load.status, false),
       tracking_started_at: load.startedAt,
       tracking_ended_at: load.endedAt,
@@ -186,6 +203,18 @@ export class TrackingApiRepository {
       origin: place(load.loadingPointId),
       destination: place(load.deliveryPointId),
     }));
+  }
+
+  /** The route currently in force per trip (latest version: planned, or the approved alternate). */
+  async currentRoutes(tripIds: string[]): Promise<Map<string, PlannedRouteRow>> {
+    if (tripIds.length === 0) return new Map();
+    const rows: PlannedRouteRow[] = await this.dataSource.query(
+      `SELECT DISTINCT ON (trip_id) trip_id, kind, version, polyline, distance_m, duration_s, created_at
+       FROM tracking.trip_routes WHERE trip_id = ANY($1::uuid[])
+       ORDER BY trip_id, version DESC`,
+      [tripIds],
+    );
+    return new Map(rows.map((row) => [row.trip_id, row]));
   }
 
   /** Raw trip points in time order (playback). */

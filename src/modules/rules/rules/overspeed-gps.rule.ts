@@ -2,6 +2,16 @@ import { alertId, distanceM, episodeId, num } from '../rule-helpers';
 import { Anchor, Effects, FixRule, RuleContext, RuleFix } from '../rule.types';
 import { RULE_DEFAULTS } from '../defaults';
 
+/** Fixes above the start threshold before the 20 s hold confirms an episode. */
+interface Candidate {
+  maxSpeed: number;
+  speedSum: number;
+  speedCount: number;
+  distanceM: number;
+  start: Anchor;
+  last: Anchor;
+}
+
 interface Episode {
   id: string;
   startMs: number;
@@ -19,6 +29,8 @@ export interface OverspeedState {
   phase: 'none' | 'candidate' | 'over';
   aboveSinceMs: number | null;
   belowSinceMs: number | null;
+  /** Readings since aboveSinceMs — the episode is back-dated to them, so its metrics include them. */
+  candidate?: Candidate | null;
   episode: Episode | null;
   /** The last closed episode — reopened if the next one starts within mergeGapS. */
   previous: (Episode & { endMs: number }) | null;
@@ -53,6 +65,7 @@ export const overspeedGpsRule: FixRule<OverspeedState> = {
     phase: 'none',
     aboveSinceMs: null,
     belowSinceMs: null,
+    candidate: null,
     episode: null,
     previous: null,
     prevFix: null,
@@ -75,6 +88,7 @@ export const overspeedGpsRule: FixRule<OverspeedState> = {
     if (state.prevFix && fix.t - state.prevFix.t > num(p, 'maxFixGapS') * 1000) {
       s.aboveSinceMs = null;
       s.belowSinceMs = null;
+      s.candidate = null;
       if (s.phase === 'candidate') s.phase = 'none';
     }
 
@@ -84,6 +98,7 @@ export const overspeedGpsRule: FixRule<OverspeedState> = {
 
     if (s.phase !== 'over') {
       if (speed > startAbove) {
+        s.candidate = addReading(s.aboveSinceMs === null ? null : (s.candidate ?? null), fix);
         s.aboveSinceMs = s.aboveSinceMs ?? fix.t;
         s.phase = 'candidate';
         if (fix.t - s.aboveSinceMs >= num(p, 'startHoldS') * 1000) {
@@ -92,6 +107,7 @@ export const overspeedGpsRule: FixRule<OverspeedState> = {
       } else {
         s.phase = 'none';
         s.aboveSinceMs = null;
+        s.candidate = null;
       }
       return s;
     }
@@ -129,6 +145,29 @@ export const overspeedGpsRule: FixRule<OverspeedState> = {
   },
 };
 
+function addReading(c: Candidate | null, fix: RuleFix): Candidate {
+  const position = { lat: fix.lat, lng: fix.lng };
+  const speed = fix.speedKmh!;
+  if (!c) {
+    return {
+      maxSpeed: speed,
+      speedSum: speed,
+      speedCount: 1,
+      distanceM: 0,
+      start: position,
+      last: position,
+    };
+  }
+  return {
+    maxSpeed: Math.max(c.maxSpeed, speed),
+    speedSum: c.speedSum + speed,
+    speedCount: c.speedCount + 1,
+    distanceM: c.distanceM + distanceM(c.last, position),
+    start: c.start,
+    last: position,
+  };
+}
+
 function validFix(fix: RuleFix): boolean {
   if (fix.source !== 'blackrock') return true; // phone fixes were already accuracy-filtered
   if (fix.gpsPositioned === false) return false;
@@ -144,12 +183,29 @@ function begin(
   effects: Effects,
 ): OverspeedState {
   const p = ctx.params;
+  const c = s.candidate ?? addReading(null, fix);
   const prev = s.previous;
   if (prev && startMs - prev.endMs < num(p, 'mergeGapS') * 1000) {
-    // Merge: the previous episode continues; its alert already went out.
+    // Merge: the previous episode continues (with these readings); its alert already went out.
     effects.episode({ op: 'reopen', id: prev.id });
-    const { endMs: _endMs, ...episode } = prev;
-    return { ...s, phase: 'over', belowSinceMs: null, aboveSinceMs: null, episode, previous: null };
+    const { endMs: _endMs, ...previous } = prev;
+    const episode: Episode = {
+      ...previous,
+      maxSpeed: Math.max(previous.maxSpeed, c.maxSpeed),
+      speedSum: previous.speedSum + c.speedSum,
+      speedCount: previous.speedCount + c.speedCount,
+      distanceM: previous.distanceM + distanceM(previous.last, c.start) + c.distanceM,
+      last: c.last,
+    };
+    return {
+      ...s,
+      phase: 'over',
+      belowSinceMs: null,
+      aboveSinceMs: null,
+      candidate: null,
+      episode,
+      previous: null,
+    };
   }
 
   const id = episodeId(ctx.vehicleId, RULE, startMs, fix.source);
@@ -161,12 +217,12 @@ function begin(
     source: fix.source,
     tripId: fix.tripId,
     startedAt: startMs,
-    anchor: position,
+    anchor: c.start,
     metrics: { limitKmh: limit },
   });
 
   let raisedAlertId: string | null = null;
-  const critical = fix.speedKmh! >= limit + num(p, 'criticalOverKmh');
+  const critical = c.maxSpeed >= limit + num(p, 'criticalOverKmh');
   if (fix.live) {
     const dedupeKey = `${RULE}:${ctx.vehicleId}:${fix.source}:${id}`;
     raisedAlertId = alertId(dedupeKey, startMs);
@@ -181,7 +237,7 @@ function begin(
       episodeId: id,
       dedupeKey,
       occurredAt: startMs,
-      payload: { limitKmh: limit, speedKmh: fix.speedKmh, position },
+      payload: { limitKmh: limit, speedKmh: fix.speedKmh, maxSpeedKmh: c.maxSpeed, position },
     });
   }
 
@@ -190,15 +246,16 @@ function begin(
     phase: 'over',
     aboveSinceMs: null,
     belowSinceMs: null,
+    candidate: null,
     episode: {
       id,
       startMs,
-      maxSpeed: fix.speedKmh!,
-      speedSum: fix.speedKmh!,
-      speedCount: 1,
-      distanceM: 0,
-      start: position,
-      last: position,
+      maxSpeed: c.maxSpeed,
+      speedSum: c.speedSum,
+      speedCount: c.speedCount,
+      distanceM: c.distanceM,
+      start: c.start,
+      last: c.last,
       alertId: raisedAlertId,
       escalated: critical,
     },

@@ -36,8 +36,16 @@ export class TrackingApiController {
   };
 
   listTrips = async (req: Request, res: Response) => {
-    const { state, limit } = req.validatedQuery as ListTripsQuery;
-    respond(res, await this.service.listTrips(scopeOf(req), state, limit));
+    const { state, limit, q } = req.validatedQuery as ListTripsQuery;
+    respond(res, await this.service.listTrips(scopeOf(req), state, limit, q));
+  };
+
+  tripsSummary = async (req: Request, res: Response) => {
+    respond(res, await this.service.summary(scopeOf(req)));
+  };
+
+  tripRoute = async (req: Request, res: Response) => {
+    respond(res, await this.service.tripRoute(scopeOf(req), String(req.params.tripId)));
   };
 
   trip = async (req: Request, res: Response) => {

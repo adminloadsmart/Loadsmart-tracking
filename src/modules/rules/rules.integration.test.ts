@@ -113,9 +113,9 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
   /** Sends fixes (seconds relative to now) through the real stream + processor + rules. */
   async function feed(
     trip: { tripId: string; vehicleId: string; tenantId: string },
-    fixes: Array<[number, number, number]>,
+    fixes: Array<[number, number, number] | [number, number, number, number]>,
   ) {
-    const batch: NormalizedPoint[] = fixes.map(([offsetS, speedKmh, northM]) => ({
+    const batch: NormalizedPoint[] = fixes.map(([offsetS, speedKmh, northM, accuracyM = 5]) => ({
       tenantId: trip.tenantId,
       vehicleId: trip.vehicleId,
       tripId: trip.tripId,
@@ -127,7 +127,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
       lng: 77.2,
       speedKmh,
       heading: 0,
-      accuracyM: 5,
+      accuracyM,
       flags: null,
     }));
     await points.publisher.publish(batch);
@@ -267,6 +267,23 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
     );
     expect(episode.status).toBe('closed');
     expect(episode.metrics.durationS).toBeGreaterThan(69 * 60);
+  });
+
+  it('INACT: a packet that is rejected (e.g. low accuracy) still counts as activity; a future one does not', async () => {
+    const trip = await startTrip();
+    await feed(trip, [[-70 * 60, 50, 0]]); // last good fix 70 minutes ago
+    await feed(trip, [[0, 50, 100, 500]]); // arrives now, rejected as low_accuracy
+    await rules.tick(Date.now());
+    expect(await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts`)).toEqual([{ n: 0 }]);
+
+    const other = await startTrip();
+    await feed(other, [[-70 * 60, 50, 0]]);
+    await feed(other, [[30 * 60, 50, 100]]); // device clock 30 min ahead: future_timestamp
+    await rules.tick(Date.now());
+    const alerts = await ds.query(
+      `SELECT trip_id FROM tracking.alerts WHERE rule_id = 'INACT-GPS'`,
+    );
+    expect(alerts).toEqual([{ trip_id: other.tripId }]);
   });
 
   it('rule settings: org admin can change thresholds (permission-checked), engine applies them', async () => {

@@ -27,6 +27,8 @@ export const listTripsSchema = z.object({
   query: z.object({
     state: z.enum(['pending', 'active', 'ended']).default('active'),
     limit: z.coerce.number().int().min(1).max(500).default(100),
+    // Matches load code, customer, truck, driver name/phone, and origin/destination name or city.
+    q: z.string().trim().max(100).optional(),
   }),
 });
 

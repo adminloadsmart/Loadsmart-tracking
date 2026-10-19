@@ -56,6 +56,23 @@ describe('OVER-GPS', () => {
     expect(effects.episodes.map((e) => e.op)).toEqual(['open', 'close', 'reopen']);
   });
 
+  it('counts the fixes before the 20 s hold in the episode (start, max, distance) and its severity', () => {
+    const fixes = [
+      fix(0, { speedKmh: 100, ...north(0) }),
+      fix(10, { speedKmh: 90, ...north(250) }),
+      fix(20, { speedKmh: 88, ...north(500) }), // confirms the episode (held 20 s)
+      ...cruise(30, 30, 60, 750),
+    ];
+    const { effects, raised } = run(overspeedGpsRule, fixes, OVER);
+    expect(raised[0]).toMatchObject({ severity: 'critical' }); // 100 ≥ 80 + 20
+    const close = effects.episodes.find((e) => e.op === 'close') as {
+      metrics: { maxSpeedKmh: number; distanceM: number; start: { lat: number } };
+    };
+    expect(close.metrics.maxSpeedKmh).toBe(100);
+    expect(close.metrics.start.lat).toBeCloseTo(north(0).lat, 6);
+    expect(close.metrics.distanceM).toBeGreaterThanOrEqual(500);
+  });
+
   it('escalates to Critical at limit + 20 km/h', () => {
     const { effects } = run(
       overspeedGpsRule,
@@ -130,6 +147,28 @@ describe('NIGHT-GPS', () => {
   it('GPS drift while parked never counts (needs speed AND distance)', () => {
     const drift = every(IST_2250 + 600, 3600, 15, (s) => ({ speedKmh: 0, ...north((s % 30) * 3) }));
     expect(run(nightGpsRule, drift, NIGHT).opened).toHaveLength(0);
+  });
+
+  it('a truck creeping at 5-10 km/h after a stop is not stationary', () => {
+    const fixes = [
+      ...cruise(IST_2250 + 15 * 60, 10 * 60, 50), // 23:05–23:15 driving
+      fix(IST_2250 + 26 * 60, { speedKmh: 0, ...north(8400) }), // brief stop
+      ...every(IST_2250 + 27 * 60, 15 * 60, 60, (s) => ({
+        speedKmh: 7,
+        ...north(8400 + (s - (IST_2250 + 27 * 60)) * 2),
+      })), // crawling 15 min
+    ];
+    const closes = (extra: ReturnType<typeof fix>[]) =>
+      run(nightGpsRule, [...fixes, ...extra], NIGHT).effects.episodes.filter(
+        (e) => e.op === 'close',
+      );
+    const stopAt = IST_2250 + 43 * 60;
+
+    // Stopping after the crawl starts a fresh 10-minute stationary timer…
+    expect(closes([fix(stopAt, { speedKmh: 0, ...north(10_300) })])).toHaveLength(0);
+    // …and the episode ends when that stop began, not at the brief stop before the crawl.
+    const stopped = every(stopAt, 10 * 60, 60, () => ({ speedKmh: 0, ...north(10_300) }));
+    expect(closes(stopped)).toEqual([expect.objectContaining({ endedAt: fix(stopAt).t })]);
   });
 
   it('starts on 2 km moved even before 5 minutes', () => {
