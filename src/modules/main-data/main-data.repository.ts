@@ -1,6 +1,12 @@
 import { DataSource } from 'typeorm';
 import type { TenantScope } from '../../shared/auth/staff-token';
-import { ACTIVE_STATUSES, LoadStatus, marketVehicleId, normalizePlate } from '../trips/trip-state';
+import {
+  ACTIVE_STATUSES,
+  INDEXED_STATUSES,
+  LoadStatus,
+  marketVehicleId,
+  normalizePlate,
+} from '../trips/trip-state';
 
 /**
  * The ONLY code in this service that knows the main loadsmart backend's tables. The tracking
@@ -43,6 +49,47 @@ export interface MainVehicle {
   bodyType: string | null;
   gpsProvider: string | null;
   gpsEnabled: boolean;
+}
+
+export interface MainGeofence {
+  id: string;
+  tenantId: string;
+  name: string;
+  /** yard | loading_point | unloading_point | fuel_pump | no_go_area */
+  type: string;
+  shape: 'circle' | 'polygon';
+  lat: number;
+  lng: number;
+  radiusM: number | null;
+  polygon: Array<{ lat: number; lng: number }> | null;
+  appliesToAllVehicles: boolean;
+  vehicleIds: string[];
+  loadingPointId: string | null;
+  customerDeliveryPointId: string | null;
+}
+
+interface GeofenceRow {
+  id: string;
+  tenant_id: string;
+  name: string;
+  type: string;
+  shape: string;
+  latitude: string;
+  longitude: string;
+  radius_m: number | null;
+  polygon: Array<{ latitude: number; longitude: number }> | null;
+  applies_to_all_vehicles: boolean;
+  loading_point_id: string | null;
+  customer_delivery_point_id: string | null;
+  vehicle_ids: string[];
+}
+
+export interface MainTripPoints {
+  vehicleNumber: string | null;
+  pickupLoadingPointId: string | null;
+  dropCustomerDeliveryPointId: string | null;
+  /** A posted load with no customer drops at one of the shipper's own loading points. */
+  dropLoadingPointId: string | null;
 }
 
 export interface MainPlace {
@@ -183,6 +230,11 @@ export class MainDataRepository {
     return this.loadsByStatus(scope, ACTIVE_STATUSES, limit);
   }
 
+  /** What the active-trip index holds: active loads plus assigned ones (see INDEXED_STATUSES). */
+  indexedLoads(limit = 50_000): Promise<MainLoad[]> {
+    return this.loadsByStatus(null, INDEXED_STATUSES, limit);
+  }
+
   async load(scope: TenantScope | null, id: string): Promise<MainLoad | null> {
     const params: unknown[] = [id];
     const rows: LoadRow[] = await this.dataSource.query(
@@ -292,6 +344,81 @@ export class MainDataRepository {
       gpsProvider: null,
       gpsEnabled: false,
     }));
+  }
+
+  // ---- geofences ---------------------------------------------------------------------------
+
+  /**
+   * The tenant's live geofences — created and edited in main (tracking.geofences, its migration
+   * CreateGeofences), only read here — with the trucks each one is limited to.
+   */
+  async geofences(tenantId: string): Promise<MainGeofence[]> {
+    const rows: GeofenceRow[] = await this.dataSource.query(
+      `SELECT g.id, g.tenant_id, g.name, g.type::text AS type, g.shape::text AS shape,
+              g.latitude, g.longitude, g.radius_m, g.polygon, g.applies_to_all_vehicles,
+              g.loading_point_id, g.customer_delivery_point_id,
+              COALESCE(array_agg(v.vehicle_id) FILTER (WHERE v.vehicle_id IS NOT NULL), '{}')
+                AS vehicle_ids
+       FROM tracking.geofences g
+       LEFT JOIN tracking.geofence_vehicles v ON v.geofence_id = g.id
+       WHERE g.tenant_id = $1 AND g.is_active AND g.deleted_at IS NULL
+       GROUP BY g.id`,
+      [tenantId],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      tenantId: r.tenant_id,
+      name: r.name,
+      type: r.type,
+      shape: r.shape === 'polygon' ? 'polygon' : 'circle',
+      lat: Number(r.latitude),
+      lng: Number(r.longitude),
+      radiusM: r.radius_m,
+      polygon: Array.isArray(r.polygon)
+        ? r.polygon.map((p) => ({ lat: Number(p.latitude), lng: Number(p.longitude) }))
+        : null,
+      appliesToAllVehicles: r.applies_to_all_vehicles,
+      vehicleIds: r.vehicle_ids,
+      loadingPointId: r.loading_point_id,
+      customerDeliveryPointId: r.customer_delivery_point_id,
+    }));
+  }
+
+  /**
+   * Each trip's pickup and drop master points — from its requisition, or from its posting for a
+   * posted load — plus the truck's plate. What a geofence's linked point is matched against.
+   */
+  async tripPoints(loadIds: string[]): Promise<Map<string, MainTripPoints>> {
+    if (loadIds.length === 0) return new Map();
+    const rows: Array<{
+      id: string;
+      vehicle_number: string | null;
+      pickup_loading_point_id: string | null;
+      drop_customer_delivery_point_id: string | null;
+      drop_loading_point_id: string | null;
+    }> = await this.dataSource.query(
+      `SELECT l.id, l.vehicle_number,
+              COALESCE(r.loading_point_id, p.pickup_loading_point_id) AS pickup_loading_point_id,
+              COALESCE(r.customer_delivery_point_id, p.drop_customer_delivery_point_id)
+                AS drop_customer_delivery_point_id,
+              p.drop_loading_point_id
+       FROM loads.loads l
+       LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
+       LEFT JOIN loads.load_postings p ON p.id = l.posting_id
+       WHERE l.id = ANY($1::uuid[])`,
+      [loadIds],
+    );
+    return new Map(
+      rows.map((r) => [
+        r.id,
+        {
+          vehicleNumber: r.vehicle_number ? normalizePlate(r.vehicle_number) : null,
+          pickupLoadingPointId: r.pickup_loading_point_id,
+          dropCustomerDeliveryPointId: r.drop_customer_delivery_point_id,
+          dropLoadingPointId: r.drop_loading_point_id,
+        },
+      ]),
+    );
   }
 
   // ---- places ------------------------------------------------------------------------------

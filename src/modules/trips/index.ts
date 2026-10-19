@@ -21,6 +21,8 @@ export {
 export type { ActiveTripRefs, TripRef } from './active-trip-index';
 export {
   ACTIVE_STATUSES,
+  APPROACH_STATUS,
+  INDEXED_STATUSES,
   LOAD_STATUSES,
   marketVehicleId,
   normalizePlate,

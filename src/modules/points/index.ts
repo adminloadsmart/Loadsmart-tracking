@@ -32,4 +32,5 @@ export function createPointsModule(
 export type { NormalizedPoint, PointSource } from './point.contract';
 export { normalizedPointSchema, POINT_SOURCES } from './point.contract';
 export type { BatchHook, PointProcessingService } from './point-processing.service';
+export { composeHooks } from './point-processing.service';
 export type { PointPublisher } from './point.publisher';

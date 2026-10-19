@@ -157,6 +157,7 @@ async function ingest(
             vehicleId: trip.vehicleId,
             tripId: trip.tripId,
             driverId: driver.driverId,
+            approachTripId: trip.approachTripId,
           },
           receivedAt,
         ),
