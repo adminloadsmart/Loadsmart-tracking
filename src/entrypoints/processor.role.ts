@@ -1,8 +1,9 @@
 import { env } from '../config/env';
 import { createRedisConnection } from '../db/redis-connection';
 import { redisManager } from '../db/redis';
+import { createGeofencesModule } from '../modules/geofences';
 import { createLivePublisher } from '../modules/live';
-import { createPointsModule } from '../modules/points';
+import { composeHooks, createPointsModule } from '../modules/points';
 import { createRoutesModule } from '../modules/routes';
 import { createRulesModule } from '../modules/rules';
 import { createTripsModule } from '../modules/trips';
@@ -19,13 +20,14 @@ const STALL_THRESHOLD_MS = 30_000;
 /**
  * The partitioned point stream (docs/ROADMAP.md §1): this instance reads only the partitions it
  * holds a lease on, so each vehicle's points are processed in order by one consumer at a time,
- * through the pipeline and the rules engine. Scale out by adding processor instances; partitions rebalance automatically (up to 16).
+ * through the pipeline, the rules engine and the geofence check. Scale out by adding processor instances; partitions rebalance automatically (up to 16).
  */
 export const startProcessorRole: RoleStarter = async ({ dataSource, health, logger }) => {
   const redis = redisManager.getClient();
   const { activeTrips } = createTripsModule(dataSource, redis, logger);
   const routes = createRoutesModule({ dataSource, redis, logger });
   const rules = createRulesModule({ dataSource, redis, activeTrips, logger, routes });
+  const geofences = createGeofencesModule({ dataSource, redis, activeTrips, logger });
   const points = createPointsModule(
     dataSource,
     redis,
@@ -35,7 +37,7 @@ export const startProcessorRole: RoleStarter = async ({ dataSource, health, logg
     },
     { maxAccuracyM: env.phoneMaxAccuracyM },
     { onLatestPositions: createLivePublisher(redis).publish, logger },
-    rules.hook,
+    composeHooks(rules.hook, geofences.hook),
   );
 
   const leases = new PartitionLeaseManager({

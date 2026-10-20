@@ -20,6 +20,30 @@ export interface BatchHook {
   }>;
 }
 
+/**
+ * Several hooks as one (rules engine, geofence check), run in order: each one's state writes join
+ * the same Redis transaction, and every after-commit step runs — one failing doesn't skip the rest.
+ */
+export function composeHooks(...hooks: BatchHook[]): BatchHook {
+  return {
+    async run(points, nowMs) {
+      const results: Array<Awaited<ReturnType<BatchHook['run']>>> = [];
+      for (const hook of hooks) results.push(await hook.run(points, nowMs));
+      return {
+        writeState: (multi) => {
+          for (const result of results) result.writeState?.(multi);
+        },
+        afterCommit: async () => {
+          const failures = (
+            await Promise.allSettled(results.map((result) => result.afterCommit?.()))
+          ).filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+          if (failures.length > 0) throw failures[0].reason;
+        },
+      };
+    },
+  };
+}
+
 const pointsProcessed = new Counter({
   name: 'tracking_points_processed_total',
   help: 'Points taken off the point stream, by source and outcome',

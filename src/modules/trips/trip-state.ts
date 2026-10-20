@@ -23,6 +23,15 @@ export const ACTIVE_STATUSES: readonly LoadStatus[] = [
 const ENDED_STATUSES: readonly LoadStatus[] = ['delivered', 'closed'];
 
 /**
+ * Statuses the active-trip index follows: the tracked ones plus "assigned" — the drive to the
+ * plant. Points from that approach carry the trip only as `flags.approachTripId` (not `tripId`),
+ * so they never join the trip's track, distance or alert rules; the geofence check uses them to
+ * see the truck arrive at the plant.
+ */
+export const INDEXED_STATUSES: readonly LoadStatus[] = ['assigned', ...ACTIVE_STATUSES];
+export const APPROACH_STATUS: LoadStatus = 'assigned';
+
+/**
  * Tracking runs from loading confirmation until delivery: before that the truck may not even be
  * at the plant yet; after it, the load's tracking is done (the vehicle timeline keeps going).
  */

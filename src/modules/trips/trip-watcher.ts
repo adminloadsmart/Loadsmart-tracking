@@ -2,7 +2,7 @@ import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import type { MainDataRepository, MainLoad } from '../main-data';
 import { ActiveTripIndex } from './active-trip-index';
-import { trackingStateFor } from './trip-state';
+import { INDEXED_STATUSES } from './trip-state';
 
 const CURSOR_KEY = 'trk:trips:cursor';
 const PAGE_SIZE = 1000;
@@ -13,7 +13,8 @@ const OVERLAP_MS = 30_000;
 /**
  * Keeps the Redis active-trip index (what ingest and the rules read on every point) in step with
  * the main backend's loads table — read directly, since the tracking service shares the main
- * database. A load is a trip; it's tracked from loading confirmation until delivery/close.
+ * database. A load is a trip; it's tracked from loading confirmation until delivery/close, and
+ * indexed from assignment so the drive to the plant can be matched to it (INDEXED_STATUSES).
  * Polls loads changed since the cursor (scheduler leader, every few seconds); a full rebuild runs
  * on every leadership takeover and periodically as a safety net for writes that don't touch
  * updated_at.
@@ -47,7 +48,7 @@ export class TripWatcher {
 
   /** Restores the index from the loads table (on takeover / periodically). */
   async rebuild(): Promise<{ set: number; removed: number }> {
-    const active = await this.mainData.activeLoads();
+    const active = await this.mainData.indexedLoads();
     const result = await this.index.rebuild(active.map(refs));
     this.logger.info(result, 'Active-trip index rebuilt from loads');
     return result;
@@ -63,7 +64,7 @@ export class TripWatcher {
     ) {
       await this.index.deactivate({ ...next, ...previous }, { endTrip: false });
     }
-    if (trackingStateFor(load.status, false) === 'active') {
+    if (INDEXED_STATUSES.includes(load.status)) {
       await this.index.activate(next);
     } else if (previous) {
       await this.index.deactivate({ ...next, ...previous });

@@ -1,7 +1,7 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import type { PointSource } from '../points';
-import { vehicleActiveTripKey } from '../trips';
+import { APPROACH_STATUS, tripRefKey, vehicleActiveTripKey } from '../trips';
 import { RULE_DEFAULTS } from './defaults';
 import { inactiveFlagKey, lastSeenKey, RuleEngine } from './rule-engine';
 import { alertId, episodeId, num } from './rule-helpers';
@@ -90,6 +90,10 @@ export class InactivityMonitor {
     if (await this.redis.exists(flagKey)) return []; // already inactive
 
     let tripId: string | null = await this.redis.get(vehicleActiveTripKey(vehicleId));
+    // An assigned load is indexed only for the drive to the plant — not a tracked trip yet.
+    if (tripId && (await this.redis.hget(tripRefKey(tripId), 'loadStatus')) === APPROACH_STATUS) {
+      tripId = null;
+    }
     if (source === 'driver_app' && !tripId) {
       // Phone only reports during trips: off-trip silence is expected — stop watching it.
       await this.redis.zrem(lastSeenKey(source), member);

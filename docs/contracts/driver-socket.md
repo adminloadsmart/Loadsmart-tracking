@@ -77,4 +77,4 @@ Offline batches may be flushed after the trip has ended. Points recorded during 
 
 - Use the fused location provider in a **foreground service** with a persistent notification. Request a 15 s interval at `PRIORITY_HIGH_ACCURACY`.
 - Ask the driver to exempt the app from battery optimization. Without that, the OS kills background location on most Indian OEM phones.
-- Only collect during an active trip. Points sent outside a trip come back as `noTrip` and aren't stored.
+- Collect from the moment a load is assigned to the driver until it's delivered. Points from the drive to the plant (load still assigned) are stored off the trip and only used to detect the arrival at the plant's geofence; points with no assigned or active load come back as `noTrip` and aren't stored.

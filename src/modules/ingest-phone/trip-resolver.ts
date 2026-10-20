@@ -1,10 +1,13 @@
-import type { ActiveTripIndex } from '../trips';
+import { APPROACH_STATUS, type ActiveTripIndex } from '../trips';
 import { TripRepository } from './trip.repository';
 
 export interface ResolvedTrip {
-  tripId: string;
+  /** Null on the drive to the plant (load still assigned) — see `approachTripId`. */
+  tripId: string | null;
   tenantId: string;
   vehicleId: string;
+  /** The assigned trip the truck is heading to the plant for: only the geofence check uses it. */
+  approachTripId?: string;
 }
 
 // Mirrors TRIP_START_GRACE in trip.repository.ts.
@@ -44,7 +47,10 @@ export class TripResolver {
         active.tenantId === tenantId &&
         (active.startedAtMs === null || recordedAtMs >= active.startedAtMs - START_GRACE_MS)
       ) {
-        result[i] = { tripId: active.tripId, tenantId, vehicleId: active.vehicleId };
+        result[i] =
+          active.loadStatus === APPROACH_STATUS
+            ? { tripId: null, tenantId, vehicleId: active.vehicleId, approachTripId: active.tripId }
+            : { tripId: active.tripId, tenantId, vehicleId: active.vehicleId };
       } else if (nowMs - recordedAtMs > LIVE_WINDOW_MS) {
         fallback.push(i);
       }
