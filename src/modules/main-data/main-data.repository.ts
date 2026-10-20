@@ -30,6 +30,9 @@ export interface MainLoad {
   loadingPointId: string | null;
   deliveryPointId: string | null;
   customerId: string | null;
+  customerName: string | null;
+  /** Load's planned capacity in tonnes (the "24 MT" on the tracking screen). */
+  plannedTonnes: number | null;
   /** Requisition's expected delivery date, end of day India time. */
   promisedDeliveryAt: Date | null;
   /** Tracking runs from loading confirmation… */
@@ -116,6 +119,8 @@ interface LoadRow {
   loading_point_id: string | null;
   delivery_point_id: string | null;
   customer_id: string | null;
+  customer_name: string | null;
+  planned_tonnes: string | number | null;
   promised_delivery_at: Date | null;
   loading_confirmed_at: Date | null;
   at_plant_at: Date | null;
@@ -130,12 +135,14 @@ const LOAD_SELECT = `
   SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.source_type::text AS source_type,
          l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
          r.loading_point_id, r.customer_delivery_point_id AS delivery_point_id, r.customer_id,
+         c.name AS customer_name, l.planned_capacity_tonnes AS planned_tonnes,
          ((r.expected_delivery_date::timestamp + time '23:59') AT TIME ZONE 'Asia/Kolkata')
            AS promised_delivery_at,
          l.loading_confirmed_at, l.at_plant_at, l.in_transit_at, l.reached_delivery_point_at,
          l.delivered_at, l.closed_at, l.updated_at
   FROM loads.loads l
-  LEFT JOIN loads.requisitions r ON r.id = l.requisition_id`;
+  LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
+  LEFT JOIN customers.customers c ON c.id = r.customer_id`;
 
 const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
 
@@ -160,6 +167,8 @@ function toLoad(row: LoadRow): MainLoad {
     loadingPointId: row.loading_point_id,
     deliveryPointId: row.delivery_point_id,
     customerId: row.customer_id,
+    customerName: row.customer_name,
+    plannedTonnes: row.planned_tonnes === null ? null : Number(row.planned_tonnes),
     promisedDeliveryAt: row.promised_delivery_at,
     startedAt: row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,

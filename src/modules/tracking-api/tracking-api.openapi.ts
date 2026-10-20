@@ -75,10 +75,12 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     path: `${BASE}/trips`,
     tags: [TAGS.TRIPS],
     operationId: 'trips.list',
-    ...authenticated('Trips in scope by tracking state, newest first.'),
+    ...authenticated(
+      'Trips in scope by tracking state, newest first. `q` filters by load code, customer, truck, driver, or origin/destination.',
+    ),
     request: { query: listTripsSchema.shape.query },
     responses: {
-      200: { description: '{ trips: [trip summary + position] }' },
+      200: { description: '{ trips: [trip summary + position | null + eta | null] }' },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,
     },
@@ -94,7 +96,41 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: {
         description:
-          'tripId, loadCode, loadStatus, sourceType, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, origin, destination, milestones, distanceKm, distanceKmBySource, fraudFlags, position',
+          'tripId, loadCode, loadStatus, sourceType, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null',
+      },
+      400: { description: 'Validation failed', ...errorContent },
+      ...authErrors,
+      404: { description: 'Trip not found or outside scope', ...errorContent },
+    },
+  });
+
+  registry.registerPath({
+    method: 'get',
+    path: `${BASE}/trips/summary`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.summary',
+    ...authenticated(
+      'Header counters over active trips: onTheRoad, runningLate (ETA past promised), notTracked (no position for the trip). "At a gate" is not available until geofences exist.',
+    ),
+    responses: {
+      200: { description: '{ onTheRoad, runningLate, notTracked }' },
+      ...authErrors,
+    },
+  });
+
+  registry.registerPath({
+    method: 'get',
+    path: `${BASE}/trips/{tripId}/route`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.route',
+    ...authenticated(
+      'The route in force for the trip (planned, or the approved alternate) as a Google encoded polyline, for drawing the planned route.',
+    ),
+    request: { params: tripParamsSchema.shape.params },
+    responses: {
+      200: {
+        description:
+          '{ tripId, routeStatus, route { kind, version, distanceKm, durationMin } | null, encoding, polyline } — route is null until planned; routeStatus says why',
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,
