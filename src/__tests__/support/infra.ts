@@ -2,7 +2,7 @@ import Redis from 'ioredis';
 import pino from 'pino';
 import { Client } from 'pg';
 import { DataSource, MigrationInterface } from 'typeorm';
-import { MAIN_SCHEMA_SQL, MAIN_TABLES } from './main-schema';
+import { MAIN_SCHEMA_SQL, MAIN_TABLES } from './constants/main-schema';
 
 /**
  * Integration-test infrastructure: an isolated `tracking_test` database (created and migrated on
