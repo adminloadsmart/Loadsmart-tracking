@@ -134,15 +134,21 @@ interface LoadRow {
 const LOAD_SELECT = `
   SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.source_type::text AS source_type,
          l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
-         r.loading_point_id, r.customer_delivery_point_id AS delivery_point_id, r.customer_id,
+         COALESCE(r.loading_point_id, p.pickup_loading_point_id) AS loading_point_id,
+         COALESCE(r.customer_delivery_point_id, p.drop_customer_delivery_point_id)
+           AS delivery_point_id,
+         COALESCE(r.customer_id, p.customer_id) AS customer_id,
          c.name AS customer_name, l.planned_capacity_tonnes AS planned_tonnes,
-         ((r.expected_delivery_date::timestamp + time '23:59') AT TIME ZONE 'Asia/Kolkata')
-           AS promised_delivery_at,
+         COALESCE(
+           ((r.expected_delivery_date::timestamp + time '23:59') AT TIME ZONE 'Asia/Kolkata'),
+           p.deliver_by_at
+         ) AS promised_delivery_at,
          l.loading_confirmed_at, l.at_plant_at, l.in_transit_at, l.reached_delivery_point_at,
          l.delivered_at, l.closed_at, l.updated_at
   FROM loads.loads l
   LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
-  LEFT JOIN customers.customers c ON c.id = r.customer_id`;
+  LEFT JOIN loads.load_postings p ON p.id = l.posting_id
+  LEFT JOIN customers.customers c ON c.id = COALESCE(r.customer_id, p.customer_id)`;
 
 const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
 
@@ -462,7 +468,7 @@ export class MainDataRepository {
     if (deliveryPointIds.length > 0) {
       const rows = await this.dataSource.query(
         `SELECT d.id, d.location, d.city, d.state, d.pin_code, d.address_line_1, d.address_line_2,
-                g.lat, g.lng
+                COALESCE(d.latitude, g.lat) AS lat, COALESCE(d.longitude, g.lng) AS lng
          FROM customers.customer_delivery_points d
          LEFT JOIN tracking.place_geocodes g ON g.place_id = d.id
          WHERE d.id = ANY($1::uuid[])`,
@@ -478,8 +484,9 @@ export class MainDataRepository {
             [r.address_line_1, r.address_line_2, r.city, r.state, r.pin_code]
               .filter(Boolean)
               .join(', ') || null,
-          lat: r.lat ?? null,
-          lng: r.lng ?? null,
+          // The point's own coordinates (numeric columns arrive as strings) win over the geocode cache.
+          lat: r.lat === null ? null : Number(r.lat),
+          lng: r.lng === null ? null : Number(r.lng),
         });
       }
     }
