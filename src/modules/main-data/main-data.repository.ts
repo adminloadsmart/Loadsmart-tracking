@@ -271,14 +271,14 @@ export class MainDataRepository {
   ): Promise<Array<{ recordedAt: string; load: MainLoad }>> {
     if (recordedAts.length === 0) return [];
     const rows: Array<LoadRow & { recorded_at: string }> = await this.dataSource.query(
-      `SELECT p.recorded_at, t.*
-       FROM unnest($3::text[]) AS p(recorded_at)
+      `SELECT pt.recorded_at, t.*
+       FROM unnest($3::text[]) AS pt(recorded_at)
        JOIN LATERAL (
          ${LOAD_SELECT}
          WHERE l.driver_id = $1 AND l.tenant_id = $2
            AND l.loading_confirmed_at IS NOT NULL
-           AND l.loading_confirmed_at - make_interval(mins => $4) <= p.recorded_at::timestamptz
-           AND COALESCE(l.delivered_at, l.closed_at, 'infinity') >= p.recorded_at::timestamptz
+           AND l.loading_confirmed_at - make_interval(mins => $4) <= pt.recorded_at::timestamptz
+           AND COALESCE(l.delivered_at, l.closed_at, 'infinity') >= pt.recorded_at::timestamptz
          ORDER BY l.loading_confirmed_at DESC
          LIMIT 1
        ) t ON true`,
