@@ -1,6 +1,6 @@
 # loadsmart-tracking
 
-Vehicle and trip tracking service for Loadsmart. It handles phone GPS (socket.io, every 15 s), BlackRock BR05 and SIM tracking (both pulled at intervals the org admin configures), ULIP FASTag checkpoints, the source waterfall, city and district naming via PostGIS, and the live map.
+Vehicle and trip tracking service for Loadsmart. It handles phone GPS (socket.io, every 15 s), Roadcast GPS devices and Intugine SIM tracking (both pulled), ULIP FASTag checkpoints, the source waterfall, city and district naming via PostGIS, and the live map.
 
 The full design and phased plan are in [docs/ROADMAP.md](docs/ROADMAP.md). **Current status: Phase 3.**
 
@@ -31,7 +31,7 @@ One codebase and one Docker image. The `ROLE` env var picks what a process runs:
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
 | `api`       | REST read API under `/v1` (staff token from the main backend). Requires `JWT_SECRET`                                                                               | `PORT` (4100)          |
 | `realtime`  | socket.io, websocket-only: `/driver` for phone GPS ingest, `/live` for map viewers. Requires `JWT_SECRET`                                                          | `REALTIME_PORT` (4101) |
-| `poller`    | Pulls from BlackRock, Intugine and ULIP (Phase 4+)                                                                                                                 | —                      |
+| `poller`    | Pulls from Roadcast (Intugine and ULIP to follow)                                                                                                                  | —                      |
 | `processor` | Point stream partitions (leased, rebalanced across instances): clean → movement → motion → distance → Timescale                                                    | —                      |
 | `scheduler` | Single leader through a Redis lock; runs the dispatcher, retention and outbox jobs, and the TripWatcher that polls main's `loads` table into the active-trip index | —                      |
 

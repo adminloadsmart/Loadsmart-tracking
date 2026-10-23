@@ -57,10 +57,12 @@ export class TripWatcher {
   private async apply(load: MainLoad): Promise<void> {
     const next = refs(load);
     const previous = await this.index.getRef(load.id);
-    // Reassigned mid-trip: release the previous vehicle/driver first.
+    // Reassigned mid-trip, or its vehicle's GPS device changed: release the previous ones first.
     if (
       previous &&
-      (previous.vehicleId !== next.vehicleId || previous.driverId !== next.driverId)
+      (previous.vehicleId !== next.vehicleId ||
+        previous.driverId !== next.driverId ||
+        previous.deviceImei !== next.deviceImei)
     ) {
       await this.index.deactivate({ ...next, ...previous }, { endTrip: false });
     }
@@ -80,5 +82,6 @@ function refs(load: MainLoad) {
     driverId: load.driverId,
     startedAt: load.startedAt,
     loadStatus: load.status,
+    deviceImei: load.deviceImei,
   };
 }

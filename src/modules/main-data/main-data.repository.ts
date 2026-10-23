@@ -24,6 +24,8 @@ export interface MainLoad {
   /** Tracking's vehicle id: the fleet vehicle, or a stable id derived from a market truck's plate. */
   vehicleId: string | null;
   vehicleNumber: string | null;
+  /** The fleet vehicle's GPS device IMEI (Roadcast), if one is on file. */
+  deviceImei: string | null;
   driverId: string | null;
   driverName: string | null;
   driverNumber: string | null;
@@ -52,6 +54,12 @@ export interface MainVehicle {
   bodyType: string | null;
   gpsProvider: string | null;
   gpsEnabled: boolean;
+}
+
+export interface MainGpsDeviceBinding {
+  imei: string;
+  vehicleId: string;
+  tenantId: string;
 }
 
 export interface MainGeofence {
@@ -113,6 +121,7 @@ interface LoadRow {
   source_type: 'own_fleet' | 'market';
   vehicle_id: string | null;
   vehicle_number: string | null;
+  device_imei: string | null;
   driver_id: string | null;
   driver_name: string | null;
   driver_number: string | null;
@@ -134,6 +143,7 @@ interface LoadRow {
 const LOAD_SELECT = `
   SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.source_type::text AS source_type,
          l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
+         NULLIF(btrim(tm.gps_device_imei), '') AS device_imei,
          COALESCE(r.loading_point_id, p.pickup_loading_point_id) AS loading_point_id,
          COALESCE(r.customer_delivery_point_id, p.drop_customer_delivery_point_id)
            AS delivery_point_id,
@@ -148,7 +158,9 @@ const LOAD_SELECT = `
   FROM loads.loads l
   LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
   LEFT JOIN loads.load_postings p ON p.id = l.posting_id
-  LEFT JOIN customers.customers c ON c.id = COALESCE(r.customer_id, p.customer_id)`;
+  LEFT JOIN customers.customers c ON c.id = COALESCE(r.customer_id, p.customer_id)
+  LEFT JOIN masters.vehicle_telemetry_meta tm
+    ON tm.vehicle_id = l.vehicle_id AND tm.deleted_at IS NULL AND l.source_type = 'own_fleet'`;
 
 const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
 
@@ -167,6 +179,7 @@ function toLoad(row: LoadRow): MainLoad {
     sourceType: row.source_type,
     vehicleId,
     vehicleNumber: row.vehicle_number ? normalizePlate(row.vehicle_number) : null,
+    deviceImei: row.device_imei,
     driverId: row.driver_id,
     driverName: row.driver_name,
     driverNumber: row.driver_number,
@@ -342,6 +355,37 @@ export class MainDataRepository {
       [vehicleIds],
     );
     return new Map(rows.map((row) => [row.id, row.body_type]));
+  }
+
+  /**
+   * Every fleet vehicle with a GPS device IMEI on file — the devices the Roadcast poller pulls.
+   * An IMEI entered on two vehicles goes to the most recently edited one — decided across all
+   * orgs before `slot` narrows the result, so an org never gets another org's device.
+   *
+   * `slot` returns only the orgs in one of `slots` fixed buckets (by tenant id hash), so a caller
+   * can visit every org once per `slots` calls without reading every org's devices each time.
+   */
+  async gpsDeviceBindings(slot?: { slot: number; slots: number }): Promise<MainGpsDeviceBinding[]> {
+    const rows: Array<{ imei: string; vehicle_id: string; tenant_id: string }> =
+      await this.dataSource.query(
+        `SELECT * FROM (
+           SELECT DISTINCT ON (btrim(m.gps_device_imei))
+                  btrim(m.gps_device_imei) AS imei, v.id AS vehicle_id, v.tenant_id
+           FROM masters.vehicle_telemetry_meta m
+           JOIN masters.vehicles v ON v.id = m.vehicle_id
+           WHERE m.deleted_at IS NULL AND v.deleted_at IS NULL
+             AND btrim(COALESCE(m.gps_device_imei, '')) <> ''
+           ORDER BY btrim(m.gps_device_imei), m.updated_at DESC
+         ) b
+         WHERE $1::int IS NULL
+            OR mod(hashtext(b.tenant_id::text)::bigint + 2147483648, $2::int) = $1::int`,
+        [slot?.slot ?? null, slot?.slots ?? 1],
+      );
+    return rows.map((row) => ({
+      imei: row.imei,
+      vehicleId: row.vehicle_id,
+      tenantId: row.tenant_id,
+    }));
   }
 
   /** Market trucks aren't in the vehicle master; they exist for tracking only while on a load. */

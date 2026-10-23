@@ -269,7 +269,7 @@ export class DelayMonitor {
     const fields = await this.redis.hmget(
       ruleStateKey(trip.vehicle_id),
       `${RULE}|driver_app`,
-      `${RULE}|blackrock`,
+      `${RULE}|roadcast`,
     );
     const candidates = fields
       .filter((v): v is string => !!v)

@@ -1,6 +1,8 @@
 import { env } from '../config/env';
 import { redisManager } from '../db/redis';
 import { createRedisConnection } from '../db/redis-connection';
+import { createJobQueue } from '../jobs/queue-registry';
+import { ROADCAST_QUEUE, RoadcastDispatcher } from '../modules/ingest-roadcast';
 import { PointRetentionJob } from '../modules/points/retention.job';
 import { createRoutesModule } from '../modules/routes';
 import { createRulesModule, OutboxRelay } from '../modules/rules';
@@ -41,6 +43,20 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
   const mainRedis = createRedisConnection(env.mainRedisUrl, 'main-backend-events');
   const outbox = new OutboxRelay(dataSource, mainRedis);
   const retention = new PointRetentionJob(dataSource, logger);
+  // Roadcast polls run on the poller role; the leader only enqueues them.
+  const roadcast =
+    env.roadcastApiKey && env.roadcastApiUrl
+      ? new RoadcastDispatcher(
+          trips.mainData,
+          trips.activeTrips,
+          createJobQueue(ROADCAST_QUEUE),
+          {
+            intervalMs: env.roadcastPollIntervalMs,
+            idleIntervalMs: env.roadcastIdleIntervalMs,
+          },
+          logger,
+        )
+      : null;
 
   const lock = new LeaderLock(redis, {
     key: SCHEDULER_LEADER_KEY,
@@ -67,6 +83,11 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
       while ((await outbox.relay()) >= 500);
     }),
   ];
+  if (roadcast) {
+    loops.push(
+      leaderLoop('roadcast-dispatch', env.roadcastPollIntervalMs, () => roadcast.dispatch()),
+    );
+  }
 
   /** Runs `work` every `everyMs` while this instance is leader; never overlaps itself. */
   function leaderLoop(name: string, everyMs: number, work: () => Promise<unknown>) {

@@ -15,10 +15,12 @@ export function createTripsModule(dataSource: DataSource, redis: Redis, logger: 
 export {
   ActiveTripIndex,
   driverActiveTripKey,
+  ON_TRIP_TENANTS_KEY,
+  onTripDevicesKey,
   tripRefKey,
   vehicleActiveTripKey,
 } from './active-trip-index';
-export type { ActiveTripRefs, TripRef } from './active-trip-index';
+export type { ActiveTripRefs, OnTripDevice, TripRef } from './active-trip-index';
 export {
   ACTIVE_STATUSES,
   APPROACH_STATUS,

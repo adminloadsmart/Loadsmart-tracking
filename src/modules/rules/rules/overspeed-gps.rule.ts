@@ -59,7 +59,7 @@ export function speedLimitKmh(params: RuleContext['params'], bodyType: string | 
  */
 export const overspeedGpsRule: FixRule<OverspeedState> = {
   id: RULE,
-  sources: ['driver_app', 'blackrock'],
+  sources: ['driver_app', 'roadcast'],
 
   initial: () => ({
     phase: 'none',
@@ -169,7 +169,7 @@ function addReading(c: Candidate | null, fix: RuleFix): Candidate {
 }
 
 function validFix(fix: RuleFix): boolean {
-  if (fix.source !== 'blackrock') return true; // phone fixes were already accuracy-filtered
+  if (fix.source !== 'roadcast') return true; // phone fixes were already accuracy-filtered
   if (fix.gpsPositioned === false) return false;
   return fix.satellites === null || fix.satellites >= 5;
 }

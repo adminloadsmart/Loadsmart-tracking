@@ -46,7 +46,7 @@ const RULE = 'HALT-GPS' as const;
  */
 export const haltGpsRule: FixRule<HaltState> = {
   id: RULE,
-  sources: ['driver_app', 'blackrock'],
+  sources: ['driver_app', 'roadcast'],
 
   initial: () => ({
     halting: false,

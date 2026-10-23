@@ -51,7 +51,7 @@ const emptyTotals = (): NightTotals => ({
  */
 export const nightGpsRule: FixRule<NightState> = {
   id: RULE,
-  sources: ['driver_app', 'blackrock'],
+  sources: ['driver_app', 'roadcast'],
 
   initial: () => ({
     nightKey: null,

@@ -38,7 +38,7 @@ const RULE = 'DEV-GPS' as const;
  */
 export const deviationGpsRule: FixRule<DeviationState> = {
   id: RULE,
-  sources: ['driver_app', 'blackrock'],
+  sources: ['driver_app', 'roadcast'],
 
   initial: () => ({
     phase: 'on',

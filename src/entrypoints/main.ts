@@ -18,7 +18,7 @@ import { startApiRole } from './api.role';
 import { startRealtimeRole } from './realtime.role';
 import { startSchedulerRole } from './scheduler.role';
 import { startProcessorRole } from './processor.role';
-import { startPollerRole } from './worker-placeholder.role';
+import { startPollerRole } from './poller.role';
 
 const STARTERS: Record<Role, RoleStarter> = {
   scheduler: startSchedulerRole,

@@ -1,7 +1,7 @@
 {
   "name": "loadsmart-tracking",
   "version": "0.1.0",
-  "description": "Loadsmart vehicle & trip tracking service (phone GPS, BlackRock BR05, SIM tracking, ULIP)",
+  "description": "Loadsmart vehicle & trip tracking service (phone GPS, Roadcast GPS devices, SIM tracking, ULIP)",
   "private": true,
   "main": "dist/entrypoints/main.js",
   "scripts": {

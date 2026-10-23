@@ -36,10 +36,20 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     await redis.quit();
   });
 
-  it('indexes a load from loading confirmation until delivery', async () => {
+  it('indexes a load from assignment until delivery, with its GPS device on the on-trip registry', async () => {
     const load = await seedLoad(ds, { tenantId: TENANT, status: 'assigned', startedAt: null });
+    await ds.query(
+      `INSERT INTO masters.vehicle_telemetry_meta (tenant_id, vehicle_id, gps_device_imei)
+       VALUES ($1, $2, '866221070401935')`,
+      [TENANT, load.vehicleId],
+    );
+    // Assigned: indexed for the drive to the plant (geofence check), not yet tracking.
     await trips.watcher.poll();
-    expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBeNull();
+    expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBe(load.loadId);
+    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('assigned');
+    expect((await trips.activeTrips.onTripDevicesByTenant()).get(TENANT)).toEqual([
+      { imei: '866221070401935', vehicleId: load.vehicleId, tenantId: TENANT },
+    ]);
 
     const confirmedAt = new Date('2026-10-06T08:00:00Z');
     await updateLoad(ds, load.loadId, {
@@ -63,6 +73,7 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     await trips.watcher.poll();
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBeNull();
     expect(await redis.exists(tripRefKey(load.loadId))).toBe(0);
+    expect(await trips.activeTrips.onTripDevicesByTenant()).toEqual(new Map());
   });
 
   it('pages through more loads than one page holds, even when they share an updated_at', async () => {

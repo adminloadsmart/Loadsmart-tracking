@@ -21,14 +21,14 @@ It follows the two architecture docs, adjusted to the confirmed data sources bel
 | # | Source | How we get it | Interval | Who controls it |
 |---|---|---|---|---|
 | 1 | **Driver phone GPS** | The app **pushes** over a persistent **socket.io** connection | **Fixed at 15 s** | Fixed in the app |
-| 2 | **BlackRock BR05 device** | We **pull** from BlackRock's API | Configurable | **Org admin** |
+| 2 | **Roadcast GPS device** (replaced BlackRock BR05, 2026-10-23) | We **pull** from Roadcast's API: one call per org with its IMEIs | **10 s on trip**, 5 min idle | Fixed for all orgs (env) |
 | 3 | **SIM tracking (Intugine)** | We **pull** from Intugine's API | **10–20 min** | **Org admin** |
 
 - ULIP FASTag is pulled as a toll checkpoint only, not as a moving position.
 - Integrated GPS via Intugine is dropped.
-- There is **no TCP server**: the BR05 protocol work in the architecture doc is out of scope.
-- **Waterfall priority is set per org by the org admin.** The default is BR05 > Phone > SIM.
-- Whether the BR05 and SIM APIs return only the latest point or the history since a timestamp is still **unknown**. The design handles both.
+- There is **no TCP server**: device protocol work in the architecture doc is out of scope; Roadcast talks to the devices.
+- **Waterfall priority is set per org by the org admin.** The default is Roadcast > Phone > SIM.
+- Roadcast returns only the **latest** point per device. Whether the SIM API returns history is still **unknown**. The design handles both.
 
 ### Decisions taken
 - **Stack:** the same as the main backend (Node 24, TypeScript, Express 5, TypeORM, zod, ioredis, BullMQ), plus socket.io.
@@ -37,7 +37,7 @@ It follows the two architecture docs, adjusted to the confirmed data sources bel
 
 ### Load math at 2,000 active vehicles
 - **Phone:** about 2,000 open sockets, one message every 15 seconds, so **about 133 messages per second**. That is about 11.5M rows per day if phones report around the clock.
-- **BR05 pull at a 60 s default:** about **33 API calls per second** to BlackRock. This can drop to a handful per second if BlackRock has a bulk or multi-vehicle endpoint.
+- **Roadcast pull:** **one call per org every 10 s** while that org has a truck on a trip (one every 5 min otherwise), carrying the org's IMEIs. 50 active orgs is 5 calls/s, whatever the number of trucks. 2,000 trucks on trips give 200 points/s into the stream.
 - **SIM pull at 10–20 min:** about **2–3 calls per second**. The load is trivial, but every call is billed.
 - **Conclusion:** one Postgres with Timescale and one Redis are enough.
   - The real ceilings are the **provider rate limits and costs** and **storage growth**.
@@ -53,7 +53,7 @@ One repo and one image. The `ROLE` environment variable picks what runs, which g
 |---|---|---|---|
 | `api` | REST (trips, vehicles, org settings, share links), OpenAPI | Stateless, autoscaled | 2 |
 | `realtime` | socket.io: `/driver` namespace (phone **ingest**) and `/live` namespace (map **viewers**) | Horizontal, with the socket.io Redis adapter | 2 |
-| `poller` | BullMQ workers that call the BlackRock, Intugine and ULIP APIs | Worker concurrency and instances, capped by provider rate limits | 1–2 |
+| `poller` | BullMQ workers that call the Roadcast, Intugine and ULIP APIs | Worker concurrency and instances, capped by provider rate limits | 1–2 |
 | `processor` | Consumes the partitioned point stream and runs the processing pipeline | Number of partitions (16) | 2 |
 | `scheduler` | Single leader (Redis lock) | Exactly one instance | 1 |
 
@@ -69,7 +69,7 @@ In local dev, `ROLE=all` runs every role in one process.
 ```
 Driver phone ──socket.io /driver (15s)──► realtime ─┐
                                                      │
-scheduler: ZSET poll:due ─► BullMQ poll-br05 ─► poller ──► BlackRock API ─┤
+scheduler: dispatch     ─► BullMQ poll-roadcast ► poller ─► Roadcast API ─┤
                          └► BullMQ poll-sim  ─► poller ──► Intugine API  ─┼─► Redis Streams points:{0..15}
                          └► BullMQ poll-ulip ─► poller ──► ULIP API ──────┘     (partition = hash(vehicle_id))
                                                                                      │
@@ -94,10 +94,10 @@ loadsmart-tracking/
     shared/  errors/ (AppError…), middleware/{auth,driver-auth,validate,request-id}, responses/respond.ts, logger.ts (pino)
     streams/ {stream-bus.ts, partitioner.ts, leased-consumer.ts, dlq.ts}
     polling/ {poll-registry.ts (ZSET due-queue), dispatcher.ts, provider-rate-limiter.ts, cursor-store.ts}
-    adapters/ {blackrock.client.ts, intugine.client.ts, ulip.client.ts, s3-archive.adapter.ts, routes-eta.client.ts}
+    adapters/ {roadcast.client.ts, intugine.client.ts, ulip.client.ts, s3-archive.adapter.ts, routes-eta.client.ts}
     modules/
       ingest-phone/      driver socket namespace, payload validators, offline-batch handler
-      ingest-blackrock/  poll job, response normalizer, device↔vehicle binding
+      ingest-roadcast/   client, dispatcher, poll job, normalizer (binding = main's gps_device_imei)
       ingest-sim/        consent lifecycle, poll job, normalizer
       ingest-ulip/       poll job, token manager
       processing/        pipeline.ts + steps/{clean,motion-state,distance,geofence,eta,delay,overspeed,toll-match}.step.ts
@@ -153,7 +153,7 @@ loadsmart-tracking/
   - Buffer locations in SQLite when offline.
   - Send every 15 s while moving. Optionally drop to 60 s while halted, if product allows.
 
-### 3.2 Pull engine (shared by BR05, SIM and ULIP)
+### 3.2 Pull engine (shared by Roadcast, SIM and ULIP)
 One generic engine. Each source plugs in an adapter with `fetch(targets, cursor) → NormalizedPoint[]`.
 - **Due queue:**
   - A Redis ZSET `poll:due`: member is `{source}:{targetId}`, score is `next_due_at`.
@@ -171,9 +171,21 @@ One generic engine. Each source plugs in an adapter with `fetch(targets, cursor)
   - In both cases, the same stale point returned again is dropped. **Getting a successful response is never mistaken for the device being alive.**
 - **Rescheduling:** after every poll, `next_due_at = now + interval`, with the interval read from org settings. A small random jitter spreads the calls out.
 - **What gets polled:**
-  - **BR05:** every vehicle bound to a BR05, **around the clock**, for the always-on vehicle timeline.
-    - Active trip: the org's `br05PollIntervalSec`.
-    - No active trip: a slower `br05IdlePollIntervalSec` (default 5 min) to save calls and storage.
+  - **Roadcast** (built): every vehicle with a `gps_device_imei` in main's `vehicle_telemetry_meta`.
+    - The scheduler leader ticks every `ROADCAST_POLL_INTERVAL_MS` (10 s, fixed for every org) and builds **one call per org**, with `{"input":{"deviceImeis":[…]}}`:
+      - every tick, the IMEIs of the org's trucks on a trip, read from the **on-trip device registry** in Redis;
+      - on the org's own sweep tick (one fixed slot of the 30 ticks in 5 min, by tenant-id hash), all of its IMEIs too, so idle trucks get a point every `ROADCAST_IDLE_INTERVAL_MS`.
+    - **On-trip device registry:** `trk:ontrip-devices:{tenantId}` (hash IMEI → vehicleId) plus the org set `trk:ontrip-devices:tenants`.
+      - The TripWatcher maintains it as trips start, end or get reassigned, in the same pipeline as the active-trip index. The IMEI comes from the load query itself (a join on `vehicle_telemetry_meta`), so there are no extra queries.
+      - Removal is compare-and-delete in Lua, so a reassigned truck or a moved IMEI never drops another vehicle's entry.
+      - The 10-min index rebuild rewrites it in one `MULTI`. That also catches an IMEI edited mid-trip.
+    - **Cost per tick:** finding the on-trip IMEIs is 2 Redis round trips (`SMEMBERS` + pipelined `HGETALL`), with no SQL and nothing proportional to idle trucks. The idle sweep reads only that tick's slot of orgs from main (`gpsDeviceBindings({slot, slots})`), spreading both the SQL and the calls over 5 min. If that read fails, only the sweep is skipped; on-trip polling never waits on Postgres.
+    - An org with nothing to fetch makes no call. More than 1000 IMEIs (`maxDeviceCap`) are split across calls.
+    - Jobs are spread across the tick (BullMQ `delay`) rather than bursting. Each org's job id is fixed (`roadcast-{tenantId}-{n}`), so a slow org never builds a backlog or delays the others. The poller runs 4 calls in parallel.
+    - A trip starting is picked up within ~15 s: the TripWatcher's 5 s poll, then the next 10 s tick.
+    - `tracking_roadcast_api_calls_total{tenant}` counts the calls per org.
+    - Cursor: Redis hash `trk:poll:cursor:roadcast` (IMEI → last published `gpsFixTimestamp`). The position time is `gpsFixTimestamp`, never the heartbeat `deviceTimestamp`.
+    - No active trip: at most one point per `ROADCAST_IDLE_INTERVAL_MS` (5 min).
   - **SIM:** only during an active trip with consent, at the org's `simIntervalMin`. Consent is started at trip start and stopped at trip end.
   - **ULIP:** per active trip every 15 min. The token is refreshed every 30 min under a lock. An alert fires if the last successful poll was more than 24 h ago, to stay inside ULIP's 72 h retention.
 - **Raw archive:** every provider response is buffered and written to S3 every 5 min as gzipped NDJSON.
@@ -187,15 +199,15 @@ One generic engine. Each source plugs in an adapter with `fetch(targets, cursor)
 
 | Setting | Range | Default | Applied by |
 |---|---|---|---|
-| `sourcePriority` | A permutation of `blackrock`, `driver_app`, `sim` | `blackrock, driver_app, sim` | Waterfall selector (new trips) |
-| `br05PollIntervalSec` (on trip) | 30–600 s; the floor is set by BlackRock's rate limit | 60 | Rescheduling the org's entries in `poll:due` |
-| `br05IdlePollIntervalSec` | 60–1800 s | 300 | Same |
+| `sourcePriority` | A permutation of `roadcast`, `driver_app`, `sim` | `roadcast, driver_app, sim` | Waterfall selector (new trips) |
+| Roadcast on-trip interval | — | **10 s, fixed** (env `ROADCAST_POLL_INTERVAL_MS`) | Not per org |
+| Roadcast idle interval | — | **5 min, fixed** (env `ROADCAST_IDLE_INTERVAL_MS`) | Same |
 | `simIntervalMin` | **10–20 min** | 20 | Same; also sent to Intugine on consent if their API needs it |
 | Phone interval | — | **15 s, fixed** | Not configurable |
 
 **No-signal thresholds are derived from the intervals, never hard-coded**, so changing an interval can't trigger false alerts:
 - Phone: 5 min (20 missed points).
-- BR05: `max(10 min, 3 × br05PollIntervalSec)`, measured on the device's `recordedAt`.
+- Roadcast: today the INACT-GPS rule (60 min, 30 for tankers), measured on the device's `recordedAt`.
 - SIM: `2 × simIntervalMin + 2 min`.
 
 **When changes take effect:**
@@ -204,7 +216,7 @@ One generic engine. Each source plugs in an adapter with `fetch(targets, cursor)
 
 **Propagation:** settings are cached in Redis as `org:{tid}:tracking-settings`. A `PUT` publishes `org_settings.changed` to invalidate the cache and reschedule polls.
 
-**Cost hint in the UI:** show the estimated number of SIM and BR05 API calls per month for the chosen intervals.
+**Cost hint in the UI:** show the estimated number of SIM and Roadcast API calls per month for the chosen intervals.
 
 ## 5. Waterfall (source selection)
 - **Priority:** comes from the trip's `settings_snapshot.sourcePriority`.
@@ -228,7 +240,7 @@ All ids are UUIDs. Every row has `tenant_id`.
   - Unique key: `(vehicle_id, source, recorded_at)`, which makes inserts idempotent (`ON CONFLICT DO NOTHING`).
   - Compression: `segmentby vehicle_id`, after 2 days.
 - `toll_crossings`: unique on `(vehicle_id, plaza_id, crossed_at)`.
-- `device_events`: whatever BlackRock exposes, such as ignition or power cut.
+- `device_events`: whatever Roadcast exposes beyond ignition (carried in point `flags`), such as power cut.
 
 **Retention (in migration 1; windows confirmed by product):**
 - Continuous aggregate `location_points_1min`.
@@ -239,7 +251,7 @@ All ids are UUIDs. Every row has `tenant_id`.
 **Metadata tables (TypeORM entities):**
 - Main's own tables (loads, vehicles, drivers, places) are read in place, never copied. Tracking-only additions: `trip_route_status`, `place_geocodes` (delivery points have no coordinates in main).
 - Devices and providers:
-  - `devices`: BR05 serial or IMEI ↔ vehicle, `provider_device_id`
+  - ~~`devices`~~: not needed; the IMEI ↔ vehicle binding is main's `vehicle_telemetry_meta.gps_device_imei`
   - `sim_consents`: phone, trip, provider consent id, status
 - Settings and source switching: `org_tracking_settings`, `trip_source_link`
 - Location:
@@ -263,8 +275,8 @@ All ids are UUIDs. Every row has `tenant_id`.
 ```ts
 NormalizedPoint {
   eventId, tenantId, vehicleId, tripId?,
-  source: 'driver_app' | 'blackrock' | 'sim',
-  sourceRef,                 // driverId / deviceId / consentId
+  source: 'driver_app' | 'roadcast' | 'sim',
+  sourceRef,                 // driverId / device IMEI / consentId
   recordedAt, receivedAt,
   lat, lng, speed?, heading?, accuracy?,
   flags?: { isMock?, appState?, batteryPct?, lowAccuracy? }
@@ -329,15 +341,15 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
 - `/live` namespace: rooms `tenant:`, `trip:` and `vehicle:`, the Redis adapter, and at most one push per vehicle every 5 s.
 - Exit: the Loadsmart-V2-Frontend map shows a live marker and trip polyline from phone data.
 
-**Phase 4: Pull engine + BlackRock BR05 (2 weeks)**
-- The generic pull engine (due ZSET, dispatcher, per-provider rate limiter, circuit breaker, cursor store), then the BlackRock adapter and normalizer.
+**Phase 4: Pull engine + Roadcast GPS devices (replaces BlackRock BR05)**
+- Built (2026-10-23): `modules/ingest-roadcast`, the `poller` role (BullMQ worker, one call per org) and the scheduler's `roadcast-dispatch` loop. The due ZSET and circuit breaker wait for Intugine, which is per consent and billed per call.
 - Device ↔ vehicle binding, from `vehicle.telemetry_meta_changed` or a manual admin API.
 - Polling around the clock, with separate trip and idle intervals.
-- **Gate:** get BlackRock's API docs before starting: authentication, rate limit, bulk endpoint, latest vs history, the units of the odometer and timestamp fields.
+- Roadcast API: `POST …/api/v2/rest/integrations/pull-positions-api`, header `X-API-KEY` (one global key), body `{"input":{"deviceImeis":["<imei>", …]}}` (up to `maxDeviceCap` 1000 per call; `{"input":{}}` would return the whole account), latest-only, UTC timestamps.
 - Exit:
   - 2,000 bound vehicles are polled within their interval, with no provider 429 errors.
   - A latest-only response repeated with the same `recordedAt` creates no new row.
-  - A BlackRock outage marks vehicles `stale` without an error cascade.
+  - A Roadcast outage marks vehicles `stale` without an error cascade.
 
 **Phase 5: SIM tracking pull via Intugine (1.5 weeks)**
 - Consent lifecycle tied to the trip (start at trip start, stop at close), the poll job at `simIntervalMin`, and the normalizer. SIM points are marked low-accuracy and excluded from speed and heading.
@@ -368,7 +380,7 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
 **Phase 9: ETA, delay and alerts (2 weeks)**
 - The planned route comes from the Routes API **once per trip** and is cached. ETA is recomputed from remaining distance and rolling speed. The provider is called again at most every 15 min or when the vehicle deviates from the route.
 - Delay against plan, overspeed, and long halts.
-- Harsh driving is calculated only on dense GPS data (phone at 15 s, or BR05 if history is available).
+- Harsh driving is calculated only on dense GPS data (phone at 15 s, or Roadcast at 10 s).
 - Alerts go through BullMQ to notifications.
 
 **Phase 10: Public links, security, hardening (1.5 weeks)**
@@ -412,13 +424,9 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
 **Alerts:** a no-signal spike across the fleet (most likely a provider outage), plus every lag and error metric above crossing its threshold.
 
 ## 12. Open items (blocking phase)
-- **BlackRock API** (before Phase 4):
-  - authentication
-  - rate limit
-  - whether a bulk endpoint exists
-  - latest-only vs history since a timestamp
-  - field units
-  - which vehicle identifier it uses
+- **Roadcast API** (Phase 4, built; still to confirm):
+  - the unit of `speed` (field names look Traccar-based, which reports knots; `ROADCAST_SPEED_UNIT` switches it)
+  - the rate limit (one call per active org per 10 s: 50 orgs is 5 calls/s)
 - **Intugine SIM API** (before Phase 5):
   - the pull endpoint's shape
   - latest-only vs history
@@ -437,7 +445,7 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
   - waterfall property tests across priorities and intervals
   - resolver cases: boundary, outside, noise
 - **Integration tests** (Testcontainers: Timescale, PostGIS, Redis): socket ingest, then stream, then processor, then DB; poll job, then stream, then DB, against a mocked provider; replay idempotency; DLQ.
-- **End to end:** a simulator replays a Delhi → Dehradun trip through the phone socket, the mocked BlackRock and Intugine APIs, and ULIP. Assert:
+- **End to end:** a simulator replays a Delhi → Dehradun trip through the phone socket, the mocked Roadcast and Intugine APIs, and ULIP. Assert:
   - the live marker on `/live`
   - the polyline API
   - city transitions
@@ -445,5 +453,5 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
   - the main backend load reaching `reached_delivery_point`
 - **Load test** (k6 with its socket.io extension, plus mocked providers with realistic latency and 429s), 1 hour at 2× target:
   - 4,000 driver sockets at 15 s, including a burst where 20% reconnect at once with 200-point batches
-  - 4,000 BR05 targets at a 60 s poll interval
+  - 4,000 Roadcast devices on trips across orgs, one call per org every 10 s
   - Pass criteria: ack p99 under 100 ms, poll due-lag under 30 s, stream lag under 5 s, zero lost acked points.

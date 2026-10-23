@@ -2,7 +2,7 @@ import { Queue, JobsOptions } from 'bullmq';
 import { getQueueConnection } from './queue-connection';
 
 export interface JobQueue {
-  enqueue(jobName: string, payload: unknown): Promise<void>;
+  enqueue(jobName: string, payload: unknown, options?: JobsOptions): Promise<void>;
 }
 
 // One BullMQ Queue instance per name, reused across calls — BullMQ recommends against creating a
@@ -32,8 +32,8 @@ export function createJobQueue(name: string): JobQueue {
   const resolvedQueue = queue;
 
   return {
-    async enqueue(jobName: string, payload: unknown): Promise<void> {
-      await resolvedQueue.add(jobName, payload);
+    async enqueue(jobName: string, payload: unknown, options?: JobsOptions): Promise<void> {
+      await resolvedQueue.add(jobName, payload, options);
     },
   };
 }

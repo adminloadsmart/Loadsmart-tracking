@@ -4,7 +4,7 @@ export type Motion = 'moving' | 'halted';
 
 /**
  * Last accepted position of one vehicle FROM ONE SOURCE. Kept per source because the phone and
- * the BR05 report slightly different positions — mixing them would look like jitter/jumps and
+ * the GPS device report slightly different positions — mixing them would look like jitter/jumps and
  * double-count distance. Choosing which source is authoritative for a trip is the waterfall's job
  * (Phase 6).
  */

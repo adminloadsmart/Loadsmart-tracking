@@ -21,6 +21,7 @@ export const MAIN_SCHEMA_SQL = `
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, vehicle_id uuid NOT NULL,
     gps_provider text, gps_enabled boolean NOT NULL DEFAULT false, deleted_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now());
+  ALTER TABLE masters.vehicle_telemetry_meta ADD COLUMN IF NOT EXISTS gps_device_imei varchar(15);
   CREATE TABLE IF NOT EXISTS masters.loading_points (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, title text NOT NULL, address_line_1 text,
     city text, state text, pin_code text, latitude numeric(10,6), longitude numeric(10,6),
@@ -29,6 +30,8 @@ export const MAIN_SCHEMA_SQL = `
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, customer_id uuid NOT NULL, location text NOT NULL,
     address_line_1 text, address_line_2 text, city text, state text, pin_code text,
     deleted_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now());
+  ALTER TABLE customers.customer_delivery_points ADD COLUMN IF NOT EXISTS latitude numeric(10,6);
+  ALTER TABLE customers.customer_delivery_points ADD COLUMN IF NOT EXISTS longitude numeric(10,6);
   CREATE TABLE IF NOT EXISTS loads.requisitions (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, customer_id uuid NOT NULL,
     loading_point_id uuid NOT NULL, customer_delivery_point_id uuid NOT NULL,
@@ -45,6 +48,8 @@ export const MAIN_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS loads.load_postings (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, pickup_loading_point_id uuid,
     drop_customer_delivery_point_id uuid, drop_loading_point_id uuid);
+  ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS customer_id uuid;
+  ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS deliver_by_at timestamptz;
   CREATE SCHEMA IF NOT EXISTS tracking;
   CREATE TABLE IF NOT EXISTS tracking.geofences (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, name text NOT NULL, type text NOT NULL,

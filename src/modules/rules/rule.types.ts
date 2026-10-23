@@ -45,7 +45,7 @@ export interface RuleFix {
   inTransit: boolean;
   /** False for buffered/supplementary or >10 min old fixes: recorded, but raise no alert. */
   live: boolean;
-  /** Ignition (ACC) when the source knows it — BR05 only. */
+  /** Ignition (ACC) when the source knows it — Roadcast device only. */
   ignition: boolean | null;
   accuracyM: number | null;
   satellites: number | null;
