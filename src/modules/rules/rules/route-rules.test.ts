@@ -265,3 +265,30 @@ describe('DELAY-GPS progress + projection', () => {
     expect(halted.delayMin).toBeGreaterThan(240);
   });
 });
+
+describe('DEV-GPS → LS_N_0028 off-route notice', () => {
+  /** On route for 10 min, then 20 km east of it for `minutes`, drifting `alongStepM` per fix. */
+  const offRoute = (minutes: number, alongStepM: number) => [
+    ...drive(0, 40, 30_000, () => 0),
+    ...Array.from({ length: minutes * 4 }, (_, i) =>
+      fix(600 + i * 15, { speedKmh: 25, ...at(40_000 + i * alongStepM, 20_000) }),
+    ),
+  ];
+  const notices = (fixes: ReturnType<typeof fix>[]) =>
+    run(deviationGpsRule, fixes, DEV).effects.notices;
+
+  it('far off route for 45 min and heading away from the drop → one notice', () => {
+    const sent = notices(offRoute(60, -100)); // driving back south, away from the drop
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'trip.route_deviation', tripId: TRIP });
+    expect(sent[0].payload.distanceOffKm as number).toBeGreaterThan(15);
+  });
+
+  it('far off route but still closing in on the drop (a long diversion) → no notice', () => {
+    expect(notices(offRoute(60, 100))).toHaveLength(0);
+  });
+
+  it('far off route for less than 45 min → no notice', () => {
+    expect(notices(offRoute(40, -100))).toHaveLength(0);
+  });
+});

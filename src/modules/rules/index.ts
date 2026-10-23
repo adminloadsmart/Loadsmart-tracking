@@ -1,6 +1,7 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import { DataSource } from 'typeorm';
+import { MainDataRepository } from '../main-data';
 import type { BatchHook } from '../points';
 import type { RouteStore } from '../routes/route.store';
 import type { RoutesRepository } from '../routes/routes.repository';
@@ -14,6 +15,7 @@ import { overspeedGpsRule } from './rules/overspeed-gps.rule';
 import { deviationGpsRule } from './rules/deviation-gps.rule';
 import { progressGpsRule } from './rules/progress-gps.rule';
 import { DelayMonitor } from './delay.monitor';
+import { SignalLossMonitor } from './signal-loss.monitor';
 import type { FixRule } from './rule.types';
 
 /** Fix-driven rules active today (docs/rules.md). Device and SIM rules join as their sources land. */
@@ -59,6 +61,8 @@ export function createRulesModule(deps: {
   };
 
   const monitor = new InactivityMonitor(deps.redis, repository, engine, deps.logger);
+  const mainData = new MainDataRepository(deps.dataSource);
+  const signalLoss = new SignalLossMonitor(deps.redis, mainData, repository, deps.logger);
   const delay = deps.routes
     ? new DelayMonitor(
         deps.redis,
@@ -67,16 +71,18 @@ export function createRulesModule(deps: {
         repository,
         engine,
         deps.logger,
+        mainData,
       )
     : null;
   return {
     repository,
     engine,
     hook,
-    /** Scheduler-leader tick for time-driven rules (inactivity, delay). */
+    /** Scheduler-leader tick for time-driven rules (inactivity, delay, signal loss). */
     async tick(nowMs = Date.now()) {
       await publishAlerts(await monitor.tick(nowMs));
       if (delay) await publishAlerts(await delay.tick(nowMs));
+      await signalLoss.tick(nowMs);
     },
   };
 }

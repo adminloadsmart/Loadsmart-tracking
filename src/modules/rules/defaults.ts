@@ -73,6 +73,10 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
       gapS: 600, // never interpolate across a gap to START a deviation
       haltSpeedKmh: 5, // halted while off route → Critical
       haltHoldS: 600,
+      // LS_N_0028 notice (main backend "off route"): further than this from every route…
+      notifyOffRouteM: 15_000,
+      notifyAfterS: 2700, // …continuously for 45 min…
+      notifyAwayWindowS: 900, // …and further from the drop than 15 min earlier
     },
   },
   'DELAY-GPS': {
@@ -89,6 +93,9 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
       consecutive: 2, // evaluations needed to raise and to clear
       staleAfterMin: 60, // last fix older → keep the last ETA, marked stale
       maxSnapDistanceM: 5000, // fixes further from the route don't move progress
+      // LS_N_0030 notice (main backend "delivery will be late"):
+      lateNoticeDefaultMin: 1440, // the company's limit when its org admin never set one (1 day)
+      lateCauseMinMin: 60, // a cause (halts / deviation) must account for this much to be named
     },
   },
   'INACT-GPS': {

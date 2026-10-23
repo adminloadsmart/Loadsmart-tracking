@@ -6,7 +6,8 @@ export interface GeofenceFix {
   t: number;
   lat: number;
   lng: number;
-  /** The trip the fix belongs to — its `tripId`, or the assigned trip on the drive to the plant. */
+  /** The trip the fix belongs to — its `tripId`, or (`flags.geofenceTripId`) the assigned trip on
+   *  the drive to the plant / the delivered trip leaving the delivery point. */
   tripId: string | null;
 }
 
@@ -33,8 +34,16 @@ export const TRIP_EVENT_TYPES = [
   'trip.arrived_at_pickup',
   'trip.departed_pickup',
   'trip.arrived_at_drop',
+  'trip.departed_drop',
 ] as const;
 export type TripEventType = (typeof TRIP_EVENT_TYPES)[number];
+
+/** Statuses a truck leaving its drop's geofence is departing from: reached it, or E-POD done. */
+const AT_OR_PAST_DROP_STATUSES: readonly string[] = [
+  'reached_delivery_point',
+  'delivered',
+  'closed',
+];
 
 const appliesTo = (geofence: MainGeofence, vehicleId: string) =>
   geofence.appliesToAllVehicles || geofence.vehicleIds.includes(vehicleId);
@@ -95,7 +104,10 @@ export function evaluateVehicle(
  * - enter the pickup's loading-point geofence while assigned → arrived at pickup ("At plant");
  * - leave it once loading is confirmed (still "loading_confirmed", or already marked in transit)
  *   → departed pickup (LS_N_0026; the main backend moves a loading_confirmed load to in transit);
- * - enter the drop's unloading-point geofence while in transit → arrived at drop.
+ * - enter the drop's unloading-point geofence while in transit → arrived at drop;
+ * - leave it once there — before the E-POD or after (a delivered load is followed until then, see
+ *   trips/trip-state isIndexed) → departed drop (ends unloading detention, LS_N_0032; completes
+ *   the trip with the E-POD, LS_N_0033).
  */
 export function tripEventFor(
   transition: GeofenceTransition,
@@ -113,12 +125,16 @@ export function tripEventFor(
       return 'trip.departed_pickup';
     return null;
   }
-  if (geofence.type === 'unloading_point' && event === 'enter' && loadStatus === 'in_transit') {
+  if (geofence.type === 'unloading_point') {
     const isDrop =
       (!!geofence.customerDeliveryPointId &&
         geofence.customerDeliveryPointId === points.dropCustomerDeliveryPointId) ||
       (!!geofence.loadingPointId && geofence.loadingPointId === points.dropLoadingPointId);
-    return isDrop ? 'trip.arrived_at_drop' : null;
+    if (!isDrop) return null;
+    if (event === 'enter' && loadStatus === 'in_transit') return 'trip.arrived_at_drop';
+    if (event === 'exit' && AT_OR_PAST_DROP_STATUSES.includes(loadStatus))
+      return 'trip.departed_drop';
+    return null;
   }
   return null;
 }

@@ -32,8 +32,9 @@ export interface PointOwner {
   vehicleId: string;
   tripId: string | null;
   driverId: string;
-  /** Set instead of `tripId` on the drive to the plant (see trips/trip-state INDEXED_STATUSES). */
-  approachTripId?: string;
+  /** Set instead of `tripId` outside the tracked window — the drive to the plant, and leaving the
+   *  delivery point after the E-POD (see trips/trip-state GEOFENCE_ONLY_STATUSES). */
+  geofenceTripId?: string;
 }
 
 const MPS_TO_KMH = 3.6;
@@ -50,7 +51,7 @@ export function toNormalizedPoint(
   if (point.provider) flags.provider = point.provider;
   if (point.appState) flags.appState = point.appState;
   if (point.altitude != null) flags.altitudeM = point.altitude;
-  if (owner.approachTripId) flags.approachTripId = owner.approachTripId;
+  if (owner.geofenceTripId) flags.geofenceTripId = owner.geofenceTripId;
 
   return {
     tenantId: owner.tenantId,

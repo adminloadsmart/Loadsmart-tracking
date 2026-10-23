@@ -7,6 +7,15 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 end
 return 0`;
 
+// Set only if the key is free or already points at this trip — never take over another trip's.
+const SET_IF_FREE_SCRIPT = `
+local current = redis.call('get', KEYS[1])
+if not current or current == ARGV[1] then
+  redis.call('set', KEYS[1], ARGV[1])
+  return 1
+end
+return 0`;
+
 export const vehicleActiveTripKey = (vehicleId: string) => `trk:veh:${vehicleId}:active_trip`;
 export const driverActiveTripKey = (driverId: string) => `trk:drv:${driverId}:active_trip`;
 /** Hash {tenantId, vehicleId, driverId} for an active trip — what ingest needs to stamp a point. */
@@ -82,13 +91,24 @@ export class ActiveTripIndex {
     };
   }
 
-  async activate(trip: ActiveTripRefs): Promise<void> {
+  /** `ifFree`: a delivered load followed to its exit from the delivery point — it must not take
+   *  the vehicle / driver over from a trip they're already on (their next one). */
+  async activate(
+    trip: ActiveTripRefs,
+    { ifFree = false }: { ifFree?: boolean } = {},
+  ): Promise<void> {
     const { tripId, vehicleId, driverId } = trip;
     const pipeline = this.redis.pipeline();
     pipeline.del(tripRefKey(tripId));
     pipeline.hset(tripRefKey(tripId), refHash(trip));
-    if (vehicleId) pipeline.set(vehicleActiveTripKey(vehicleId), tripId);
-    if (driverId) pipeline.set(driverActiveTripKey(driverId), tripId);
+    for (const key of [
+      vehicleId ? vehicleActiveTripKey(vehicleId) : null,
+      driverId ? driverActiveTripKey(driverId) : null,
+    ]) {
+      if (!key) continue;
+      if (ifFree) pipeline.eval(SET_IF_FREE_SCRIPT, 1, key, tripId);
+      else pipeline.set(key, tripId);
+    }
     await execOrThrow(pipeline);
   }
 
@@ -119,7 +139,8 @@ export class ActiveTripIndex {
     return statuses;
   }
 
-  /** Makes Redis match the given active trips exactly: sets missing keys, removes stale ones. */
+  /** Makes Redis match the given active trips exactly: sets missing keys, removes stale ones.
+   *  When two trips share a vehicle or driver, the later one in the list keeps it. */
   async rebuild(activeTrips: ActiveTripRefs[]): Promise<{ set: number; removed: number }> {
     const expected = new Map<string, string>();
     const expectedRefs = new Map<string, ActiveTripRefs>();

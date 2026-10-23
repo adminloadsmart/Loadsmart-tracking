@@ -1,4 +1,4 @@
-import { alertId, distanceM, episodeId, num } from '../rule-helpers';
+import { alertId, distanceM, episodeId, noticeId, num } from '../rule-helpers';
 import { Effects, FixRule, RuleContext, RuleFix } from '../rule.types';
 import { RULE_DEFAULTS } from '../defaults';
 
@@ -22,9 +22,17 @@ export interface DeviationState {
   slowSinceMs: number | null;
   escalated: boolean;
   lastFix: { t: number; lat: number; lng: number } | null;
+  /** Since when the truck has been further than notifyOffRouteM from every route (LS_N_0028). */
+  farSinceMs?: number | null;
+  /** Straight-line distance to the drop, sampled about once a minute while deviating. */
+  dropSamples?: Array<{ t: number; m: number }>;
+  /** The LS_N_0028 notice went out for this deviation — one per deviation, re-armed on rejoin. */
+  notified?: boolean;
 }
 
 const RULE = 'DEV-GPS' as const;
+/** How often the straight-line distance to the drop is sampled for LS_N_0028's "heading away". */
+const DROP_SAMPLE_EVERY_MS = 60_000;
 
 /**
  * DEV-GPS (rule sheet): route deviation while in transit.
@@ -35,6 +43,10 @@ const RULE = 'DEV-GPS' as const;
  *  - Rejoin = d < 0.8 × corridor held 2 min; records max distance, off-route km and duration,
  *    tagged back-track / shortcut / detour by where it rejoined along the route.
  *  - Alert at start (Warning), Critical if the truck halts while off route.
+ *  - LS_N_0028 notice (main backend "off route", one per deviation): further than 15 km from
+ *    every route for 45 min without a break, AND heading away from the drop — the straight-line
+ *    distance to it is larger than 15 min earlier. Service roads, toll bypasses and diversions
+ *    that still close in on the drop don't qualify.
  */
 export const deviationGpsRule: FixRule<DeviationState> = {
   id: RULE,
@@ -58,6 +70,9 @@ export const deviationGpsRule: FixRule<DeviationState> = {
     slowSinceMs: null,
     escalated: false,
     lastFix: null,
+    farSinceMs: null,
+    dropSamples: [],
+    notified: false,
   }),
 
   onFix(state, fix, ctx, effects) {
@@ -156,6 +171,8 @@ export const deviationGpsRule: FixRule<DeviationState> = {
         s.insideAlongM = null;
       }
 
+      s = offRouteNotice(s, fix, d, gap, routes.primary.geometry.end, ctx, effects);
+
       // Halted while off route → Critical.
       if (fix.speedKmh !== null && fix.speedKmh < num(p, 'haltSpeedKmh')) {
         s.slowSinceMs = s.slowSinceMs ?? fix.t;
@@ -175,6 +192,51 @@ export const deviationGpsRule: FixRule<DeviationState> = {
     return last(s);
   },
 };
+
+/** LS_N_0028: far off route for long enough and moving away from the drop → one notice. */
+function offRouteNotice(
+  state: DeviationState,
+  fix: RuleFix,
+  d: number,
+  gap: boolean,
+  drop: { lat: number; lng: number },
+  ctx: RuleContext,
+  effects: Effects,
+): DeviationState {
+  const p = ctx.params;
+  const s = { ...state };
+  const toDropM = distanceM(fix, drop);
+  const windowMs = num(p, 'notifyAwayWindowS') * 1000;
+  // A data gap breaks "continuously" — the clock restarts at the first fix after it.
+  const farSince = d > num(p, 'notifyOffRouteM') ? (gap ? fix.t : (s.farSinceMs ?? fix.t)) : null;
+  const samples = (s.dropSamples ?? []).filter((x) => fix.t - x.t <= 2 * windowMs);
+  const lastSample = samples[samples.length - 1];
+  if (!lastSample || fix.t - lastSample.t >= DROP_SAMPLE_EVERY_MS) {
+    samples.push({ t: fix.t, m: Math.round(toDropM) });
+  }
+  s.farSinceMs = farSince;
+  s.dropSamples = samples;
+
+  if (s.notified || !fix.live || !fix.tripId || farSince === null) return s;
+  if (fix.t - farSince < num(p, 'notifyAfterS') * 1000) return s;
+  // The newest sample at least one window old: was the truck closer to the drop back then?
+  const earlier = [...samples].reverse().find((x) => fix.t - x.t >= windowMs);
+  if (!earlier || toDropM <= earlier.m) return s;
+
+  effects.notice({
+    id: noticeId(fix.tripId, `route_deviation|${s.episodeId ?? s.startMs}`),
+    type: 'trip.route_deviation',
+    tripId: fix.tripId,
+    payload: {
+      distanceOffKm: Math.round(d / 100) / 10,
+      deviationStartedAt: new Date(s.startMs ?? farSince).toISOString(),
+      lat: fix.lat,
+      lng: fix.lng,
+      occurredAt: new Date(fix.t).toISOString(),
+    },
+  });
+  return { ...s, notified: true };
+}
 
 function start(
   s: DeviationState,
