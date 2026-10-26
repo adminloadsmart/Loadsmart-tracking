@@ -43,6 +43,8 @@ export interface ActiveTripRefs {
   startedAt: Date | null;
   /** Load status (e.g. in_transit) — rules evaluate some events only while in transit. */
   loadStatus?: string | null;
+  /** loads.tracking_source — which source the trip should be tracked by first. */
+  trackingSource?: string | null;
   /** The vehicle's GPS device IMEI, if it has one (on-trip device registry). */
   deviceImei?: string | null;
 }
@@ -54,6 +56,8 @@ export interface TripRef {
   /** Epoch ms tracking started — points recorded before it don't belong to this trip. */
   startedAtMs: number | null;
   loadStatus: string | null;
+  /** loads.tracking_source (gps | driver_app | sim | fastag), null when main hasn't set it. */
+  trackingSource: string | null;
 }
 
 function refHash(trip: ActiveTripRefs): Record<string, string> {
@@ -63,6 +67,7 @@ function refHash(trip: ActiveTripRefs): Record<string, string> {
     driverId: trip.driverId ?? '',
     startedAtMs: trip.startedAt ? String(trip.startedAt.getTime()) : '',
     loadStatus: trip.loadStatus ?? '',
+    trackingSource: trip.trackingSource ?? '',
     deviceImei: trip.deviceImei ?? '',
   };
 }
@@ -275,6 +280,7 @@ function toTripRef(tripId: string, ref: Record<string, string>): TripRef | null 
     vehicleId: ref.vehicleId || null,
     startedAtMs: ref.startedAtMs ? Number(ref.startedAtMs) : null,
     loadStatus: ref.loadStatus || null,
+    trackingSource: ref.trackingSource || null,
   };
 }
 

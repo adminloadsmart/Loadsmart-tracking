@@ -2,7 +2,7 @@ import type Redis from 'ioredis';
 import { Counter, Histogram } from 'prom-client';
 import { metricsRegistry } from '../../shared/metrics';
 import type { NormalizedPoint, PointPublisher } from '../points';
-import { APPROACH_STATUS, type ActiveTripIndex, type TripRef } from '../trips';
+import { isApproachStatus, isTrackingSource, type ActiveTripIndex, type TripRef } from '../trips';
 import type { PositionSource } from './roadcast.client';
 import { RoadcastError } from './roadcast.client';
 import {
@@ -187,9 +187,10 @@ export function ownerFor(device: RoadcastDevice, trip: TripRef | undefined, fixM
   if (
     trip &&
     trip.tenantId === device.tenantId &&
+    isTrackingSource(trip.trackingSource, 'roadcast') &&
     (trip.startedAtMs === null || fixMs >= trip.startedAtMs - START_GRACE_MS)
   ) {
-    if (trip.loadStatus === APPROACH_STATUS) owner.approachTripId = trip.tripId;
+    if (isApproachStatus(trip.loadStatus)) owner.approachTripId = trip.tripId;
     else owner.tripId = trip.tripId;
   }
   return owner;

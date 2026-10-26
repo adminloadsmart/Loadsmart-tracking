@@ -6,6 +6,10 @@ export interface TripAtTime {
   tripId: string;
   tenantId: string;
   vehicleId: string | null;
+  /** loads.tracking_source of the trip. */
+  trackingSource: string | null;
+  /** The point is from the drive to the plant, before tracking started (see TripResolver). */
+  approach: boolean;
 }
 
 /** How far before tracking officially started a point may still belong to the trip — the
@@ -40,6 +44,10 @@ export class TripRepository {
       tripId: load.id,
       tenantId: load.tenantId,
       vehicleId: load.vehicleId,
+      trackingSource: load.trackingSource,
+      approach:
+        load.startedAt === null ||
+        Date.parse(recordedAt) < load.startedAt.getTime() - TRIP_START_GRACE_MINUTES * 60_000,
     }));
   }
 }

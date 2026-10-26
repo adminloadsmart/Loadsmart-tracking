@@ -5,7 +5,7 @@ import type { PointSource } from '../points';
 import type { ProcessedPoint } from '../processing/pipeline';
 import type { RouteStore } from '../routes/route.store';
 import type { TripRoutes } from '../routes/trip-routes';
-import type { ActiveTripIndex } from '../trips';
+import { IN_TRANSIT_STATUS, type ActiveTripIndex } from '../trips';
 import { mergeParams, RULE_DEFAULTS } from './defaults';
 import { AlertChange, RulesRepository, VehicleEffects } from './rules.repository';
 import { Effects, FixRule, RuleContext, RuleFix, RuleId } from './rule.types';
@@ -105,7 +105,7 @@ export class RuleEngine {
           speedKmh: point.speedKmh ?? null,
           source: point.source,
           tripId: point.tripId ?? null,
-          inTransit: !!point.tripId && loadStatuses.get(point.tripId) === 'in_transit',
+          inTransit: !!point.tripId && loadStatuses.get(point.tripId) === IN_TRANSIT_STATUS,
           live: !point.flags?.supplementary && nowMs - t <= LIVE_WINDOW_MS,
           ignition: typeof point.flags?.ignition === 'boolean' ? point.flags.ignition : null,
           accuracyM: point.accuracyM ?? null,

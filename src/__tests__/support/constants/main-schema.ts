@@ -41,10 +41,17 @@ export const MAIN_SCHEMA_SQL = `
     source_type text NOT NULL, requisition_id uuid NOT NULL, vehicle_id uuid, vehicle_number text,
     driver_id uuid, driver_name text, driver_number text, planned_capacity_tonnes numeric,
     loading_confirmed_at timestamptz,
+    truck_assigned_at timestamptz, in_transit_loading_at timestamptz,
     at_plant_at timestamptz, in_transit_at timestamptz, reached_delivery_point_at timestamptz,
     delivered_at timestamptz, closed_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now());
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS planned_capacity_tonnes numeric;
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS posting_id uuid;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS truck_assigned_at timestamptz;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS in_transit_loading_at timestamptz;
+  DO $$ BEGIN
+    CREATE TYPE loads.loads_tracking_source_enum AS ENUM ('gps', 'driver_app', 'sim', 'fastag');
+  EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS tracking_source loads.loads_tracking_source_enum;
   CREATE TABLE IF NOT EXISTS loads.load_postings (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, pickup_loading_point_id uuid,
     drop_customer_delivery_point_id uuid, drop_loading_point_id uuid);

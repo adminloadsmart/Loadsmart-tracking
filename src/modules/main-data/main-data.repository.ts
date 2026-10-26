@@ -15,6 +15,10 @@ import {
  * (local and staging differ, e.g. driver tenancy), so a main migration has one place to land here.
  */
 
+/** loads.loads_tracking_source_enum in the main backend. */
+export const LOAD_TRACKING_SOURCES = ['gps', 'driver_app', 'sim', 'fastag'] as const;
+export type LoadTrackingSource = (typeof LOAD_TRACKING_SOURCES)[number];
+
 export interface MainLoad {
   id: string;
   tenantId: string;
@@ -41,6 +45,8 @@ export interface MainLoad {
   startedAt: Date | null;
   /** …to delivery (or close). */
   endedAt: Date | null;
+  /** loads.loads.tracking_source — how the backend says this truck is tracked (null = unset). */
+  trackingSource: LoadTrackingSource | null;
   milestones: Record<string, string | null>;
   updatedAt: Date;
 }
@@ -122,6 +128,7 @@ interface LoadRow {
   vehicle_id: string | null;
   vehicle_number: string | null;
   device_imei: string | null;
+  tracking_source: string | null;
   driver_id: string | null;
   driver_name: string | null;
   driver_number: string | null;
@@ -140,10 +147,11 @@ interface LoadRow {
   updated_at: Date;
 }
 
-const LOAD_SELECT = `
+const loadSelect = (withTrackingSource: boolean) => `
   SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.source_type::text AS source_type,
          l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
          NULLIF(btrim(tm.gps_device_imei), '') AS device_imei,
+         ${withTrackingSource ? 'l.tracking_source::text' : 'NULL::text'} AS tracking_source,
          COALESCE(r.loading_point_id, p.pickup_loading_point_id) AS loading_point_id,
          COALESCE(r.customer_delivery_point_id, p.drop_customer_delivery_point_id)
            AS delivery_point_id,
@@ -164,6 +172,12 @@ const LOAD_SELECT = `
 
 const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
 
+function toTrackingSource(value: string | null): LoadTrackingSource | null {
+  return (LOAD_TRACKING_SOURCES as readonly string[]).includes(value ?? '')
+    ? (value as LoadTrackingSource)
+    : null;
+}
+
 function toLoad(row: LoadRow): MainLoad {
   const vehicleId =
     row.source_type === 'own_fleet'
@@ -180,6 +194,7 @@ function toLoad(row: LoadRow): MainLoad {
     vehicleId,
     vehicleNumber: row.vehicle_number ? normalizePlate(row.vehicle_number) : null,
     deviceImei: row.device_imei,
+    trackingSource: toTrackingSource(row.tracking_source),
     driverId: row.driver_id,
     driverName: row.driver_name,
     driverNumber: row.driver_number,
@@ -189,7 +204,7 @@ function toLoad(row: LoadRow): MainLoad {
     customerName: row.customer_name,
     plannedTonnes: row.planned_tonnes === null ? null : Number(row.planned_tonnes),
     promisedDeliveryAt: row.promised_delivery_at,
-    startedAt: row.loading_confirmed_at,
+    startedAt: row.at_plant_at ?? row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,
     milestones: {
       loadingConfirmedAt: iso(row.loading_confirmed_at),
@@ -210,7 +225,30 @@ function scoped(scope: TenantScope | null, column: string, params: unknown[]): s
 }
 
 export class MainDataRepository {
+  private trackingSourceColumn?: Promise<boolean>;
+
   constructor(private readonly dataSource: DataSource) {}
+
+  /**
+   * The loads SELECT. loads.tracking_source arrives with a main migration — until it has run,
+   * select NULL instead, so tracking keeps working (and picks its own source order).
+   */
+  private async select(): Promise<string> {
+    this.trackingSourceColumn ??= this.dataSource
+      .query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'loads' AND table_name = 'loads' AND column_name = 'tracking_source'`,
+      )
+      .then((rows: unknown[]) => rows.length > 0);
+    try {
+      const present = await this.trackingSourceColumn;
+      if (!present) this.trackingSourceColumn = undefined; // look again once main migrates
+      return loadSelect(present);
+    } catch (err) {
+      this.trackingSourceColumn = undefined;
+      throw err;
+    }
+  }
 
   // ---- loads (= trips) ---------------------------------------------------------------------
 
@@ -229,12 +267,12 @@ export class MainDataRepository {
     const pageKey = `date_trunc('milliseconds', l.updated_at)`;
     const rows: LoadRow[] = after
       ? await this.dataSource.query(
-          `${LOAD_SELECT} WHERE (${pageKey}, l.id) > ($1::timestamptz, $2::uuid)
+          `${await this.select()} WHERE (${pageKey}, l.id) > ($1::timestamptz, $2::uuid)
            ORDER BY ${pageKey}, l.id LIMIT $3`,
           [after.updatedAt, after.id, limit],
         )
       : await this.dataSource.query(
-          `${LOAD_SELECT} WHERE l.updated_at > $1 ORDER BY ${pageKey}, l.id LIMIT $2`,
+          `${await this.select()} WHERE l.updated_at > $1 ORDER BY ${pageKey}, l.id LIMIT $2`,
           [since, limit],
         );
     return rows.map(toLoad);
@@ -247,8 +285,8 @@ export class MainDataRepository {
   ): Promise<MainLoad[]> {
     const params: unknown[] = [statuses, limit];
     const rows: LoadRow[] = await this.dataSource.query(
-      `${LOAD_SELECT} WHERE l.status::text = ANY($1::text[])${scoped(scope, 'l.tenant_id', params)}
-       ORDER BY l.loading_confirmed_at DESC NULLS LAST, l.code DESC LIMIT $2`,
+      `${await this.select()} WHERE l.status::text = ANY($1::text[])${scoped(scope, 'l.tenant_id', params)}
+       ORDER BY COALESCE(l.at_plant_at, l.loading_confirmed_at) DESC NULLS LAST, l.code DESC LIMIT $2`,
       params,
     );
     return rows.map(toLoad);
@@ -266,15 +304,16 @@ export class MainDataRepository {
   async load(scope: TenantScope | null, id: string): Promise<MainLoad | null> {
     const params: unknown[] = [id];
     const rows: LoadRow[] = await this.dataSource.query(
-      `${LOAD_SELECT} WHERE l.id = $1${scoped(scope, 'l.tenant_id', params)}`,
+      `${await this.select()} WHERE l.id = $1${scoped(scope, 'l.tenant_id', params)}`,
       params,
     );
     return rows[0] ? toLoad(rows[0]) : null;
   }
 
   /**
-   * For each timestamp, the driver's load (in this tenant) whose tracking window covers it —
-   * places an offline batch flushed after its trip ended. One round trip per batch.
+   * For each timestamp, the driver's load (in this tenant) whose window covers it — from the
+   * truck being assigned (the drive to the plant) to delivery. Places an offline batch flushed
+   * after its trip ended. One round trip per batch.
    */
   async driverLoadsAt(
     driverId: string,
@@ -287,12 +326,14 @@ export class MainDataRepository {
       `SELECT pt.recorded_at, t.*
        FROM unnest($3::text[]) AS pt(recorded_at)
        JOIN LATERAL (
-         ${LOAD_SELECT}
+         ${await this.select()}
          WHERE l.driver_id = $1 AND l.tenant_id = $2
-           AND l.loading_confirmed_at IS NOT NULL
-           AND l.loading_confirmed_at - make_interval(mins => $4) <= pt.recorded_at::timestamptz
+           AND COALESCE(l.truck_assigned_at, l.in_transit_loading_at, l.at_plant_at,
+                        l.loading_confirmed_at) - make_interval(mins => $4)
+                 <= pt.recorded_at::timestamptz
            AND COALESCE(l.delivered_at, l.closed_at, 'infinity') >= pt.recorded_at::timestamptz
-         ORDER BY l.loading_confirmed_at DESC
+         ORDER BY COALESCE(l.truck_assigned_at, l.in_transit_loading_at, l.at_plant_at,
+                           l.loading_confirmed_at) DESC
          LIMIT 1
        ) t ON true`,
       [driverId, tenantId, recordedAts, graceMinutes],

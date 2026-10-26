@@ -12,7 +12,7 @@ function trip(n: number, tenantId: string, deviceImei: string | null): ActiveTri
     vehicleId: `veh-${n}`,
     driverId: null,
     startedAt: new Date('2026-10-23T05:00:00Z'),
-    loadStatus: 'in_transit',
+    loadStatus: 'in_transit_unloading',
     deviceImei,
   };
 }

@@ -76,7 +76,7 @@ export async function seedLoad(ds: DataSource, input: SeedLoadInput): Promise<Se
       loadId,
       tenantId,
       input.code ?? 'LOAD-T1',
-      input.status ?? 'in_transit',
+      input.status ?? 'in_transit_unloading',
       sourceType,
       requisitionId,
       vehicleId,
@@ -89,6 +89,12 @@ export async function seedLoad(ds: DataSource, input: SeedLoadInput): Promise<Se
       input.deliveredAt ?? null,
     ],
   );
+  if (input.trackingSource) {
+    await ds.query(`UPDATE loads.loads SET tracking_source = $2 WHERE id = $1`, [
+      loadId,
+      input.trackingSource,
+    ]);
+  }
   return { loadId, vehicleId, driverId, loadingPointId, deliveryPointId };
 }
 

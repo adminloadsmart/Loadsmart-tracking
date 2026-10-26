@@ -1,4 +1,5 @@
 import type { MainGeofence, MainTripPoints } from '../main-data';
+import { IN_TRANSIT_STATUS, isApproachStatus } from '../trips/trip-state';
 import { containsPoint } from './geofence.geo';
 
 /** One accepted, non-late fix as the geofence check sees it (device time). */
@@ -92,10 +93,11 @@ export function evaluateVehicle(
 /**
  * The trip step a transition stands for, if any — only when the geofence is linked to this
  * trip's own pickup / drop point, and only from the status the main backend moves on from:
- * - enter the pickup's loading-point geofence while assigned → arrived at pickup ("At plant");
- * - leave it once loading is confirmed (still "loading_confirmed", or already marked in transit)
- *   → departed pickup (LS_N_0026; the main backend moves a loading_confirmed load to in transit);
- * - enter the drop's unloading-point geofence while in transit → arrived at drop.
+ * - enter the pickup's loading-point geofence on the approach (truck_assigned / in_transit_loading)
+ *   → arrived at pickup (the main backend moves the load to reached_loading);
+ * - leave it once the load is loaded (still "loaded", or already in_transit_unloading)
+ *   → departed pickup (LS_N_0026);
+ * - enter the drop's unloading-point geofence while in_transit_unloading → arrived at drop.
  */
 export function tripEventFor(
   transition: GeofenceTransition,
@@ -108,12 +110,16 @@ export function tripEventFor(
     const isPickup =
       !!geofence.loadingPointId && geofence.loadingPointId === points.pickupLoadingPointId;
     if (!isPickup) return null;
-    if (event === 'enter' && loadStatus === 'assigned') return 'trip.arrived_at_pickup';
-    if (event === 'exit' && (loadStatus === 'loading_confirmed' || loadStatus === 'in_transit'))
+    if (event === 'enter' && isApproachStatus(loadStatus)) return 'trip.arrived_at_pickup';
+    if (event === 'exit' && (loadStatus === 'loaded' || loadStatus === IN_TRANSIT_STATUS))
       return 'trip.departed_pickup';
     return null;
   }
-  if (geofence.type === 'unloading_point' && event === 'enter' && loadStatus === 'in_transit') {
+  if (
+    geofence.type === 'unloading_point' &&
+    event === 'enter' &&
+    loadStatus === IN_TRANSIT_STATUS
+  ) {
     const isDrop =
       (!!geofence.customerDeliveryPointId &&
         geofence.customerDeliveryPointId === points.dropCustomerDeliveryPointId) ||

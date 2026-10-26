@@ -23,7 +23,10 @@ export {
 export type { ActiveTripRefs, OnTripDevice, TripRef } from './active-trip-index';
 export {
   ACTIVE_STATUSES,
-  APPROACH_STATUS,
+  APPROACH_STATUSES,
+  IN_TRANSIT_STATUS,
+  isApproachStatus,
+  isTrackingSource,
   INDEXED_STATUSES,
   LOAD_STATUSES,
   marketVehicleId,

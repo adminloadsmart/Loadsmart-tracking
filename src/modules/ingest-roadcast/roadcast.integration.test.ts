@@ -13,7 +13,7 @@ import {
 import { allPointStreamKeys } from '../../streams/partitioner';
 import { MainDataRepository } from '../main-data';
 import { createPointsModule } from '../points';
-import { APPROACH_STATUS, createTripsModule } from '../trips';
+import { APPROACH_STATUSES, createTripsModule } from '../trips';
 import type { PositionSource } from './roadcast.client';
 import { RoadcastDevice, RoadcastPollJob } from './roadcast-poll.job';
 
@@ -84,7 +84,7 @@ describe.skipIf(!available)('Roadcast pull end to end (real Redis + Postgres)', 
     };
   }
 
-  async function onTrip(device: RoadcastDevice, loadStatus = 'in_transit') {
+  async function onTrip(device: RoadcastDevice, loadStatus = 'in_transit_unloading') {
     const tripId = randomUUID();
     await trips.activeTrips.activate({
       tripId,
@@ -200,7 +200,7 @@ describe.skipIf(!available)('Roadcast pull end to end (real Redis + Postgres)', 
 
   it('on the drive to the plant, carries the trip only as approachTripId', async () => {
     const device = newDevice();
-    const tripId = await onTrip(device, APPROACH_STATUS);
+    const tripId = await onTrip(device, APPROACH_STATUSES[0]);
     roadcast.rows = [row(device.imei, '2026-10-23T05:16:00Z')];
     expect((await job.run({ devices: [device] }, NOW)).accepted).toBe(1);
 

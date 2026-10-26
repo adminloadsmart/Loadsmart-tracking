@@ -6,19 +6,23 @@ const TENANT = '11111111-1111-4111-8111-111111111111';
 describe('trackingStateFor', () => {
   it.each([
     ['created', 'pending'],
-    ['assigned', 'pending'],
-    ['loading_confirmed', 'active'],
-    ['at_plant', 'active'],
-    ['in_transit', 'active'],
-    ['reached_delivery_point', 'active'],
-    ['delivered', 'ended'],
+    ['bids_received', 'pending'],
+    ['truck_assigned', 'pending'],
+    ['in_transit_loading', 'pending'],
+    ['loaded', 'active'],
+    ['reached_loading', 'active'],
+    ['in_transit_unloading', 'active'],
+    ['reached_unloading', 'active'],
+    ['delivered_ok', 'ended'],
+    ['delivered_with_issues', 'ended'],
+    ['payment', 'ended'],
     ['closed', 'ended'],
   ] as const)('%s -> %s', (status, state) => {
     expect(trackingStateFor(status, false)).toBe(state);
   });
 
   it('a deleted load is ended whatever its status', () => {
-    expect(trackingStateFor('in_transit', true)).toBe('ended');
+    expect(trackingStateFor('in_transit_unloading', true)).toBe('ended');
   });
 });
 

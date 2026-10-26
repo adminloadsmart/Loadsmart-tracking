@@ -57,7 +57,11 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
   });
 
   async function assignedTrip() {
-    const seeded = await seedLoad(ds, { tenantId: TENANT, status: 'assigned', startedAt: null });
+    const seeded = await seedLoad(ds, {
+      tenantId: TENANT,
+      status: 'truck_assigned',
+      startedAt: null,
+    });
     await trips.watcher.poll();
     await ds.query(
       `INSERT INTO tracking.geofences (id, tenant_id, name, type, latitude, longitude, radius_m, loading_point_id)
@@ -129,7 +133,7 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
 
   it('a load past assigned gets only the geofence event', async () => {
     const trip = await assignedTrip();
-    await updateLoad(ds, trip.tripId, { status: 'at_plant' });
+    await updateLoad(ds, trip.tripId, { status: 'reached_loading' });
     await trips.watcher.poll();
     await feed(trip, [
       [180, 2000],

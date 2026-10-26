@@ -1,4 +1,4 @@
-import { APPROACH_STATUS, type ActiveTripIndex } from '../trips';
+import { isApproachStatus, isTrackingSource, type ActiveTripIndex } from '../trips';
 import { TripRepository } from './trip.repository';
 
 export interface ResolvedTrip {
@@ -45,12 +45,12 @@ export class TripResolver {
         active &&
         active.vehicleId &&
         active.tenantId === tenantId &&
+        isTrackingSource(active.trackingSource, 'driver_app') &&
         (active.startedAtMs === null || recordedAtMs >= active.startedAtMs - START_GRACE_MS)
       ) {
-        result[i] =
-          active.loadStatus === APPROACH_STATUS
-            ? { tripId: null, tenantId, vehicleId: active.vehicleId, approachTripId: active.tripId }
-            : { tripId: active.tripId, tenantId, vehicleId: active.vehicleId };
+        result[i] = isApproachStatus(active.loadStatus)
+          ? { tripId: null, tenantId, vehicleId: active.vehicleId, approachTripId: active.tripId }
+          : { tripId: active.tripId, tenantId, vehicleId: active.vehicleId };
       } else if (nowMs - recordedAtMs > LIVE_WINDOW_MS) {
         fallback.push(i);
       }
@@ -65,8 +65,16 @@ export class TripResolver {
       const byTime = new Map(found.map((trip) => [trip.recordedAt, trip]));
       for (const i of fallback) {
         const trip = byTime.get(recordedAts[i]);
-        if (trip?.vehicleId) {
-          result[i] = { tripId: trip.tripId, tenantId: trip.tenantId, vehicleId: trip.vehicleId };
+        if (trip?.vehicleId && isTrackingSource(trip.trackingSource, 'driver_app')) {
+          // Before tracking started it is the drive to the plant — the geofence check's, not the trip's.
+          result[i] = trip.approach
+            ? {
+                tripId: null,
+                tenantId: trip.tenantId,
+                vehicleId: trip.vehicleId,
+                approachTripId: trip.tripId,
+              }
+            : { tripId: trip.tripId, tenantId: trip.tenantId, vehicleId: trip.vehicleId };
         }
       }
     }

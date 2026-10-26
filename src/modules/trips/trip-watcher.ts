@@ -82,6 +82,7 @@ function refs(load: MainLoad) {
     driverId: load.driverId,
     startedAt: load.startedAt,
     loadStatus: load.status,
+    trackingSource: load.trackingSource,
     deviceImei: load.deviceImei,
   };
 }

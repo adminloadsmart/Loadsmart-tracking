@@ -37,7 +37,11 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
   });
 
   it('indexes a load from assignment until delivery, with its GPS device on the on-trip registry', async () => {
-    const load = await seedLoad(ds, { tenantId: TENANT, status: 'assigned', startedAt: null });
+    const load = await seedLoad(ds, {
+      tenantId: TENANT,
+      status: 'truck_assigned',
+      startedAt: null,
+    });
     await ds.query(
       `INSERT INTO masters.vehicle_telemetry_meta (tenant_id, vehicle_id, gps_device_imei)
        VALUES ($1, $2, '866221070401935')`,
@@ -46,14 +50,14 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     // Assigned: indexed for the drive to the plant (geofence check), not yet tracking.
     await trips.watcher.poll();
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBe(load.loadId);
-    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('assigned');
+    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('truck_assigned');
     expect((await trips.activeTrips.onTripDevicesByTenant()).get(TENANT)).toEqual([
       { imei: '866221070401935', vehicleId: load.vehicleId, tenantId: TENANT },
     ]);
 
     const confirmedAt = new Date('2026-10-06T08:00:00Z');
     await updateLoad(ds, load.loadId, {
-      status: 'loading_confirmed',
+      status: 'loaded',
       loading_confirmed_at: confirmedAt,
     });
     await trips.watcher.poll();
@@ -61,15 +65,15 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     expect(await redis.get(driverActiveTripKey(load.driverId!))).toBe(load.loadId);
     expect(await redis.hgetall(tripRefKey(load.loadId))).toMatchObject({
       tenantId: TENANT,
-      loadStatus: 'loading_confirmed',
+      loadStatus: 'loaded',
       startedAtMs: String(confirmedAt.getTime()),
     });
 
-    await updateLoad(ds, load.loadId, { status: 'in_transit' });
+    await updateLoad(ds, load.loadId, { status: 'in_transit_unloading' });
     await trips.watcher.poll();
-    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('in_transit');
+    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('in_transit_unloading');
 
-    await updateLoad(ds, load.loadId, { status: 'delivered', delivered_at: new Date() });
+    await updateLoad(ds, load.loadId, { status: 'delivered_ok', delivered_at: new Date() });
     await trips.watcher.poll();
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBeNull();
     expect(await redis.exists(tripRefKey(load.loadId))).toBe(0);
