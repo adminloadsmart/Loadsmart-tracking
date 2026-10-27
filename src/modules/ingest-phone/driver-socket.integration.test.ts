@@ -152,11 +152,13 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
 
   // --- tests ---------------------------------------------------------------------------------
 
-  it('rejects connections without a valid driver-access token or with a revoked one', async () => {
+  it('rejects connections without a valid driver token or with a revoked one', async () => {
     const driverId = randomUUID();
     for (const bad of [
       undefined,
       'garbage',
+      token(driverId, { purpose: 'driver-login-otp', tenantId: null }),
+      // identity token of a driver with no active tenant relation
       token(driverId, { purpose: 'driver-identity-access', tenantId: null }),
       jwt.sign({ id: driverId, tenantId: TENANT, purpose: 'driver-access' }, 'wrong-secret'),
     ]) {
@@ -168,6 +170,16 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     await expect(connected(client(token(driverId, { jti })))).rejects.toThrow('unauthorized');
 
     await expect(connected(client(token(driverId)))).resolves.toBeUndefined();
+  });
+
+  it('accepts an identity-scoped token for a driver with an active tenant relation', async () => {
+    const driverId = randomUUID();
+    await ds.query(
+      `INSERT INTO masters.driver_tenant_relations (tenant_id, driver_id, status) VALUES ($1, $2, 'active')`,
+      [TENANT, driverId],
+    );
+    const identity = token(driverId, { purpose: 'driver-identity-access', tenantId: null });
+    await expect(connected(client(identity))).resolves.toBeUndefined();
   });
 
   it('falls back to the token query param or Authorization header when auth is not set', async () => {

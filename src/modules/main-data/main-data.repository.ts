@@ -358,7 +358,7 @@ export class MainDataRepository {
    */
   async driverLoadsAt(
     driverId: string,
-    tenantId: string,
+    tenantIds: string[],
     recordedAts: string[],
     graceMinutes: number,
   ): Promise<Array<{ recordedAt: string; load: MainLoad }>> {
@@ -368,7 +368,7 @@ export class MainDataRepository {
        FROM unnest($3::text[]) AS pt(recorded_at)
        JOIN LATERAL (
          ${await this.select()}
-         WHERE l.driver_id = $1 AND l.tenant_id = $2
+         WHERE l.driver_id = $1 AND l.tenant_id = ANY($2::uuid[])
            AND COALESCE(l.truck_assigned_at, l.in_transit_loading_at, l.at_plant_at,
                         l.loading_confirmed_at) - make_interval(mins => $4)
                  <= pt.recorded_at::timestamptz
@@ -377,7 +377,7 @@ export class MainDataRepository {
                            l.loading_confirmed_at) DESC
          LIMIT 1
        ) t ON true`,
-      [driverId, tenantId, recordedAts, graceMinutes],
+      [driverId, tenantIds, recordedAts, graceMinutes],
     );
     return rows.map((row) => ({ recordedAt: row.recorded_at, load: toLoad(row) }));
   }

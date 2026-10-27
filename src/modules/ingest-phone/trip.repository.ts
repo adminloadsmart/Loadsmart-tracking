@@ -24,18 +24,18 @@ export class TripRepository {
   }
 
   /**
-   * For each timestamp, the driver's trip (load, in this tenant) whose tracking window covers
+   * For each timestamp, the driver's trip (load, in one of these tenants) whose tracking window covers
    * it. Used only for points the Redis fast path can't place — e.g. an offline batch flushed
    * after its trip ended. One round trip per batch.
    */
   async findTripsForDriverAt(
     driverId: string,
-    tenantId: string,
+    tenantIds: string[],
     recordedAts: string[],
   ): Promise<TripAtTime[]> {
     const found = await this.mainData.driverLoadsAt(
       driverId,
-      tenantId,
+      tenantIds,
       recordedAts,
       TRIP_START_GRACE_MINUTES,
     );

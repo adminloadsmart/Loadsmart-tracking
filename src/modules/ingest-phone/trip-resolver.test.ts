@@ -26,7 +26,7 @@ describe('TripResolver', () => {
   it('stamps the trip on a tracked load', async () => {
     const [trip] = await resolverFor(ref('in_transit_unloading')).resolve(
       'd1',
-      TENANT,
+      [TENANT],
       [recordedAt],
       now,
     );
@@ -36,7 +36,7 @@ describe('TripResolver', () => {
   it('keeps an assigned load off the trip, as the approach to the plant', async () => {
     const [trip] = await resolverFor(ref('truck_assigned')).resolve(
       'd1',
-      TENANT,
+      [TENANT],
       [recordedAt],
       now,
     );
@@ -57,7 +57,7 @@ describe('TripResolver', () => {
 
   it('keeps a delivered load off the trip, while it leaves the delivery point', async () => {
     for (const status of ['delivered_ok', 'closed']) {
-      const [trip] = await resolverFor(ref(status)).resolve('d1', TENANT, [recordedAt], now);
+      const [trip] = await resolverFor(ref(status)).resolve('d1', [TENANT], [recordedAt], now);
       expect(trip).toEqual({
         tripId: null,
         tenantId: TENANT,
@@ -77,7 +77,7 @@ describe('TripResolver', () => {
         ],
       } as unknown as TripRepository,
     );
-    const [trip] = await resolver.resolve('d1', TENANT, [old], now);
+    const [trip] = await resolver.resolve('d1', [TENANT], [old], now);
     expect(trip).toEqual({ tripId: 'trip-1', tenantId: TENANT, vehicleId: 'veh-1' });
   });
 
@@ -87,7 +87,7 @@ describe('TripResolver', () => {
       trackingSource,
     });
     const resolve = (trackingSource: string | null) =>
-      resolverFor(withSource(trackingSource)).resolve('d1', TENANT, [recordedAt], now);
+      resolverFor(withSource(trackingSource)).resolve('d1', [TENANT], [recordedAt], now);
     expect((await resolve('driver_app'))[0]).toMatchObject({ tripId: 'trip-1' });
     expect((await resolve(null))[0]).toMatchObject({ tripId: 'trip-1' });
     expect((await resolve('fastag'))[0]).toMatchObject({ tripId: 'trip-1' });
@@ -116,12 +116,12 @@ describe('TripResolver', () => {
       );
 
     it('puts a point from after tracking started on the trip', async () => {
-      const [trip] = await fallbackFor(false).resolve('d1', TENANT, [old], now);
+      const [trip] = await fallbackFor(false).resolve('d1', [TENANT], [old], now);
       expect(trip).toEqual({ tripId: 'trip-9', tenantId: TENANT, vehicleId: 'veh-9' });
     });
 
     it('keeps a point from the drive to the plant off the trip, as its approach', async () => {
-      const [trip] = await fallbackFor(true).resolve('d1', TENANT, [old], now);
+      const [trip] = await fallbackFor(true).resolve('d1', [TENANT], [old], now);
       expect(trip).toEqual({
         tripId: null,
         tenantId: TENANT,

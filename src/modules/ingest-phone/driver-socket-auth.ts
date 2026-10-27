@@ -5,7 +5,9 @@ import { extractHandshakeToken } from '../../shared/auth/handshake-token';
 /** Who is on the other end of a /driver socket — set on socket.data by the handshake. */
 export interface DriverIdentity {
   driverId: string;
-  tenantId: string;
+  /** Tenants the driver may push points for: the token's tenant, or — for an identity-scoped
+   *  token — their live active relations. */
+  tenantIds: string[];
   jti: string | null;
   /** Epoch seconds the token expires. */
   exp: number;
@@ -17,11 +19,13 @@ interface DriverTokenPayload extends JwtPayload {
   purpose?: string;
 }
 
+const ACCEPTED_PURPOSES = ['driver-access', 'driver-identity-access'];
+
 /**
  * Verifies the driver-app access token the main loadsmart backend issues (its
- * driver-auth.middleware.ts): HS256 with the shared JWT_SECRET, purpose 'driver-access' (a
- * tenant-selected session — 'driver-identity-access' and login/OTP tokens are rejected), not
- * revoked. Every failure is the same opaque 'unauthorized' so a caller can't probe which check
+ * driver-auth.middleware.ts): HS256 with the shared JWT_SECRET, purpose 'driver-access' or
+ * 'driver-identity-access' (login always issues the latter, with no tenant — the tenants are
+ * resolved live, see createDriverSocketAuth; login/OTP tokens are rejected), not revoked. Every failure is the same opaque 'unauthorized' so a caller can't probe which check
  * failed.
  */
 export function verifyDriverToken(token: string, jwtSecret: string): DriverIdentity | null {
@@ -31,11 +35,11 @@ export function verifyDriverToken(token: string, jwtSecret: string): DriverIdent
   } catch {
     return null;
   }
-  if (decoded.purpose !== 'driver-access') return null;
-  if (!decoded.id || !decoded.tenantId || typeof decoded.exp !== 'number') return null;
+  if (!decoded.purpose || !ACCEPTED_PURPOSES.includes(decoded.purpose)) return null;
+  if (!decoded.id || typeof decoded.exp !== 'number') return null;
   return {
     driverId: decoded.id,
-    tenantId: decoded.tenantId,
+    tenantIds: decoded.tenantId ? [decoded.tenantId] : [],
     jti: decoded.jti ?? null,
     exp: decoded.exp,
   };
@@ -44,6 +48,8 @@ export function verifyDriverToken(token: string, jwtSecret: string): DriverIdent
 export function createDriverSocketAuth(deps: {
   jwtSecret: string;
   isBlocked: (jti: string | null) => Promise<boolean>;
+  /** The driver's active tenant relations, resolved live like the main backend's createDriverAuth. */
+  activeTenantIds: (driverId: string) => Promise<string[]>;
 }) {
   return async (socket: Socket, next: (err?: Error) => void): Promise<void> => {
     const token = extractHandshakeToken(socket.handshake);
@@ -51,6 +57,15 @@ export function createDriverSocketAuth(deps: {
     if (!identity || (await deps.isBlocked(identity.jti))) {
       next(new Error('unauthorized'));
       return;
+    }
+    // A tenant-pinned token carries its tenant; an identity token resolves the live relations. A
+    // driver with none is rejected, same as the main backend's requireTenant.
+    if (identity.tenantIds.length === 0) {
+      identity.tenantIds = await deps.activeTenantIds(identity.driverId);
+      if (identity.tenantIds.length === 0) {
+        next(new Error('unauthorized'));
+        return;
+      }
     }
     socket.data.driver = identity;
     next();

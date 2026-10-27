@@ -23,7 +23,7 @@ const LIVE_WINDOW_MS = 2 * 60_000;
  * Maps a driver's points to the trip (and so the vehicle and tenant) they belong to.
  * Fast path: the Redis active-trip index (no Postgres). Fallback, older points only: one query
  * per batch against the trips read model, so an offline batch flushed after the trip ended still
- * lands on the right trip. Points matching no trip of the token's tenant resolve to null.
+ * lands on the right trip. Points matching no trip of the driver's tenants resolve to null.
  */
 export class TripResolver {
   constructor(
@@ -33,7 +33,7 @@ export class TripResolver {
 
   async resolve(
     driverId: string,
-    tenantId: string,
+    tenantIds: string[],
     recordedAts: string[],
     nowMs = Date.now(),
   ): Promise<Array<ResolvedTrip | null>> {
@@ -51,14 +51,19 @@ export class TripResolver {
       if (
         active &&
         active.vehicleId &&
-        active.tenantId === tenantId &&
+        tenantIds.includes(active.tenantId) &&
         isTrackingSource(active.trackingSource, 'driver_app') &&
         (active.startedAtMs === null || recordedAtMs >= active.startedAtMs - START_GRACE_MS) &&
         (!followedAfterDelivery || isLive)
       ) {
         result[i] = isGeofenceOnly(active.loadStatus)
-          ? { tripId: null, tenantId, vehicleId: active.vehicleId, geofenceTripId: active.tripId }
-          : { tripId: active.tripId, tenantId, vehicleId: active.vehicleId };
+          ? {
+              tripId: null,
+              tenantId: active.tenantId,
+              vehicleId: active.vehicleId,
+              geofenceTripId: active.tripId,
+            }
+          : { tripId: active.tripId, tenantId: active.tenantId, vehicleId: active.vehicleId };
       } else if (nowMs - recordedAtMs > LIVE_WINDOW_MS) {
         fallback.push(i);
       }
@@ -67,7 +72,7 @@ export class TripResolver {
     if (fallback.length > 0) {
       const found = await this.repository.findTripsForDriverAt(
         driverId,
-        tenantId,
+        tenantIds,
         fallback.map((i) => recordedAts[i]),
       );
       const byTime = new Map(found.map((trip) => [trip.recordedAt, trip]));

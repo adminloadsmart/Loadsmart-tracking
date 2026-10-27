@@ -65,7 +65,7 @@ export function registerDriverNamespace(namespace: Namespace, deps: Deps): void 
     const driver = socket.data.driver as DriverIdentity;
     const log = deps.logger.child({ driverId: driver.driverId, socketId: socket.id });
     driverSockets.inc();
-    log.info({ tenantId: driver.tenantId }, 'Driver socket connected');
+    log.info({ tenantIds: driver.tenantIds }, 'Driver socket connected');
     // Raw payloads are debug-only (LOG_LEVEL=debug); unknown event names show up here too.
     socket.onAny((event: string, payload: unknown) =>
       log.debug({ event, payload }, 'Driver socket event'),
@@ -142,7 +142,7 @@ async function ingest(
 ): Promise<Ack> {
   try {
     const recordedAts = points.map((point) => new Date(point.recordedAt).toISOString());
-    const trips = await deps.resolver.resolve(driver.driverId, driver.tenantId, recordedAts);
+    const trips = await deps.resolver.resolve(driver.driverId, driver.tenantIds, recordedAts);
     const receivedAt = new Date().toISOString();
 
     const normalized: NormalizedPoint[] = [];

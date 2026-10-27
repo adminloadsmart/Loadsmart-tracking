@@ -22,6 +22,9 @@ export const MAIN_SCHEMA_SQL = `
     gps_provider text, gps_enabled boolean NOT NULL DEFAULT false, deleted_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now());
   ALTER TABLE masters.vehicle_telemetry_meta ADD COLUMN IF NOT EXISTS gps_device_imei varchar(15);
+  CREATE TABLE IF NOT EXISTS masters.driver_tenant_relations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, driver_id uuid NOT NULL,
+    status text NOT NULL DEFAULT 'active', deleted_at timestamptz);
   CREATE TABLE IF NOT EXISTS masters.loading_points (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, title text NOT NULL, address_line_1 text,
     city text, state text, pin_code text, latitude numeric(10,6), longitude numeric(10,6),
@@ -80,6 +83,6 @@ export const MAIN_SCHEMA_SQL = `
 
 export const MAIN_TABLES =
   'loads.loads, loads.requisitions, loads.load_postings, customers.customer_delivery_points, ' +
-  'masters.loading_points, masters.vehicle_telemetry_meta, masters.vehicles, masters.truck_types, ' +
+  'masters.driver_tenant_relations, masters.loading_points, masters.vehicle_telemetry_meta, masters.vehicles, masters.truck_types, ' +
   'customers.customers, tracking.geofences, tracking.geofence_vehicles, tracking.geofence_events, ' +
   'auth.organizations';

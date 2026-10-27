@@ -70,18 +70,22 @@ describe('verifyDriverToken', () => {
     );
     expect(identity).toMatchObject({
       driverId: owner.driverId,
-      tenantId: owner.tenantId,
+      tenantIds: [owner.tenantId],
       jti: 'j1',
     });
   });
 
+  it('accepts an identity-scoped token, leaving the tenants to be resolved live', () => {
+    const identity = verifyDriverToken(
+      sign({ id: owner.driverId, tenantId: null, purpose: 'driver-identity-access', jti: 'j2' }),
+      secret,
+    );
+    expect(identity).toMatchObject({ driverId: owner.driverId, tenantIds: [], jti: 'j2' });
+  });
+
   it.each([
-    [
-      'identity-only token',
-      { id: owner.driverId, tenantId: null, purpose: 'driver-identity-access' },
-    ],
+    ['login token', { id: owner.driverId, tenantId: null, purpose: 'driver-login-otp' }],
     ['staff token', { id: owner.driverId, tenantId: owner.tenantId, purpose: 'access' }],
-    ['no tenant', { id: owner.driverId, purpose: 'driver-access' }],
     ['no purpose', { id: owner.driverId, tenantId: owner.tenantId }],
   ])('rejects a %s', (_label, payload) => {
     expect(verifyDriverToken(sign(payload), secret)).toBeNull();
