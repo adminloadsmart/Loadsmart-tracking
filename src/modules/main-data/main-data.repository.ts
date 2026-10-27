@@ -154,11 +154,17 @@ interface LoadRow {
   updated_at: Date;
 }
 
-const loadSelect = (withTrackingSource: boolean) => `
+/** Columns main adds by migration — absent on a main database that hasn't run them yet. */
+interface LoadColumns {
+  trackingSource: boolean;
+  departedDrop: boolean;
+}
+
+const loadSelect = (columns: LoadColumns) => `
   SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.source_type::text AS source_type,
          l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
          NULLIF(btrim(tm.gps_device_imei), '') AS device_imei,
-         ${withTrackingSource ? 'l.tracking_source::text' : 'NULL::text'} AS tracking_source,
+         ${columns.trackingSource ? 'l.tracking_source::text' : 'NULL::text'} AS tracking_source,
          COALESCE(r.loading_point_id, p.pickup_loading_point_id) AS loading_point_id,
          COALESCE(r.customer_delivery_point_id, p.drop_customer_delivery_point_id)
            AS delivery_point_id,
@@ -169,7 +175,8 @@ const loadSelect = (withTrackingSource: boolean) => `
            p.deliver_by_at
          ) AS promised_delivery_at,
          l.loading_confirmed_at, l.at_plant_at, l.in_transit_at, l.reached_delivery_point_at,
-         l.delivered_at, l.departed_drop_at, l.closed_at, l.updated_at
+         l.delivered_at, ${columns.departedDrop ? 'l.departed_drop_at' : 'NULL::timestamptz'} AS departed_drop_at,
+         l.closed_at, l.updated_at
   FROM loads.loads l
   LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
   LEFT JOIN loads.load_postings p ON p.id = l.posting_id
@@ -234,27 +241,40 @@ function scoped(scope: TenantScope | null, column: string, params: unknown[]): s
 }
 
 export class MainDataRepository {
-  private trackingSourceColumn?: Promise<boolean>;
+  private loadColumns?: Promise<LoadColumns>;
 
   constructor(private readonly dataSource: DataSource) {}
 
   /**
-   * The loads SELECT. loads.tracking_source arrives with a main migration — until it has run,
-   * select NULL instead, so tracking keeps working (and picks its own source order).
+   * The loads SELECT. loads.tracking_source and loads.departed_drop_at arrive with main
+   * migrations — until they have run, select NULL instead, so tracking keeps working (it picks
+   * its own source order, and a delivered load isn't followed to the drop's exit).
    */
   private async select(): Promise<string> {
-    this.trackingSourceColumn ??= this.dataSource
+    return loadSelect(await this.columns());
+  }
+
+  private async columns(): Promise<LoadColumns> {
+    this.loadColumns ??= this.dataSource
       .query(
-        `SELECT 1 FROM information_schema.columns
-         WHERE table_schema = 'loads' AND table_name = 'loads' AND column_name = 'tracking_source'`,
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'loads' AND table_name = 'loads'
+           AND column_name IN ('tracking_source', 'departed_drop_at')`,
       )
-      .then((rows: unknown[]) => rows.length > 0);
+      .then((rows: Array<{ column_name: string }>) => {
+        const names = new Set(rows.map((row) => row.column_name));
+        return {
+          trackingSource: names.has('tracking_source'),
+          departedDrop: names.has('departed_drop_at'),
+        };
+      });
     try {
-      const present = await this.trackingSourceColumn;
-      if (!present) this.trackingSourceColumn = undefined; // look again once main migrates
-      return loadSelect(present);
+      const columns = await this.loadColumns;
+      // look again once main migrates
+      if (!columns.trackingSource || !columns.departedDrop) this.loadColumns = undefined;
+      return columns;
     } catch (err) {
-      this.trackingSourceColumn = undefined;
+      this.loadColumns = undefined;
       throw err;
     }
   }
@@ -309,10 +329,11 @@ export class MainDataRepository {
    *  ones whose truck hasn't been seen leaving the delivery point yet (within DELIVERED_FOLLOW_MS
    *  of the E-POD). */
   async indexedLoads(limit = 50_000): Promise<MainLoad[]> {
+    const { departedDrop } = await this.columns();
     const rows: LoadRow[] = await this.dataSource.query(
       `${await this.select()}
        WHERE l.status::text = ANY($1::text[])
-          OR (l.status::text = ANY($2::text[]) AND l.departed_drop_at IS NULL
+          OR (l.status::text = ANY($2::text[])${departedDrop ? ' AND l.departed_drop_at IS NULL' : ''}
               AND l.delivered_at > now() - make_interval(secs => $3))
        ORDER BY COALESCE(l.at_plant_at, l.loading_confirmed_at) DESC NULLS LAST, l.code DESC
        LIMIT $4`,
@@ -470,14 +491,21 @@ export class MainDataRepository {
 
   /**
    * The company's LS_N_0030 limit — "late by more than this many minutes" — set by its org admin
-   * in main (auth.organizations.late_delivery_threshold_minutes); null when never set.
+   * in main (auth.organizations.late_delivery_threshold_minutes); null when never set — or when
+   * main hasn't run the migration that adds the column yet (the caller then uses its default).
    */
   async lateDeliveryThresholdMin(tenantId: string): Promise<number | null> {
-    const rows: Array<{ minutes: number | null }> = await this.dataSource.query(
-      `SELECT late_delivery_threshold_minutes AS minutes FROM auth.organizations WHERE id = $1`,
-      [tenantId],
-    );
-    return rows[0]?.minutes ?? null;
+    try {
+      const rows: Array<{ minutes: number | null }> = await this.dataSource.query(
+        `SELECT late_delivery_threshold_minutes AS minutes FROM auth.organizations WHERE id = $1`,
+        [tenantId],
+      );
+      return rows[0]?.minutes ?? null;
+    } catch (err) {
+      const code = (err as { driverError?: { code?: string } }).driverError?.code;
+      if (code === '42703' || code === '42P01') return null; // undefined column / table
+      throw err;
+    }
   }
 
   // ---- geofences ---------------------------------------------------------------------------
