@@ -1,19 +1,22 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
+import type { MainDataRepository } from '../main-data';
 import type { RouteStore } from '../routes/route.store';
 import type { InTransitTrip, RoutesRepository } from '../routes/routes.repository';
 import { RULE_DEFAULTS } from './defaults';
-import { alreadyLateSeverity, evaluateDelay, promisedTime } from './delay';
+import { alreadyLateSeverity, evaluateDelay, lateNoticeDue, promisedTime } from './delay';
 import { ruleStateKey, RuleEngine } from './rule-engine';
-import { alertId, episodeId, num } from './rule-helpers';
+import { alertId, episodeId, noticeId, num } from './rule-helpers';
 import { AlertChange, RulesRepository } from './rules.repository';
 import type { ProgressState } from './rules/progress-gps.rule';
-import { Effects, SEVERITY_RANK, Severity } from './rule.types';
+import { DelayCause, Effects, SEVERITY_RANK, Severity } from './rule.types';
 
 const RULE = 'DELAY-GPS' as const;
 export const tripEtaKey = (tripId: string) => `trk:trip:${tripId}:eta`;
 const delayStateKey = (tripId: string) => `trk:delay:${tripId}`;
 const OPEN_SET = 'trk:delay:open';
+/** How long a company's LS_N_0030 limit (main's org setting) is cached. */
+const THRESHOLD_TTL_MS = 5 * 60_000;
 
 interface DelayState {
   lastEvalMs: number;
@@ -24,6 +27,11 @@ interface DelayState {
   alertId: string | null;
   episodeId: string | null;
   maxDelayMin: number;
+  /** LS_N_0030: consecutive evaluations over the company's limit, the delay last notified (0 =
+   *  none yet) and how many notices went out (the next notice's id). */
+  lateConsec: number;
+  lateNotifiedMin: number;
+  lateCount: number;
 }
 
 const emptyState = (): DelayState => ({
@@ -35,6 +43,9 @@ const emptyState = (): DelayState => ({
   alertId: null,
   episodeId: null,
   maxDelayMin: 0,
+  lateConsec: 0,
+  lateNotifiedMin: 0,
+  lateCount: 0,
 });
 
 /**
@@ -46,8 +57,14 @@ const emptyState = (): DelayState => ({
  *  - last fix older than 60 min → keep the last ETA, mark it stale, no new projected-delay alert;
  *  - re-alert only when severity changes (escalation).
  * The latest ETA is kept in Redis for the trip API and the live map.
+ *
+ * LS_N_0030 "delivery will be late" (a trip notice for the main backend) rides on the same
+ * evaluation: once the delay exceeds the company's limit (main's org setting, default 1 day) on
+ * `consecutive` evaluations, then again only each time the delay doubles since the last notice.
  */
 export class DelayMonitor {
+  private readonly thresholdCache = new Map<string, { at: number; value: number }>();
+
   constructor(
     private readonly redis: Redis,
     private readonly routes: RoutesRepository,
@@ -55,6 +72,8 @@ export class DelayMonitor {
     private readonly rules: RulesRepository,
     private readonly engine: RuleEngine,
     private readonly logger: Logger,
+    /** Reads the company's LS_N_0030 limit; without it the default applies. */
+    private readonly mainData: MainDataRepository | null = null,
   ) {}
 
   async tick(nowMs = Date.now()): Promise<AlertChange[]> {
@@ -169,6 +188,17 @@ export class DelayMonitor {
       }
     }
     if (state.alertId) state.maxDelayMin = Math.max(state.maxDelayMin, delayMin);
+    if (!stale || alreadyLate) {
+      await this.lateNotice(state, trip, {
+        delayMin,
+        etaMs: stale ? null : estimate.etaMs,
+        promisedMs,
+        speedKmh: estimate.speedKmh,
+        nowMs,
+        params: p,
+        effects,
+      });
+    }
 
     const changes = await this.rules.applyEffects([
       {
@@ -176,6 +206,7 @@ export class DelayMonitor {
         vehicleId: trip.vehicle_id,
         episodes: effects.episodes,
         alerts: effects.alerts,
+        notices: effects.notices,
       },
     ]);
     await this.redis.hset(delayStateKey(trip.id), serializeState(state));
@@ -231,6 +262,74 @@ export class DelayMonitor {
     }
   }
 
+  /** LS_N_0030: once over the company's limit, then only each time the delay doubles. */
+  private async lateNotice(
+    state: DelayState,
+    trip: InTransitTrip,
+    input: {
+      delayMin: number;
+      etaMs: number | null;
+      promisedMs: number;
+      speedKmh: number;
+      nowMs: number;
+      params: Record<string, number | boolean | string>;
+      effects: Effects;
+    },
+  ): Promise<void> {
+    const { delayMin, nowMs, params: p } = input;
+    const threshold = await this.lateThresholdMin(
+      trip.tenant_id,
+      num(p, 'lateNoticeDefaultMin'),
+      nowMs,
+    );
+    const next = lateNoticeDue(state, delayMin, threshold, num(p, 'consecutive'));
+    state.lateConsec = next.lateConsec;
+    if (!next.due) return;
+
+    const causes = await this.rules.tripDelayCauses(trip.id);
+    const minCauseMin = num(p, 'lateCauseMinMin');
+    const cause: { delayCause: DelayCause; causeMin: number | null } =
+      causes.haltMin >= minCauseMin && causes.haltMin >= causes.deviationMin
+        ? { delayCause: 'halts', causeMin: causes.haltMin }
+        : causes.deviationMin >= minCauseMin
+          ? { delayCause: 'deviation', causeMin: causes.deviationMin }
+          : { delayCause: 'slow_progress', causeMin: null };
+    input.effects.notice({
+      id: noticeId(trip.id, `delivery_late|${state.lateCount + 1}`),
+      type: 'trip.delivery_late',
+      tripId: trip.id,
+      payload: {
+        delayMin,
+        etaAt: input.etaMs === null ? null : new Date(Math.round(input.etaMs)).toISOString(),
+        promisedAt: new Date(Math.round(input.promisedMs)).toISOString(),
+        ...cause,
+        speedKmh: Math.round(input.speedKmh),
+        sequence: state.lateCount + 1,
+        occurredAt: new Date(nowMs).toISOString(),
+      },
+    });
+    state.lateNotifiedMin = delayMin;
+    state.lateCount += 1;
+  }
+
+  private async lateThresholdMin(
+    tenantId: string,
+    defaultMin: number,
+    nowMs: number,
+  ): Promise<number> {
+    const cached = this.thresholdCache.get(tenantId);
+    if (cached && nowMs - cached.at < THRESHOLD_TTL_MS) return cached.value;
+    let value = defaultMin;
+    try {
+      value = (await this.mainData?.lateDeliveryThresholdMin(tenantId)) ?? value;
+    } catch (err) {
+      // e.g. main's migration adding the column hasn't run yet — the default still applies.
+      this.logger.warn({ err, tenantId }, 'Late-delivery limit lookup failed; using the default');
+    }
+    this.thresholdCache.set(tenantId, { at: nowMs, value });
+    return value;
+  }
+
   private closeOpen(state: DelayState, nowMs: number, reason: string, effects: Effects): void {
     if (state.episodeId) {
       effects.episode({
@@ -241,7 +340,14 @@ export class DelayMonitor {
       });
     }
     if (state.alertId) effects.alert({ op: 'close', id: state.alertId, reason });
-    Object.assign(state, { ...emptyState(), lastEvalMs: state.lastEvalMs });
+    // LS_N_0030's memory outlives the alert: a later notice still needs the delay to double.
+    Object.assign(state, {
+      ...emptyState(),
+      lastEvalMs: state.lastEvalMs,
+      lateConsec: state.lateConsec,
+      lateNotifiedMin: state.lateNotifiedMin,
+      lateCount: state.lateCount,
+    });
   }
 
   private async clear(
@@ -258,7 +364,13 @@ export class DelayMonitor {
     const effects = new Effects();
     this.closeOpen(state, nowMs, reason, effects);
     const changes = await this.rules.applyEffects([
-      { tenantId, vehicleId, episodes: effects.episodes, alerts: effects.alerts },
+      {
+        tenantId,
+        vehicleId,
+        episodes: effects.episodes,
+        alerts: effects.alerts,
+        notices: effects.notices,
+      },
     ]);
     await this.redis.del(delayStateKey(tripId));
     return changes;
@@ -290,6 +402,9 @@ function parseState(raw: Record<string, string>): Partial<DelayState> {
     alertId: raw.alertId || null,
     episodeId: raw.episodeId || null,
     maxDelayMin: Number(raw.maxDelayMin || 0),
+    lateConsec: Number(raw.lateConsec || 0),
+    lateNotifiedMin: Number(raw.lateNotifiedMin || 0),
+    lateCount: Number(raw.lateCount || 0),
   };
 }
 
@@ -303,5 +418,8 @@ function serializeState(s: DelayState): Record<string, string> {
     alertId: s.alertId ?? '',
     episodeId: s.episodeId ?? '',
     maxDelayMin: String(s.maxDelayMin),
+    lateConsec: String(s.lateConsec),
+    lateNotifiedMin: String(s.lateNotifiedMin),
+    lateCount: String(s.lateCount),
   };
 }

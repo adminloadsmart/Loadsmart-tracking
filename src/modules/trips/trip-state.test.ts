@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { marketVehicleId, normalizePlate, trackingStateFor } from './trip-state';
+import {
+  DELIVERED_FOLLOW_MS,
+  isIndexed,
+  marketVehicleId,
+  normalizePlate,
+  trackingStateFor,
+} from './trip-state';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 
@@ -39,5 +45,28 @@ describe('marketVehicleId', () => {
     const other = '22222222-2222-4222-8222-222222222222';
     expect(marketVehicleId(other, 'MH12AB1234')).not.toBe(marketVehicleId(TENANT, 'MH12AB1234'));
     expect(marketVehicleId(TENANT, 'MH12AB1235')).not.toBe(marketVehicleId(TENANT, 'MH12AB1234'));
+  });
+});
+
+describe('isIndexed', () => {
+  const now = Date.parse('2026-10-20T12:00:00Z');
+  const load = (status: string, deliveredAgoMs: number | null, departed = false) => ({
+    status: status as Parameters<typeof isIndexed>[0]['status'],
+    deliveredAt: deliveredAgoMs === null ? null : new Date(now - deliveredAgoMs),
+    departedDropAt: departed ? new Date(now) : null,
+  });
+
+  it('indexes assigned and tracked loads, never created ones', () => {
+    for (const status of ['assigned', 'loading_confirmed', 'at_plant', 'in_transit']) {
+      expect(isIndexed(load(status, null), now)).toBe(true);
+    }
+    expect(isIndexed(load('created', null), now)).toBe(false);
+  });
+
+  it('follows a delivered load until its truck leaves the drop, for DELIVERED_FOLLOW_MS', () => {
+    expect(isIndexed(load('delivered', 60_000), now)).toBe(true);
+    expect(isIndexed(load('closed', 60_000), now)).toBe(true);
+    expect(isIndexed(load('delivered', 60_000, true), now)).toBe(false);
+    expect(isIndexed(load('delivered', DELIVERED_FOLLOW_MS + 1), now)).toBe(false);
   });
 });

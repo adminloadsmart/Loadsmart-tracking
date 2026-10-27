@@ -2,6 +2,8 @@ import { DataSource } from 'typeorm';
 import type { TenantScope } from '../../shared/auth/staff-token';
 import {
   ACTIVE_STATUSES,
+  AFTER_DELIVERY_STATUSES,
+  DELIVERED_FOLLOW_MS,
   INDEXED_STATUSES,
   LoadStatus,
   marketVehicleId,
@@ -39,6 +41,10 @@ export interface MainLoad {
   startedAt: Date | null;
   /** …to delivery (or close). */
   endedAt: Date | null;
+  /** E-POD uploaded; a delivered load stays indexed until its truck leaves the drop (isIndexed). */
+  deliveredAt: Date | null;
+  /** When the truck left the delivery point's geofence (the main backend records trip.departed_drop). */
+  departedDropAt: Date | null;
   milestones: Record<string, string | null>;
   updatedAt: Date;
 }
@@ -127,6 +133,7 @@ interface LoadRow {
   in_transit_at: Date | null;
   reached_delivery_point_at: Date | null;
   delivered_at: Date | null;
+  departed_drop_at: Date | null;
   closed_at: Date | null;
   updated_at: Date;
 }
@@ -144,7 +151,7 @@ const LOAD_SELECT = `
            p.deliver_by_at
          ) AS promised_delivery_at,
          l.loading_confirmed_at, l.at_plant_at, l.in_transit_at, l.reached_delivery_point_at,
-         l.delivered_at, l.closed_at, l.updated_at
+         l.delivered_at, l.departed_drop_at, l.closed_at, l.updated_at
   FROM loads.loads l
   LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
   LEFT JOIN loads.load_postings p ON p.id = l.posting_id
@@ -178,6 +185,8 @@ function toLoad(row: LoadRow): MainLoad {
     promisedDeliveryAt: row.promised_delivery_at,
     startedAt: row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,
+    deliveredAt: row.delivered_at,
+    departedDropAt: row.departed_drop_at,
     milestones: {
       loadingConfirmedAt: iso(row.loading_confirmed_at),
       atPlantAt: iso(row.at_plant_at),
@@ -245,9 +254,19 @@ export class MainDataRepository {
     return this.loadsByStatus(scope, ACTIVE_STATUSES, limit);
   }
 
-  /** What the active-trip index holds: active loads plus assigned ones (see INDEXED_STATUSES). */
-  indexedLoads(limit = 50_000): Promise<MainLoad[]> {
-    return this.loadsByStatus(null, INDEXED_STATUSES, limit);
+  /** What the active-trip index holds (isIndexed): active loads, assigned ones, and delivered
+   *  ones whose truck hasn't been seen leaving the delivery point yet (within DELIVERED_FOLLOW_MS
+   *  of the E-POD). */
+  async indexedLoads(limit = 50_000): Promise<MainLoad[]> {
+    const rows: LoadRow[] = await this.dataSource.query(
+      `${LOAD_SELECT}
+       WHERE l.status::text = ANY($1::text[])
+          OR (l.status::text = ANY($2::text[]) AND l.departed_drop_at IS NULL
+              AND l.delivered_at > now() - make_interval(secs => $3))
+       ORDER BY l.loading_confirmed_at DESC NULLS LAST, l.code DESC LIMIT $4`,
+      [INDEXED_STATUSES, AFTER_DELIVERY_STATUSES, DELIVERED_FOLLOW_MS / 1000, limit],
+    );
+    return rows.map(toLoad);
   }
 
   async load(scope: TenantScope | null, id: string): Promise<MainLoad | null> {
@@ -359,6 +378,20 @@ export class MainDataRepository {
       gpsProvider: null,
       gpsEnabled: false,
     }));
+  }
+
+  // ---- organizations ------------------------------------------------------------------------
+
+  /**
+   * The company's LS_N_0030 limit — "late by more than this many minutes" — set by its org admin
+   * in main (auth.organizations.late_delivery_threshold_minutes); null when never set.
+   */
+  async lateDeliveryThresholdMin(tenantId: string): Promise<number | null> {
+    const rows: Array<{ minutes: number | null }> = await this.dataSource.query(
+      `SELECT late_delivery_threshold_minutes AS minutes FROM auth.organizations WHERE id = $1`,
+      [tenantId],
+    );
+    return rows[0]?.minutes ?? null;
   }
 
   // ---- geofences ---------------------------------------------------------------------------

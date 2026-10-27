@@ -1,13 +1,20 @@
 import { returningRows } from '../../db/returning';
 import { DataSource, EntityManager } from 'typeorm';
 import { MainDataRepository } from '../main-data';
-import { AlertOp, EpisodeOp, RuleId, SEVERITY_RANK, Severity } from './rule.types';
+import { AlertOp, EpisodeOp, NoticeOp, RuleId, SEVERITY_RANK, Severity } from './rule.types';
 
 export interface VehicleEffects {
   tenantId: string;
   vehicleId: string;
   episodes: EpisodeOp[];
   alerts: AlertOp[];
+  notices: NoticeOp[];
+}
+
+/** Minutes a trip has spent halted (HALT-GPS) and off route (DEV-GPS) so far. */
+export interface TripDelayCauses {
+  haltMin: number;
+  deviationMin: number;
 }
 
 /** An alert that changed in a way people should hear about (outbox + /live). */
@@ -60,7 +67,11 @@ export class RulesRepository {
   }
 
   async applyEffects(batch: VehicleEffects[]): Promise<AlertChange[]> {
-    if (batch.every((v) => v.episodes.length === 0 && v.alerts.length === 0)) return [];
+    if (
+      batch.every((v) => v.episodes.length === 0 && v.alerts.length === 0 && v.notices.length === 0)
+    ) {
+      return [];
+    }
     return this.dataSource.transaction(async (manager) => {
       const changes: AlertChange[] = [];
       for (const vehicle of batch) {
@@ -70,11 +81,9 @@ export class RulesRepository {
           if (change) changes.push(change);
         }
       }
-      for (const change of changes) {
-        await manager.query(
-          `INSERT INTO tracking.alert_outbox (event_type, payload) VALUES ($1, $2)`,
-          [change.type, JSON.stringify(change.alert)],
-        );
+      for (const change of changes) await this.enqueueOutbox(manager, change.type, change.alert);
+      for (const vehicle of batch) {
+        for (const notice of vehicle.notices) await this.applyNotice(manager, vehicle, notice);
       }
       return changes;
     });
@@ -140,6 +149,41 @@ export class RulesRepository {
         );
         return;
     }
+  }
+
+  /** Records the notice once (deterministic id) and, only when it's new, announces it. */
+  private async applyNotice(
+    manager: EntityManager,
+    v: VehicleEffects,
+    op: NoticeOp,
+  ): Promise<void> {
+    const payload = {
+      ...op.payload,
+      tenant_id: v.tenantId,
+      loadId: op.tripId,
+      vehicleId: v.vehicleId,
+    };
+    const inserted: Array<{ id: string }> = await manager.query(
+      `INSERT INTO tracking.trip_notices (id, tenant_id, vehicle_id, trip_id, type, payload)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
+      [op.id, v.tenantId, v.vehicleId, op.tripId, op.type, JSON.stringify(payload)],
+    );
+    if (inserted.length === 0) return;
+    await this.enqueueOutbox(manager, op.type, payload);
+  }
+
+  /** Queues an event for the outbox relay (→ tracking.events), in the caller's transaction. */
+  private async enqueueOutbox(
+    manager: EntityManager,
+    eventType: string,
+    payload: unknown,
+  ): Promise<void> {
+    await manager.query(`INSERT INTO tracking.alert_outbox (event_type, payload) VALUES ($1, $2)`, [
+      eventType,
+      JSON.stringify(payload),
+    ]);
   }
 
   private async applyAlert(
@@ -220,6 +264,22 @@ export class RulesRepository {
         return rows[0] ? { type: 'alert.closed', alert: rows[0] } : null;
       }
     }
+  }
+
+  /** What LS_N_0030 names as the main reason for a delay (see TripDelayCauses). */
+  async tripDelayCauses(tripId: string): Promise<TripDelayCauses> {
+    const causeRules: RuleId[] = ['HALT-GPS', 'DEV-GPS'];
+    const rows: Array<{ rule_id: RuleId; minutes: string | number }> = await this.dataSource.query(
+      `SELECT rule_id,
+              SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at)) / 60) AS minutes
+       FROM tracking.episodes
+       WHERE trip_id = $1 AND rule_id = ANY($2::text[])
+       GROUP BY rule_id`,
+      [tripId, causeRules],
+    );
+    const minutes = (ruleId: RuleId) =>
+      Math.round(Number(rows.find((r) => r.rule_id === ruleId)?.minutes ?? 0));
+    return { haltMin: minutes('HALT-GPS'), deviationMin: minutes('DEV-GPS') };
   }
 
   loadSettings(tenantId: string): Promise<RuleSettingRow[]> {

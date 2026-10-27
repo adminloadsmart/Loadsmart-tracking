@@ -84,3 +84,20 @@ export function promisedTime(
   if (tripPromisedMs) return tripPromisedMs;
   return startMs + (routeLengthM / 1000 / num(params, 'fallbackKmPerDay')) * 86_400_000;
 }
+
+/**
+ * LS_N_0030's decision for one evaluation: due once the delay has been over the company's limit
+ * on `consecutive` evaluations in a row, and after the first notice only once the delay is at
+ * least double the one last notified.
+ */
+export function lateNoticeDue(
+  state: { lateConsec: number; lateNotifiedMin: number },
+  delayMin: number,
+  thresholdMin: number,
+  consecutive: number,
+): { lateConsec: number; due: boolean } {
+  const lateConsec = delayMin > thresholdMin ? state.lateConsec + 1 : 0;
+  if (lateConsec < consecutive) return { lateConsec, due: false };
+  const doubled = state.lateNotifiedMin === 0 || delayMin >= 2 * state.lateNotifiedMin;
+  return { lateConsec, due: doubled };
+}

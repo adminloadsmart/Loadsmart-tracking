@@ -5,6 +5,7 @@ import type { Anchor, RuleId } from './rule.types';
 // Fixed namespaces — never change them, or replays would mint new episode/alert ids.
 const EPISODE_NAMESPACE = '0a8f3c55-6c1d-5e0b-9a1f-6f4b2d9e7c31';
 const ALERT_NAMESPACE = '5d2e7b19-3a4c-5f86-8b0d-1c9e6a7f2b44';
+const NOTICE_NAMESPACE = '9c4a1e7d-2b6f-5a83-8e1c-4d7f0b3a6e92';
 
 /** Deterministic episode id: the same vehicle/rule/start always maps to the same row. */
 export function episodeId(
@@ -18,6 +19,11 @@ export function episodeId(
 
 export function alertId(dedupeKey: string, occurredAtMs: number): string {
   return uuidV5(ALERT_NAMESPACE, `${dedupeKey}|${occurredAtMs}`);
+}
+
+/** Deterministic trip-notice id: the same trip + occurrence key always maps to the same row. */
+export function noticeId(tripId: string, key: string): string {
+  return uuidV5(NOTICE_NAMESPACE, `${tripId}|${key}`);
 }
 
 const median = (values: number[]) => {

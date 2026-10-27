@@ -21,8 +21,13 @@ export {
 export type { ActiveTripRefs, TripRef } from './active-trip-index';
 export {
   ACTIVE_STATUSES,
-  APPROACH_STATUS,
+  AFTER_DELIVERY_STATUSES,
+  DELIVERED_FOLLOW_MS,
+  GEOFENCE_ONLY_STATUSES,
   INDEXED_STATUSES,
+  isAfterDelivery,
+  isGeofenceOnly,
+  isIndexed,
   LOAD_STATUSES,
   marketVehicleId,
   normalizePlate,
