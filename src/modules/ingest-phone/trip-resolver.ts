@@ -1,13 +1,15 @@
-import { isApproachStatus, isTrackingSource, type ActiveTripIndex } from '../trips';
+import { isAfterDelivery, isGeofenceOnly, isTrackingSource, type ActiveTripIndex } from '../trips';
 import { TripRepository } from './trip.repository';
 
 export interface ResolvedTrip {
-  /** Null on the drive to the plant (load still assigned) — see `approachTripId`. */
+  /** Null outside the tracked window (the drive to the plant, leaving the drop after the E-POD) —
+   *  see `geofenceTripId`. */
   tripId: string | null;
   tenantId: string;
   vehicleId: string;
-  /** The assigned trip the truck is heading to the plant for: only the geofence check uses it. */
-  approachTripId?: string;
+  /** The trip the truck is heading to the plant for, or leaving the delivery point of: only the
+   *  geofence check uses it. */
+  geofenceTripId?: string;
 }
 
 // Mirrors TRIP_START_GRACE in trip.repository.ts.
@@ -39,17 +41,23 @@ export class TripResolver {
     const result: Array<ResolvedTrip | null> = recordedAts.map(() => null);
     const fallback: number[] = [];
 
+    // A delivered load followed to its exit from the drop only claims live points: an offline
+    // batch flushed after delivery still belongs to the trip it was recorded on (DB fallback).
+    const followedAfterDelivery = !!active && isAfterDelivery(active.loadStatus);
+
     recordedAts.forEach((recordedAt, i) => {
       const recordedAtMs = Date.parse(recordedAt);
+      const isLive = nowMs - recordedAtMs <= LIVE_WINDOW_MS;
       if (
         active &&
         active.vehicleId &&
         active.tenantId === tenantId &&
         isTrackingSource(active.trackingSource, 'driver_app') &&
-        (active.startedAtMs === null || recordedAtMs >= active.startedAtMs - START_GRACE_MS)
+        (active.startedAtMs === null || recordedAtMs >= active.startedAtMs - START_GRACE_MS) &&
+        (!followedAfterDelivery || isLive)
       ) {
-        result[i] = isApproachStatus(active.loadStatus)
-          ? { tripId: null, tenantId, vehicleId: active.vehicleId, approachTripId: active.tripId }
+        result[i] = isGeofenceOnly(active.loadStatus)
+          ? { tripId: null, tenantId, vehicleId: active.vehicleId, geofenceTripId: active.tripId }
           : { tripId: active.tripId, tenantId, vehicleId: active.vehicleId };
       } else if (nowMs - recordedAtMs > LIVE_WINDOW_MS) {
         fallback.push(i);
@@ -72,7 +80,7 @@ export class TripResolver {
                 tripId: null,
                 tenantId: trip.tenantId,
                 vehicleId: trip.vehicleId,
-                approachTripId: trip.tripId,
+                geofenceTripId: trip.tripId,
               }
             : { tripId: trip.tripId, tenantId: trip.tenantId, vehicleId: trip.vehicleId };
         }

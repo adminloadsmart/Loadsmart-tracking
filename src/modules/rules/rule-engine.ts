@@ -156,6 +156,7 @@ export class RuleEngine {
           vehicleId,
           episodes: vehicleEffects.episodes,
           alerts: vehicleEffects.alerts,
+          notices: vehicleEffects.notices,
         });
       }
     }

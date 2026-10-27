@@ -103,7 +103,8 @@ export async function truncateTrackingTables(ds: DataSource): Promise<void> {
   await ds.query(
     `TRUNCATE tracking.location_points, tracking.location_points_short, tracking.episodes,
               tracking.alerts, tracking.rule_settings, tracking.alert_outbox, tracking.trip_routes,
-              tracking.trip_route_status, tracking.place_geocodes, ${MAIN_TABLES}`,
+              tracking.trip_route_status, tracking.place_geocodes, tracking.trip_notices,
+              ${MAIN_TABLES}`,
   );
 }
 

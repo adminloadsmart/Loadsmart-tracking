@@ -22,3 +22,14 @@ describe('ownerFor and tracking_source', () => {
     expect(ownerFor(device, trip(source), Date.now()).tripId).toBeNull();
   });
 });
+
+describe('ownerFor outside the tracked window', () => {
+  it.each([['truck_assigned'], ['in_transit_loading'], ['delivered_ok'], ['closed']])(
+    'a %s load carries the trip only as geofenceTripId, never tripId',
+    (loadStatus) => {
+      const owner = ownerFor(device, { ...trip('gps'), loadStatus }, Date.now());
+      expect(owner.tripId).toBeNull();
+      expect(owner.geofenceTripId).toBe('trip-1');
+    },
+  );
+});

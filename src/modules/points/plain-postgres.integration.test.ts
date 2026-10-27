@@ -51,7 +51,7 @@ describe.skipIf(!available)('plain PostgreSQL (no TimescaleDB / PostGIS)', () =>
       ]),
     );
     expect(await ds.query(`SELECT count(*)::int AS n FROM public.tracking_migrations`)).toEqual([
-      { n: 4 },
+      { n: 6 },
     ]);
     expect(await ds.query(`SELECT to_regclass('public.migrations') AS t`)).toEqual([{ t: null }]);
     // Tracking keeps no copies of the main backend's data (it reads main's tables directly).

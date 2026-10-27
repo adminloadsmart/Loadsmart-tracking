@@ -9,13 +9,37 @@ return 0`;
 
 // Remove a device from its org's on-trip registry only if it still belongs to this vehicle (a
 // reassigned truck or a moved IMEI must not drop another vehicle's entry), and drop the org from
-// the registry's org set once it has no device left.
+// the registry's org set once it has no device left. Skipped while the vehicle is already on
+// another trip (a delivered load being followed to its exit must not unregister the next trip's
+// device).
 const REMOVE_DEVICE_SCRIPT = `
+local current = redis.call('get', KEYS[3])
+if current and current ~= ARGV[4] then
+  return 0
+end
 if redis.call('hget', KEYS[1], ARGV[1]) == ARGV[2] then
   redis.call('hdel', KEYS[1], ARGV[1])
 end
 if redis.call('hlen', KEYS[1]) == 0 then
   redis.call('srem', KEYS[2], ARGV[3])
+end
+return 0`;
+
+// Set only if the key is free or already points at this trip — never take over another trip's.
+const SET_IF_FREE_SCRIPT = `
+local current = redis.call('get', KEYS[1])
+if not current or current == ARGV[1] then
+  redis.call('set', KEYS[1], ARGV[1])
+  return 1
+end
+return 0`;
+
+// Register a device on the on-trip registry only while the vehicle's active trip is this one.
+const REGISTER_DEVICE_IF_OWNER_SCRIPT = `
+if redis.call('get', KEYS[3]) == ARGV[3] then
+  redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
+  redis.call('sadd', KEYS[2], ARGV[4])
+  return 1
 end
 return 0`;
 
@@ -155,16 +179,42 @@ export class ActiveTripIndex {
     return refs;
   }
 
-  async activate(trip: ActiveTripRefs): Promise<void> {
+  /** `ifFree`: a delivered load followed to its exit from the delivery point — it must not take
+   *  the vehicle / driver over from a trip they're already on (their next one). */
+  async activate(
+    trip: ActiveTripRefs,
+    { ifFree = false }: { ifFree?: boolean } = {},
+  ): Promise<void> {
     const { tripId, vehicleId, driverId } = trip;
     const pipeline = this.redis.pipeline();
     pipeline.del(tripRefKey(tripId));
     pipeline.hset(tripRefKey(tripId), refHash(trip));
-    if (vehicleId) pipeline.set(vehicleActiveTripKey(vehicleId), tripId);
-    if (driverId) pipeline.set(driverActiveTripKey(driverId), tripId);
+    for (const key of [
+      vehicleId ? vehicleActiveTripKey(vehicleId) : null,
+      driverId ? driverActiveTripKey(driverId) : null,
+    ]) {
+      if (!key) continue;
+      if (ifFree) pipeline.eval(SET_IF_FREE_SCRIPT, 1, key, tripId);
+      else pipeline.set(key, tripId);
+    }
+    // A followed-to-exit load only registers its device while it still holds the vehicle.
     if (vehicleId && trip.deviceImei) {
-      pipeline.hset(onTripDevicesKey(trip.tenantId), trip.deviceImei, vehicleId);
-      pipeline.sadd(ON_TRIP_TENANTS_KEY, trip.tenantId);
+      if (ifFree) {
+        pipeline.eval(
+          REGISTER_DEVICE_IF_OWNER_SCRIPT,
+          3,
+          onTripDevicesKey(trip.tenantId),
+          ON_TRIP_TENANTS_KEY,
+          vehicleActiveTripKey(vehicleId),
+          trip.deviceImei,
+          vehicleId,
+          tripId,
+          trip.tenantId,
+        );
+      } else {
+        pipeline.hset(onTripDevicesKey(trip.tenantId), trip.deviceImei, vehicleId);
+        pipeline.sadd(ON_TRIP_TENANTS_KEY, trip.tenantId);
+      }
     }
     await execOrThrow(pipeline);
   }
@@ -181,12 +231,14 @@ export class ActiveTripIndex {
     if (vehicleId && deviceImei) {
       pipeline.eval(
         REMOVE_DEVICE_SCRIPT,
-        2,
+        3,
         onTripDevicesKey(tenantId),
         ON_TRIP_TENANTS_KEY,
+        vehicleActiveTripKey(vehicleId),
         deviceImei,
         vehicleId,
         tenantId,
+        tripId,
       );
     }
     await execOrThrow(pipeline);
@@ -207,7 +259,8 @@ export class ActiveTripIndex {
     return statuses;
   }
 
-  /** Makes Redis match the given active trips exactly: sets missing keys, removes stale ones. */
+  /** Makes Redis match the given active trips exactly: sets missing keys, removes stale ones.
+   *  When two trips share a vehicle or driver, the later one in the list keeps it. */
   async rebuild(activeTrips: ActiveTripRefs[]): Promise<{ set: number; removed: number }> {
     const expected = new Map<string, string>();
     const expectedRefs = new Map<string, ActiveTripRefs>();

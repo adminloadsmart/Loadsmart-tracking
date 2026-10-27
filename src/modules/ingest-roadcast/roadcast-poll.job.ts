@@ -2,7 +2,7 @@ import type Redis from 'ioredis';
 import { Counter, Histogram } from 'prom-client';
 import { metricsRegistry } from '../../shared/metrics';
 import type { NormalizedPoint, PointPublisher } from '../points';
-import { isApproachStatus, isTrackingSource, type ActiveTripIndex, type TripRef } from '../trips';
+import { isGeofenceOnly, isTrackingSource, type ActiveTripIndex, type TripRef } from '../trips';
 import type { PositionSource } from './roadcast.client';
 import { RoadcastError } from './roadcast.client';
 import {
@@ -138,7 +138,7 @@ export class RoadcastPollJob {
           return;
         }
         const owner = ownerFor(device, trips.get(device.vehicleId), fixMs);
-        const onTrip = owner.tripId !== null || owner.approachTripId !== undefined;
+        const onTrip = owner.tripId !== null || owner.geofenceTripId !== undefined;
         if (!onTrip && fixMs - cursor < this.options.idleIntervalMs) {
           counts.idle_throttled++;
           return;
@@ -190,7 +190,7 @@ export function ownerFor(device: RoadcastDevice, trip: TripRef | undefined, fixM
     isTrackingSource(trip.trackingSource, 'roadcast') &&
     (trip.startedAtMs === null || fixMs >= trip.startedAtMs - START_GRACE_MS)
   ) {
-    if (isApproachStatus(trip.loadStatus)) owner.approachTripId = trip.tripId;
+    if (isGeofenceOnly(trip.loadStatus)) owner.geofenceTripId = trip.tripId;
     else owner.tripId = trip.tripId;
   }
   return owner;

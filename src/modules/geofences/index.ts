@@ -89,14 +89,14 @@ export function createGeofencesModule(deps: {
     const byVehicle = new Map<string, { tenantId: string; fixes: GeofenceFix[] }>();
     for (const { point, rejected } of points) {
       if (rejected || point.flags?.late) continue;
-      const approachTripId =
-        typeof point.flags?.approachTripId === 'string' ? point.flags.approachTripId : null;
+      const geofenceTripId =
+        typeof point.flags?.geofenceTripId === 'string' ? point.flags.geofenceTripId : null;
       const entry = byVehicle.get(point.vehicleId) ?? { tenantId: point.tenantId, fixes: [] };
       entry.fixes.push({
         t: Date.parse(point.recordedAt),
         lat: point.lat,
         lng: point.lng,
-        tripId: point.tripId ?? approachTripId,
+        tripId: point.tripId ?? geofenceTripId,
       });
       byVehicle.set(point.vehicleId, entry);
     }

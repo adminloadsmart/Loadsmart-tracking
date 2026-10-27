@@ -57,6 +57,10 @@ export const MAIN_SCHEMA_SQL = `
     drop_customer_delivery_point_id uuid, drop_loading_point_id uuid);
   ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS customer_id uuid;
   ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS deliver_by_at timestamptz;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS departed_drop_at timestamptz;
+  CREATE SCHEMA IF NOT EXISTS auth;
+  CREATE TABLE IF NOT EXISTS auth.organizations (
+    id uuid PRIMARY KEY, late_delivery_threshold_minutes integer);
   CREATE SCHEMA IF NOT EXISTS tracking;
   CREATE TABLE IF NOT EXISTS tracking.geofences (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, name text NOT NULL, type text NOT NULL,
@@ -77,4 +81,5 @@ export const MAIN_SCHEMA_SQL = `
 export const MAIN_TABLES =
   'loads.loads, loads.requisitions, loads.load_postings, customers.customer_delivery_points, ' +
   'masters.loading_points, masters.vehicle_telemetry_meta, masters.vehicles, masters.truck_types, ' +
-  'customers.customers, tracking.geofences, tracking.geofence_vehicles, tracking.geofence_events';
+  'customers.customers, tracking.geofences, tracking.geofence_vehicles, tracking.geofence_events, ' +
+  'auth.organizations';

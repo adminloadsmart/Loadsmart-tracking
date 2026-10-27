@@ -140,6 +140,19 @@ describe('tripEventFor', () => {
     expect(tripEventFor(transition('enter', dropFence), 'truck_assigned', points)).toBeNull();
   });
 
+  it('leaving the drop once there — before or after the E-POD — is the departure', () => {
+    for (const status of ['reached_unloading', 'delivered_ok', 'closed']) {
+      expect(tripEventFor(transition('exit', dropFence), status, points)).toBe(
+        'trip.departed_drop',
+      );
+    }
+    // Driving out of the drop's geofence before reaching it isn't a departure.
+    expect(tripEventFor(transition('exit', dropFence), 'in_transit_unloading', points)).toBeNull();
+    // Nor is leaving another customer's delivery point.
+    const otherDrop = { ...dropFence, customerDeliveryPointId: 'another-drop' };
+    expect(tripEventFor(transition('exit', otherDrop), 'delivered_ok', points)).toBeNull();
+  });
+
   it("a posted load's drop at the shipper's own loading point counts", () => {
     const ownDrop = { ...dropFence, loadingPointId: 'own-site', customerDeliveryPointId: null };
     const posted = { ...points, dropCustomerDeliveryPointId: null, dropLoadingPointId: 'own-site' };

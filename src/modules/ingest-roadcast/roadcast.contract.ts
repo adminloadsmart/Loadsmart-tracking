@@ -52,7 +52,7 @@ export interface DeviceOwner {
   vehicleId: string;
   tripId: string | null;
   /** Set instead of `tripId` on the drive to the plant (see trips/trip-state INDEXED_STATUSES). */
-  approachTripId?: string;
+  geofenceTripId?: string;
 }
 
 const KNOTS_TO_KMH = 1.852;
@@ -85,7 +85,7 @@ export function toNormalizedPoint(
   if (row.motion != null) flags.motion = row.motion;
   if (row.gpsBattery != null) flags.batteryPct = row.gpsBattery;
   if (row.deviceStatus) flags.deviceStatus = row.deviceStatus;
-  if (owner.approachTripId) flags.approachTripId = owner.approachTripId;
+  if (owner.geofenceTripId) flags.geofenceTripId = owner.geofenceTripId;
 
   const speedKmh =
     row.speed == null ? null : speedUnit === 'knots' ? row.speed * KNOTS_TO_KMH : row.speed;

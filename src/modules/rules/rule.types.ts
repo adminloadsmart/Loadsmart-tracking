@@ -101,10 +101,59 @@ export type AlertOp =
   | { op: 'update'; id: string; payload: Record<string, unknown> }
   | { op: 'close'; id: string; reason: string };
 
+/** Trip notices the main backend turns into notifications (tracking.events). */
+export const TRIP_NOTICE_TYPES = [
+  'trip.route_deviation',
+  'trip.signal_lost',
+  'trip.delivery_late',
+] as const;
+export type TripNoticeType = (typeof TRIP_NOTICE_TYPES)[number];
+
+/** LS_N_0029 step reached: 4 h, 12 h, then once a day (day_1 = 36 h, day_2 = 60 h, …). */
+export type SignalLossStep = '4h' | '12h' | `day_${number}`;
+
+/** What LS_N_0030 names as the main reason for a delay. */
+export type DelayCause = 'halts' | 'deviation' | 'slow_progress';
+
+/** Each notice type's payload, as the main backend reads it (the repository adds tenant/load/vehicle). */
+export interface TripNoticePayloads {
+  'trip.route_deviation': {
+    distanceOffKm: number;
+    deviationStartedAt: string;
+    lat: number;
+    lng: number;
+    occurredAt: string;
+  };
+  'trip.signal_lost': {
+    step: SignalLossStep;
+    lastSeenAt: string;
+    hoursSince: number;
+    lastLat: number | null;
+    lastLng: number | null;
+    occurredAt: string;
+  };
+  'trip.delivery_late': {
+    delayMin: number;
+    etaAt: string | null;
+    promisedAt: string;
+    delayCause: DelayCause;
+    causeMin: number | null;
+    speedKmh: number;
+    sequence: number;
+    occurredAt: string;
+  };
+}
+
+/** A one-off notice: sent once per deterministic `id` (tracking.trip_notices), never repeated. */
+export type NoticeOp = {
+  [T in TripNoticeType]: { id: string; type: T; tripId: string; payload: TripNoticePayloads[T] };
+}[TripNoticeType];
+
 /** Side effects a rule asks for; applied by the engine (DB, outbox, live). */
 export class Effects {
   readonly episodes: EpisodeOp[] = [];
   readonly alerts: AlertOp[] = [];
+  readonly notices: NoticeOp[] = [];
 
   episode(op: EpisodeOp): void {
     this.episodes.push(op);
@@ -112,8 +161,11 @@ export class Effects {
   alert(op: AlertOp): void {
     this.alerts.push(op);
   }
+  notice(op: NoticeOp): void {
+    this.notices.push(op);
+  }
   get empty(): boolean {
-    return this.episodes.length === 0 && this.alerts.length === 0;
+    return this.episodes.length === 0 && this.alerts.length === 0 && this.notices.length === 0;
   }
 }
 

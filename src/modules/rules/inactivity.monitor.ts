@@ -1,7 +1,7 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import type { PointSource } from '../points';
-import { isApproachStatus, tripRefKey, vehicleActiveTripKey } from '../trips';
+import { isGeofenceOnly, tripRefKey, vehicleActiveTripKey } from '../trips';
 import { RULE_DEFAULTS } from './defaults';
 import { inactiveFlagKey, lastSeenKey, RuleEngine } from './rule-engine';
 import { alertId, episodeId, num } from './rule-helpers';
@@ -90,10 +90,10 @@ export class InactivityMonitor {
     if (await this.redis.exists(flagKey)) return []; // already inactive
 
     let tripId: string | null = await this.redis.get(vehicleActiveTripKey(vehicleId));
-    // An assigned load is indexed only for the drive to the plant — not a tracked trip yet.
-    if (tripId && isApproachStatus(await this.redis.hget(tripRefKey(tripId), 'loadStatus'))) {
-      tripId = null;
-    }
+    // An assigned or delivered load is indexed only for the geofence check (the drive to the
+    // plant, leaving the drop) — not a tracked trip.
+    const loadStatus = tripId ? await this.redis.hget(tripRefKey(tripId), 'loadStatus') : null;
+    if (isGeofenceOnly(loadStatus)) tripId = null;
     if (source === 'driver_app' && !tripId) {
       // Phone only reports during trips: off-trip silence is expected — stop watching it.
       await this.redis.zrem(lastSeenKey(source), member);
@@ -139,7 +139,13 @@ export class InactivityMonitor {
       payload: { source, lastSeenAt: new Date(lastSeenMs).toISOString(), thresholdMin },
     });
     const changes = await this.repository.applyEffects([
-      { tenantId, vehicleId, episodes: effects.episodes, alerts: effects.alerts },
+      {
+        tenantId,
+        vehicleId,
+        episodes: effects.episodes,
+        alerts: effects.alerts,
+        notices: effects.notices,
+      },
     ]);
     await this.redis.hset(flagKey, {
       episodeId: id,

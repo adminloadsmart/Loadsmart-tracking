@@ -198,7 +198,7 @@ describe.skipIf(!available)('Roadcast pull end to end (real Redis + Postgres)', 
     expect(stored.map((p: { trip_id: string | null }) => p.trip_id)).toEqual([null, null]);
   });
 
-  it('on the drive to the plant, carries the trip only as approachTripId', async () => {
+  it('on the drive to the plant, carries the trip only as geofenceTripId', async () => {
     const device = newDevice();
     const tripId = await onTrip(device, APPROACH_STATUSES[0]);
     roadcast.rows = [row(device.imei, '2026-10-23T05:16:00Z')];
@@ -207,7 +207,7 @@ describe.skipIf(!available)('Roadcast pull end to end (real Redis + Postgres)', 
     await processStream();
     const [stored] = await storedPoints(device.vehicleId);
     expect(stored.trip_id).toBeNull();
-    expect(stored.flags).toMatchObject({ approachTripId: tripId });
+    expect(stored.flags).toMatchObject({ geofenceTripId: tripId });
   });
 
   it('ignores devices it did not ask for, rows without a fix, and malformed rows', async () => {

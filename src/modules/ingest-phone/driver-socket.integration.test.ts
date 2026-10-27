@@ -323,8 +323,8 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     await drainStreams();
     expect(await rows('location_points', tripId)).toHaveLength(1);
     const approach = await ds.query(
-      `SELECT trip_id, flags->>'approachTripId' AS approach
-       FROM tracking.location_points_short WHERE flags->>'approachTripId' = $1`,
+      `SELECT trip_id, flags->>'geofenceTripId' AS approach
+       FROM tracking.location_points_short WHERE flags->>'geofenceTripId' = $1`,
       [tripId],
     );
     expect(approach).toEqual([{ trip_id: null, approach: tripId }]);

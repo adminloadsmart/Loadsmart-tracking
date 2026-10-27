@@ -86,7 +86,7 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
       speedKmh: 20,
       heading: 0,
       accuracyM: 5,
-      flags: { approachTripId: trip.tripId },
+      flags: { geofenceTripId: trip.tripId },
     }));
     await points.publisher.publish(batch);
     await drainPointStreams(redis, allPointStreamKeys(PARTITIONS), (s, e) =>

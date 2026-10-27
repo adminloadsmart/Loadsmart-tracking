@@ -117,12 +117,12 @@ describe('Roadcast contract', () => {
     const point = toNormalizedPoint(
       rows[0],
       fixTimeMs(rows[0])!,
-      { ...OWNER, approachTripId: 'trip-1' },
+      { ...OWNER, geofenceTripId: 'trip-1' },
       RECEIVED_AT,
       'kmh',
     );
     expect(point.tripId).toBeNull();
-    expect(point.flags).toMatchObject({ approachTripId: 'trip-1' });
+    expect(point.flags).toMatchObject({ geofenceTripId: 'trip-1' });
   });
 
   it('rejects the 0,0 no-fix position and out-of-range coordinates', () => {
