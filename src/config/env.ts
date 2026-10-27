@@ -61,6 +61,20 @@ export const env = {
   // Google Routes + Geocoding (planned routes for DELAY/DEV rules). Optional: without it trips get
   // no planned route and the route-based rules stay inactive.
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || undefined,
+  // Roadcast GPS devices (poller role). One account for all of Loadsmart; every vehicle with a
+  // gps_device_imei in main is pulled. Optional: without a key the Roadcast poller stays off.
+  roadcastApiUrl: process.env.ROADCAST_API_URL || undefined,
+  roadcastApiKey: process.env.ROADCAST_API_KEY || undefined,
+  // One call per org per ROADCAST_POLL_INTERVAL_MS (fixed 10 s for every org) with the IMEIs of
+  // its trucks on a trip…
+  roadcastPollIntervalMs: numberWithDefault('ROADCAST_POLL_INTERVAL_MS', 10_000),
+  // …and once per ROADCAST_IDLE_INTERVAL_MS with all its IMEIs: idle trucks get a point this often.
+  roadcastIdleIntervalMs: numberWithDefault('ROADCAST_IDLE_INTERVAL_MS', 300_000),
+  // Below the poll interval, so a hung call never overlaps the next one.
+  roadcastTimeoutMs: numberWithDefault('ROADCAST_TIMEOUT_MS', 8_000),
+  // Unit of the API's `speed` field: 'kmh' or 'knots' (unconfirmed by Roadcast).
+  roadcastSpeedUnit: (process.env.ROADCAST_SPEED_UNIT === 'knots' ? 'knots' : 'kmh') as
+    'kmh' | 'knots',
   // Shared with the main loadsmart backend so this service can verify its access/driver tokens.
   // Optional until Phase 2 (driver socket auth) — nothing verifies tokens yet.
   jwtSecret: process.env.JWT_SECRET || undefined,

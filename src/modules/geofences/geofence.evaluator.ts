@@ -1,4 +1,5 @@
 import type { MainGeofence, MainTripPoints } from '../main-data';
+import { AFTER_DELIVERY_STATUSES, IN_TRANSIT_STATUS, isApproachStatus } from '../trips/trip-state';
 import { containsPoint } from './geofence.geo';
 
 /** One accepted, non-late fix as the geofence check sees it (device time). */
@@ -38,11 +39,10 @@ export const TRIP_EVENT_TYPES = [
 ] as const;
 export type TripEventType = (typeof TRIP_EVENT_TYPES)[number];
 
-/** Statuses a truck leaving its drop's geofence is departing from: reached it, or E-POD done. */
+/** Statuses a truck leaving its drop's geofence is departing from: reached it, or delivered. */
 const AT_OR_PAST_DROP_STATUSES: readonly string[] = [
-  'reached_delivery_point',
-  'delivered',
-  'closed',
+  'reached_unloading',
+  ...AFTER_DELIVERY_STATUSES,
 ];
 
 const appliesTo = (geofence: MainGeofence, vehicleId: string) =>
@@ -101,10 +101,11 @@ export function evaluateVehicle(
 /**
  * The trip step a transition stands for, if any — only when the geofence is linked to this
  * trip's own pickup / drop point, and only from the status the main backend moves on from:
- * - enter the pickup's loading-point geofence while assigned → arrived at pickup ("At plant");
- * - leave it once loading is confirmed (still "loading_confirmed", or already marked in transit)
- *   → departed pickup (LS_N_0026; the main backend moves a loading_confirmed load to in transit);
- * - enter the drop's unloading-point geofence while in transit → arrived at drop;
+ * - enter the pickup's loading-point geofence on the approach (truck_assigned / in_transit_loading)
+ *   → arrived at pickup (the main backend moves the load to reached_loading);
+ * - leave it once the load is loaded (still "loaded", or already in_transit_unloading)
+ *   → departed pickup (LS_N_0026);
+ * - enter the drop's unloading-point geofence while in_transit_unloading → arrived at drop;
  * - leave it once there — before the E-POD or after (a delivered load is followed until then, see
  *   trips/trip-state isIndexed) → departed drop (ends unloading detention, LS_N_0032; completes
  *   the trip with the E-POD, LS_N_0033).
@@ -120,8 +121,8 @@ export function tripEventFor(
     const isPickup =
       !!geofence.loadingPointId && geofence.loadingPointId === points.pickupLoadingPointId;
     if (!isPickup) return null;
-    if (event === 'enter' && loadStatus === 'assigned') return 'trip.arrived_at_pickup';
-    if (event === 'exit' && (loadStatus === 'loading_confirmed' || loadStatus === 'in_transit'))
+    if (event === 'enter' && isApproachStatus(loadStatus)) return 'trip.arrived_at_pickup';
+    if (event === 'exit' && (loadStatus === 'loaded' || loadStatus === IN_TRANSIT_STATUS))
       return 'trip.departed_pickup';
     return null;
   }
@@ -131,7 +132,7 @@ export function tripEventFor(
         geofence.customerDeliveryPointId === points.dropCustomerDeliveryPointId) ||
       (!!geofence.loadingPointId && geofence.loadingPointId === points.dropLoadingPointId);
     if (!isDrop) return null;
-    if (event === 'enter' && loadStatus === 'in_transit') return 'trip.arrived_at_drop';
+    if (event === 'enter' && loadStatus === IN_TRANSIT_STATUS) return 'trip.arrived_at_drop';
     if (event === 'exit' && AT_OR_PAST_DROP_STATUSES.includes(loadStatus))
       return 'trip.departed_drop';
     return null;

@@ -1,6 +1,8 @@
 export interface SeedLoadInput {
   tenantId: string;
   status?: string;
+  /** loads.tracking_source as the main backend set it (gps | driver_app | sim | fastag). */
+  trackingSource?: string | null;
   sourceType?: 'own_fleet' | 'market';
   vehicleId?: string;
   /** Market trucks: no vehicle row, only the plate on the load. */

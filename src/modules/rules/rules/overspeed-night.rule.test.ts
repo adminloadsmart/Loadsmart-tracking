@@ -91,13 +91,13 @@ describe('OVER-GPS', () => {
     expect(run(overspeedGpsRule, spike, OVER).opened).toHaveLength(0);
     const noFix = cruise(0, 60, 95).map((f) => ({
       ...f,
-      source: 'blackrock' as const,
+      source: 'roadcast' as const,
       gpsPositioned: false,
     }));
     expect(run(overspeedGpsRule, noFix, OVER).opened).toHaveLength(0);
     const fewSats = cruise(0, 60, 95).map((f) => ({
       ...f,
-      source: 'blackrock' as const,
+      source: 'roadcast' as const,
       satellites: 4,
     }));
     expect(run(overspeedGpsRule, fewSats, OVER).opened).toHaveLength(0);

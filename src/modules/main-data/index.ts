@@ -1,6 +1,8 @@
-export { MainDataRepository } from './main-data.repository';
+export { LOAD_TRACKING_SOURCES, MainDataRepository } from './main-data.repository';
 export type {
+  LoadTrackingSource,
   MainGeofence,
+  MainGpsDeviceBinding,
   MainLoad,
   MainPlace,
   MainTripPoints,

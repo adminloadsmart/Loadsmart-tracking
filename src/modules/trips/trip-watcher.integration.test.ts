@@ -36,16 +36,28 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     await redis.quit();
   });
 
-  it('indexes a load from assignment until its truck leaves the delivery point', async () => {
-    const load = await seedLoad(ds, { tenantId: TENANT, status: 'assigned', startedAt: null });
+  it('indexes a load from assignment until its truck leaves the delivery point, with its GPS device on the on-trip registry', async () => {
+    const load = await seedLoad(ds, {
+      tenantId: TENANT,
+      status: 'truck_assigned',
+      startedAt: null,
+    });
+    await ds.query(
+      `INSERT INTO masters.vehicle_telemetry_meta (tenant_id, vehicle_id, gps_device_imei)
+       VALUES ($1, $2, '866221070401935')`,
+      [TENANT, load.vehicleId],
+    );
+    // Assigned: indexed for the drive to the plant (geofence check), not yet tracking.
     await trips.watcher.poll();
-    // Assigned: indexed for the drive to the plant (geofence only).
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBe(load.loadId);
-    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('assigned');
+    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('truck_assigned');
+    expect((await trips.activeTrips.onTripDevicesByTenant()).get(TENANT)).toEqual([
+      { imei: '866221070401935', vehicleId: load.vehicleId, tenantId: TENANT },
+    ]);
 
     const confirmedAt = new Date('2026-10-06T08:00:00Z');
     await updateLoad(ds, load.loadId, {
-      status: 'loading_confirmed',
+      status: 'loaded',
       loading_confirmed_at: confirmedAt,
     });
     await trips.watcher.poll();
@@ -53,31 +65,32 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     expect(await redis.get(driverActiveTripKey(load.driverId!))).toBe(load.loadId);
     expect(await redis.hgetall(tripRefKey(load.loadId))).toMatchObject({
       tenantId: TENANT,
-      loadStatus: 'loading_confirmed',
+      loadStatus: 'loaded',
       startedAtMs: String(confirmedAt.getTime()),
     });
 
-    await updateLoad(ds, load.loadId, { status: 'in_transit' });
+    await updateLoad(ds, load.loadId, { status: 'in_transit_unloading' });
     await trips.watcher.poll();
-    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('in_transit');
+    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('in_transit_unloading');
 
     // Delivered: still followed (geofence only) until the truck leaves the delivery point…
-    await updateLoad(ds, load.loadId, { status: 'delivered', delivered_at: new Date() });
+    await updateLoad(ds, load.loadId, { status: 'delivered_ok', delivered_at: new Date() });
     await trips.watcher.poll();
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBe(load.loadId);
-    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('delivered');
+    expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('delivered_ok');
 
     // …which the main backend records from trip.departed_drop.
     await updateLoad(ds, load.loadId, { departed_drop_at: new Date() });
     await trips.watcher.poll();
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBeNull();
     expect(await redis.exists(tripRefKey(load.loadId))).toBe(0);
+    expect(await trips.activeTrips.onTripDevicesByTenant()).toEqual(new Map());
   });
 
   it('a delivered load is not followed past DELIVERED_FOLLOW_MS', async () => {
     const load = await seedLoad(ds, {
       tenantId: TENANT,
-      status: 'delivered',
+      status: 'delivered_ok',
       deliveredAt: new Date(Date.now() - 25 * 60 * 60_000),
     });
     await trips.watcher.poll();
@@ -87,11 +100,15 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
   });
 
   it('a delivered load never takes the truck or driver over from its next trip', async () => {
-    const next = await seedLoad(ds, { tenantId: TENANT, status: 'assigned', startedAt: null });
+    const next = await seedLoad(ds, {
+      tenantId: TENANT,
+      status: 'truck_assigned',
+      startedAt: null,
+    });
     await trips.watcher.poll();
     const delivered = await seedLoad(ds, {
       tenantId: TENANT,
-      status: 'delivered',
+      status: 'delivered_ok',
       deliveredAt: new Date(),
       vehicleId: next.vehicleId!,
       driverId: next.driverId,
@@ -99,7 +116,7 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     await trips.watcher.poll();
     expect(await redis.get(vehicleActiveTripKey(next.vehicleId!))).toBe(next.loadId);
     expect(await redis.get(driverActiveTripKey(next.driverId!))).toBe(next.loadId);
-    expect(await redis.hget(tripRefKey(delivered.loadId), 'loadStatus')).toBe('delivered');
+    expect(await redis.hget(tripRefKey(delivered.loadId), 'loadStatus')).toBe('delivered_ok');
 
     await redis.flushdb();
     await trips.watcher.rebuild();

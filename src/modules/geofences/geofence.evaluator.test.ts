@@ -115,53 +115,58 @@ describe('tripEventFor', () => {
   };
 
   it('entering the pickup while assigned is the arrival at the plant', () => {
-    expect(tripEventFor(transition('enter'), 'assigned', points)).toBe('trip.arrived_at_pickup');
-    expect(tripEventFor(transition('enter'), 'at_plant', points)).toBeNull();
+    expect(tripEventFor(transition('enter'), 'truck_assigned', points)).toBe(
+      'trip.arrived_at_pickup',
+    );
+    expect(tripEventFor(transition('enter'), 'in_transit_loading', points)).toBe(
+      'trip.arrived_at_pickup',
+    );
+    expect(tripEventFor(transition('enter'), 'reached_loading', points)).toBeNull();
   });
 
   it('leaving the pickup once loading is confirmed is the departure', () => {
-    expect(tripEventFor(transition('exit'), 'loading_confirmed', points)).toBe(
+    expect(tripEventFor(transition('exit'), 'loaded', points)).toBe('trip.departed_pickup');
+    expect(tripEventFor(transition('exit'), 'in_transit_unloading', points)).toBe(
       'trip.departed_pickup',
     );
-    expect(tripEventFor(transition('exit'), 'in_transit', points)).toBe('trip.departed_pickup');
     // Stepping out before loading is confirmed isn't the departure.
-    expect(tripEventFor(transition('exit'), 'at_plant', points)).toBeNull();
+    expect(tripEventFor(transition('exit'), 'reached_loading', points)).toBeNull();
   });
 
   it('entering the drop while in transit is the arrival at the drop', () => {
-    expect(tripEventFor(transition('enter', dropFence), 'in_transit', points)).toBe(
+    expect(tripEventFor(transition('enter', dropFence), 'in_transit_unloading', points)).toBe(
       'trip.arrived_at_drop',
     );
-    expect(tripEventFor(transition('enter', dropFence), 'assigned', points)).toBeNull();
+    expect(tripEventFor(transition('enter', dropFence), 'truck_assigned', points)).toBeNull();
   });
 
   it('leaving the drop once there — before or after the E-POD — is the departure', () => {
-    for (const status of ['reached_delivery_point', 'delivered', 'closed']) {
+    for (const status of ['reached_unloading', 'delivered_ok', 'closed']) {
       expect(tripEventFor(transition('exit', dropFence), status, points)).toBe(
         'trip.departed_drop',
       );
     }
     // Driving out of the drop's geofence before reaching it isn't a departure.
-    expect(tripEventFor(transition('exit', dropFence), 'in_transit', points)).toBeNull();
+    expect(tripEventFor(transition('exit', dropFence), 'in_transit_unloading', points)).toBeNull();
     // Nor is leaving another customer's delivery point.
     const otherDrop = { ...dropFence, customerDeliveryPointId: 'another-drop' };
-    expect(tripEventFor(transition('exit', otherDrop), 'delivered', points)).toBeNull();
+    expect(tripEventFor(transition('exit', otherDrop), 'delivered_ok', points)).toBeNull();
   });
 
   it("a posted load's drop at the shipper's own loading point counts", () => {
     const ownDrop = { ...dropFence, loadingPointId: 'own-site', customerDeliveryPointId: null };
     const posted = { ...points, dropCustomerDeliveryPointId: null, dropLoadingPointId: 'own-site' };
-    expect(tripEventFor(transition('enter', ownDrop), 'in_transit', posted)).toBe(
+    expect(tripEventFor(transition('enter', ownDrop), 'in_transit_unloading', posted)).toBe(
       'trip.arrived_at_drop',
     );
   });
 
   it("ignores geofences not linked to this trip's points, and fixes with no trip", () => {
     const otherPlant = { ...plant, loadingPointId: 'another-plant' };
-    expect(tripEventFor(transition('enter', otherPlant), 'assigned', points)).toBeNull();
-    expect(tripEventFor(transition('enter', plant, null), 'assigned', points)).toBeNull();
+    expect(tripEventFor(transition('enter', otherPlant), 'truck_assigned', points)).toBeNull();
+    expect(tripEventFor(transition('enter', plant, null), 'truck_assigned', points)).toBeNull();
     expect(
-      tripEventFor(transition('enter', { ...plant, type: 'yard' }), 'assigned', points),
+      tripEventFor(transition('enter', { ...plant, type: 'yard' }), 'truck_assigned', points),
     ).toBeNull();
   });
 });

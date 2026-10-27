@@ -12,19 +12,23 @@ const TENANT = '11111111-1111-4111-8111-111111111111';
 describe('trackingStateFor', () => {
   it.each([
     ['created', 'pending'],
-    ['assigned', 'pending'],
-    ['loading_confirmed', 'active'],
-    ['at_plant', 'active'],
-    ['in_transit', 'active'],
-    ['reached_delivery_point', 'active'],
-    ['delivered', 'ended'],
+    ['bids_received', 'pending'],
+    ['truck_assigned', 'pending'],
+    ['in_transit_loading', 'pending'],
+    ['loaded', 'active'],
+    ['reached_loading', 'active'],
+    ['in_transit_unloading', 'active'],
+    ['reached_unloading', 'active'],
+    ['delivered_ok', 'ended'],
+    ['delivered_with_issues', 'ended'],
+    ['payment', 'ended'],
     ['closed', 'ended'],
   ] as const)('%s -> %s', (status, state) => {
     expect(trackingStateFor(status, false)).toBe(state);
   });
 
   it('a deleted load is ended whatever its status', () => {
-    expect(trackingStateFor('in_transit', true)).toBe('ended');
+    expect(trackingStateFor('in_transit_unloading', true)).toBe('ended');
   });
 });
 
@@ -57,16 +61,16 @@ describe('isIndexed', () => {
   });
 
   it('indexes assigned and tracked loads, never created ones', () => {
-    for (const status of ['assigned', 'loading_confirmed', 'at_plant', 'in_transit']) {
+    for (const status of ['truck_assigned', 'in_transit_loading', 'reached_loading', 'loaded']) {
       expect(isIndexed(load(status, null), now)).toBe(true);
     }
     expect(isIndexed(load('created', null), now)).toBe(false);
   });
 
   it('follows a delivered load until its truck leaves the drop, for DELIVERED_FOLLOW_MS', () => {
-    expect(isIndexed(load('delivered', 60_000), now)).toBe(true);
+    expect(isIndexed(load('delivered_ok', 60_000), now)).toBe(true);
     expect(isIndexed(load('closed', 60_000), now)).toBe(true);
-    expect(isIndexed(load('delivered', 60_000, true), now)).toBe(false);
-    expect(isIndexed(load('delivered', DELIVERED_FOLLOW_MS + 1), now)).toBe(false);
+    expect(isIndexed(load('delivered_ok', 60_000, true), now)).toBe(false);
+    expect(isIndexed(load('delivered_ok', DELIVERED_FOLLOW_MS + 1), now)).toBe(false);
   });
 });

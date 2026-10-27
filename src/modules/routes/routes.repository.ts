@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { MainDataRepository } from '../main-data';
+import { IN_TRANSIT_STATUS } from '../trips';
 
 export interface TripNeedingRoute {
   id: string;
@@ -168,7 +169,7 @@ export class RoutesRepository {
 
   /** Trips the DELAY rule evaluates: load in transit, with a vehicle and a planned route. */
   async inTransitTripsWithRoute(): Promise<InTransitTrip[]> {
-    const loads = (await this.mainData.loadsByStatus(null, ['in_transit'], 50_000)).filter(
+    const loads = (await this.mainData.loadsByStatus(null, [IN_TRANSIT_STATUS], 50_000)).filter(
       (l) => l.vehicleId,
     );
     if (loads.length === 0) return [];

@@ -15,12 +15,18 @@ export function createTripsModule(dataSource: DataSource, redis: Redis, logger: 
 export {
   ActiveTripIndex,
   driverActiveTripKey,
+  ON_TRIP_TENANTS_KEY,
+  onTripDevicesKey,
   tripRefKey,
   vehicleActiveTripKey,
 } from './active-trip-index';
-export type { ActiveTripRefs, TripRef } from './active-trip-index';
+export type { ActiveTripRefs, OnTripDevice, TripRef } from './active-trip-index';
 export {
   ACTIVE_STATUSES,
+  APPROACH_STATUSES,
+  IN_TRANSIT_STATUS,
+  isApproachStatus,
+  isTrackingSource,
   AFTER_DELIVERY_STATUSES,
   DELIVERED_FOLLOW_MS,
   GEOFENCE_ONLY_STATUSES,

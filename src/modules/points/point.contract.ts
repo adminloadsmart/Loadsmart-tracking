@@ -1,10 +1,10 @@
 import { z } from 'zod';
 
-export const POINT_SOURCES = ['driver_app', 'blackrock', 'sim'] as const;
+export const POINT_SOURCES = ['driver_app', 'roadcast', 'sim'] as const;
 export type PointSource = (typeof POINT_SOURCES)[number];
 
 /**
- * The one shape every ingest path (phone socket, BlackRock/Intugine pollers) normalizes into
+ * The one shape every ingest path (phone socket, Roadcast/Intugine pollers) normalizes into
  * before the point stream (docs/ROADMAP.md §7). Units are fixed here so no consumer has to
  * guess: speed km/h, heading degrees 0-360, accuracy metres, timestamps ISO-8601.
  */
@@ -13,7 +13,7 @@ export const normalizedPointSchema = z.object({
   vehicleId: z.uuid(),
   tripId: z.uuid().nullable().optional(),
   source: z.enum(POINT_SOURCES),
-  // driverId / BlackRock device id / Intugine consent id — who reported this point.
+  // driverId / Roadcast device IMEI / Intugine consent id — who reported this point.
   sourceRef: z.string().min(1).max(100),
   recordedAt: z.iso.datetime({ offset: true }),
   receivedAt: z.iso.datetime({ offset: true }),

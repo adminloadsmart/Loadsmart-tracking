@@ -17,6 +17,10 @@ import {
  * (local and staging differ, e.g. driver tenancy), so a main migration has one place to land here.
  */
 
+/** loads.loads_tracking_source_enum in the main backend. */
+export const LOAD_TRACKING_SOURCES = ['gps', 'driver_app', 'sim', 'fastag'] as const;
+export type LoadTrackingSource = (typeof LOAD_TRACKING_SOURCES)[number];
+
 export interface MainLoad {
   id: string;
   tenantId: string;
@@ -26,6 +30,8 @@ export interface MainLoad {
   /** Tracking's vehicle id: the fleet vehicle, or a stable id derived from a market truck's plate. */
   vehicleId: string | null;
   vehicleNumber: string | null;
+  /** The fleet vehicle's GPS device IMEI (Roadcast), if one is on file. */
+  deviceImei: string | null;
   driverId: string | null;
   driverName: string | null;
   driverNumber: string | null;
@@ -41,6 +47,8 @@ export interface MainLoad {
   startedAt: Date | null;
   /** …to delivery (or close). */
   endedAt: Date | null;
+  /** loads.loads.tracking_source — how the backend says this truck is tracked (null = unset). */
+  trackingSource: LoadTrackingSource | null;
   /** E-POD uploaded; a delivered load stays indexed until its truck leaves the drop (isIndexed). */
   deliveredAt: Date | null;
   /** When the truck left the delivery point's geofence (the main backend records trip.departed_drop). */
@@ -58,6 +66,12 @@ export interface MainVehicle {
   bodyType: string | null;
   gpsProvider: string | null;
   gpsEnabled: boolean;
+}
+
+export interface MainGpsDeviceBinding {
+  imei: string;
+  vehicleId: string;
+  tenantId: string;
 }
 
 export interface MainGeofence {
@@ -119,6 +133,8 @@ interface LoadRow {
   source_type: 'own_fleet' | 'market';
   vehicle_id: string | null;
   vehicle_number: string | null;
+  device_imei: string | null;
+  tracking_source: string | null;
   driver_id: string | null;
   driver_name: string | null;
   driver_number: string | null;
@@ -138,9 +154,11 @@ interface LoadRow {
   updated_at: Date;
 }
 
-const LOAD_SELECT = `
+const loadSelect = (withTrackingSource: boolean) => `
   SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.source_type::text AS source_type,
          l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
+         NULLIF(btrim(tm.gps_device_imei), '') AS device_imei,
+         ${withTrackingSource ? 'l.tracking_source::text' : 'NULL::text'} AS tracking_source,
          COALESCE(r.loading_point_id, p.pickup_loading_point_id) AS loading_point_id,
          COALESCE(r.customer_delivery_point_id, p.drop_customer_delivery_point_id)
            AS delivery_point_id,
@@ -155,9 +173,17 @@ const LOAD_SELECT = `
   FROM loads.loads l
   LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
   LEFT JOIN loads.load_postings p ON p.id = l.posting_id
-  LEFT JOIN customers.customers c ON c.id = COALESCE(r.customer_id, p.customer_id)`;
+  LEFT JOIN customers.customers c ON c.id = COALESCE(r.customer_id, p.customer_id)
+  LEFT JOIN masters.vehicle_telemetry_meta tm
+    ON tm.vehicle_id = l.vehicle_id AND tm.deleted_at IS NULL AND l.source_type = 'own_fleet'`;
 
 const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
+
+function toTrackingSource(value: string | null): LoadTrackingSource | null {
+  return (LOAD_TRACKING_SOURCES as readonly string[]).includes(value ?? '')
+    ? (value as LoadTrackingSource)
+    : null;
+}
 
 function toLoad(row: LoadRow): MainLoad {
   const vehicleId =
@@ -174,6 +200,8 @@ function toLoad(row: LoadRow): MainLoad {
     sourceType: row.source_type,
     vehicleId,
     vehicleNumber: row.vehicle_number ? normalizePlate(row.vehicle_number) : null,
+    deviceImei: row.device_imei,
+    trackingSource: toTrackingSource(row.tracking_source),
     driverId: row.driver_id,
     driverName: row.driver_name,
     driverNumber: row.driver_number,
@@ -183,7 +211,7 @@ function toLoad(row: LoadRow): MainLoad {
     customerName: row.customer_name,
     plannedTonnes: row.planned_tonnes === null ? null : Number(row.planned_tonnes),
     promisedDeliveryAt: row.promised_delivery_at,
-    startedAt: row.loading_confirmed_at,
+    startedAt: row.at_plant_at ?? row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,
     deliveredAt: row.delivered_at,
     departedDropAt: row.departed_drop_at,
@@ -206,7 +234,30 @@ function scoped(scope: TenantScope | null, column: string, params: unknown[]): s
 }
 
 export class MainDataRepository {
+  private trackingSourceColumn?: Promise<boolean>;
+
   constructor(private readonly dataSource: DataSource) {}
+
+  /**
+   * The loads SELECT. loads.tracking_source arrives with a main migration — until it has run,
+   * select NULL instead, so tracking keeps working (and picks its own source order).
+   */
+  private async select(): Promise<string> {
+    this.trackingSourceColumn ??= this.dataSource
+      .query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'loads' AND table_name = 'loads' AND column_name = 'tracking_source'`,
+      )
+      .then((rows: unknown[]) => rows.length > 0);
+    try {
+      const present = await this.trackingSourceColumn;
+      if (!present) this.trackingSourceColumn = undefined; // look again once main migrates
+      return loadSelect(present);
+    } catch (err) {
+      this.trackingSourceColumn = undefined;
+      throw err;
+    }
+  }
 
   // ---- loads (= trips) ---------------------------------------------------------------------
 
@@ -225,12 +276,12 @@ export class MainDataRepository {
     const pageKey = `date_trunc('milliseconds', l.updated_at)`;
     const rows: LoadRow[] = after
       ? await this.dataSource.query(
-          `${LOAD_SELECT} WHERE (${pageKey}, l.id) > ($1::timestamptz, $2::uuid)
+          `${await this.select()} WHERE (${pageKey}, l.id) > ($1::timestamptz, $2::uuid)
            ORDER BY ${pageKey}, l.id LIMIT $3`,
           [after.updatedAt, after.id, limit],
         )
       : await this.dataSource.query(
-          `${LOAD_SELECT} WHERE l.updated_at > $1 ORDER BY ${pageKey}, l.id LIMIT $2`,
+          `${await this.select()} WHERE l.updated_at > $1 ORDER BY ${pageKey}, l.id LIMIT $2`,
           [since, limit],
         );
     return rows.map(toLoad);
@@ -243,8 +294,8 @@ export class MainDataRepository {
   ): Promise<MainLoad[]> {
     const params: unknown[] = [statuses, limit];
     const rows: LoadRow[] = await this.dataSource.query(
-      `${LOAD_SELECT} WHERE l.status::text = ANY($1::text[])${scoped(scope, 'l.tenant_id', params)}
-       ORDER BY l.loading_confirmed_at DESC NULLS LAST, l.code DESC LIMIT $2`,
+      `${await this.select()} WHERE l.status::text = ANY($1::text[])${scoped(scope, 'l.tenant_id', params)}
+       ORDER BY COALESCE(l.at_plant_at, l.loading_confirmed_at) DESC NULLS LAST, l.code DESC LIMIT $2`,
       params,
     );
     return rows.map(toLoad);
@@ -254,16 +305,17 @@ export class MainDataRepository {
     return this.loadsByStatus(scope, ACTIVE_STATUSES, limit);
   }
 
-  /** What the active-trip index holds (isIndexed): active loads, assigned ones, and delivered
+  /** What the active-trip index holds (isIndexed): active loads, approach ones, and delivered
    *  ones whose truck hasn't been seen leaving the delivery point yet (within DELIVERED_FOLLOW_MS
    *  of the E-POD). */
   async indexedLoads(limit = 50_000): Promise<MainLoad[]> {
     const rows: LoadRow[] = await this.dataSource.query(
-      `${LOAD_SELECT}
+      `${await this.select()}
        WHERE l.status::text = ANY($1::text[])
           OR (l.status::text = ANY($2::text[]) AND l.departed_drop_at IS NULL
               AND l.delivered_at > now() - make_interval(secs => $3))
-       ORDER BY l.loading_confirmed_at DESC NULLS LAST, l.code DESC LIMIT $4`,
+       ORDER BY COALESCE(l.at_plant_at, l.loading_confirmed_at) DESC NULLS LAST, l.code DESC
+       LIMIT $4`,
       [INDEXED_STATUSES, AFTER_DELIVERY_STATUSES, DELIVERED_FOLLOW_MS / 1000, limit],
     );
     return rows.map(toLoad);
@@ -272,15 +324,16 @@ export class MainDataRepository {
   async load(scope: TenantScope | null, id: string): Promise<MainLoad | null> {
     const params: unknown[] = [id];
     const rows: LoadRow[] = await this.dataSource.query(
-      `${LOAD_SELECT} WHERE l.id = $1${scoped(scope, 'l.tenant_id', params)}`,
+      `${await this.select()} WHERE l.id = $1${scoped(scope, 'l.tenant_id', params)}`,
       params,
     );
     return rows[0] ? toLoad(rows[0]) : null;
   }
 
   /**
-   * For each timestamp, the driver's load (in this tenant) whose tracking window covers it —
-   * places an offline batch flushed after its trip ended. One round trip per batch.
+   * For each timestamp, the driver's load (in this tenant) whose window covers it — from the
+   * truck being assigned (the drive to the plant) to delivery. Places an offline batch flushed
+   * after its trip ended. One round trip per batch.
    */
   async driverLoadsAt(
     driverId: string,
@@ -293,12 +346,14 @@ export class MainDataRepository {
       `SELECT pt.recorded_at, t.*
        FROM unnest($3::text[]) AS pt(recorded_at)
        JOIN LATERAL (
-         ${LOAD_SELECT}
+         ${await this.select()}
          WHERE l.driver_id = $1 AND l.tenant_id = $2
-           AND l.loading_confirmed_at IS NOT NULL
-           AND l.loading_confirmed_at - make_interval(mins => $4) <= pt.recorded_at::timestamptz
+           AND COALESCE(l.truck_assigned_at, l.in_transit_loading_at, l.at_plant_at,
+                        l.loading_confirmed_at) - make_interval(mins => $4)
+                 <= pt.recorded_at::timestamptz
            AND COALESCE(l.delivered_at, l.closed_at, 'infinity') >= pt.recorded_at::timestamptz
-         ORDER BY l.loading_confirmed_at DESC
+         ORDER BY COALESCE(l.truck_assigned_at, l.in_transit_loading_at, l.at_plant_at,
+                           l.loading_confirmed_at) DESC
          LIMIT 1
        ) t ON true`,
       [driverId, tenantId, recordedAts, graceMinutes],
@@ -361,6 +416,37 @@ export class MainDataRepository {
       [vehicleIds],
     );
     return new Map(rows.map((row) => [row.id, row.body_type]));
+  }
+
+  /**
+   * Every fleet vehicle with a GPS device IMEI on file — the devices the Roadcast poller pulls.
+   * An IMEI entered on two vehicles goes to the most recently edited one — decided across all
+   * orgs before `slot` narrows the result, so an org never gets another org's device.
+   *
+   * `slot` returns only the orgs in one of `slots` fixed buckets (by tenant id hash), so a caller
+   * can visit every org once per `slots` calls without reading every org's devices each time.
+   */
+  async gpsDeviceBindings(slot?: { slot: number; slots: number }): Promise<MainGpsDeviceBinding[]> {
+    const rows: Array<{ imei: string; vehicle_id: string; tenant_id: string }> =
+      await this.dataSource.query(
+        `SELECT * FROM (
+           SELECT DISTINCT ON (btrim(m.gps_device_imei))
+                  btrim(m.gps_device_imei) AS imei, v.id AS vehicle_id, v.tenant_id
+           FROM masters.vehicle_telemetry_meta m
+           JOIN masters.vehicles v ON v.id = m.vehicle_id
+           WHERE m.deleted_at IS NULL AND v.deleted_at IS NULL
+             AND btrim(COALESCE(m.gps_device_imei, '')) <> ''
+           ORDER BY btrim(m.gps_device_imei), m.updated_at DESC
+         ) b
+         WHERE $1::int IS NULL
+            OR mod(hashtext(b.tenant_id::text)::bigint + 2147483648, $2::int) = $1::int`,
+        [slot?.slot ?? null, slot?.slots ?? 1],
+      );
+    return rows.map((row) => ({
+      imei: row.imei,
+      vehicleId: row.vehicle_id,
+      tenantId: row.tenant_id,
+    }));
   }
 
   /** Market trucks aren't in the vehicle master; they exist for tracking only while on a load. */

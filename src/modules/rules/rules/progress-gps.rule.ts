@@ -30,7 +30,7 @@ const SAMPLE_EVERY_MS = 5 * 60_000;
  */
 export const progressGpsRule: FixRule<ProgressState> = {
   id: 'DELAY-GPS',
-  sources: ['driver_app', 'blackrock'],
+  sources: ['driver_app', 'roadcast'],
 
   initial: () => ({
     tripId: null,

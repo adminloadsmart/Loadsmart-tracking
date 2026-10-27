@@ -17,7 +17,7 @@ const SOURCES: Array<{
   // A phone off or in a dead zone is common → Medium, like INACT-SIM; a hard-wired device going
   // silent is a real problem → High (INACT-GPS).
   { source: 'driver_app', ruleId: 'INACT-GPS', severity: 'medium', label: 'driver phone' },
-  { source: 'blackrock', ruleId: 'INACT-GPS', severity: 'high', label: 'GPS device' },
+  { source: 'roadcast', ruleId: 'INACT-GPS', severity: 'high', label: 'GPS device' },
 ];
 const MIN_THRESHOLD_MIN = 30; // the smallest possible threshold (tanker rule) bounds the scan
 const SCAN_LIMIT = 2000;

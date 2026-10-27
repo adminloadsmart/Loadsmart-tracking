@@ -112,7 +112,7 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
       tripId: seeded.loadId,
       vehicleId: seeded.vehicleId!,
       end: async () => {
-        await updateLoad(ds, seeded.loadId, { status: 'delivered', delivered_at: new Date() });
+        await updateLoad(ds, seeded.loadId, { status: 'delivered_ok', delivered_at: new Date() });
         await trips.watcher.poll();
       },
     };
@@ -305,6 +305,29 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     expect(ack).toEqual({ ok: true, accepted: 2, noTrip: 1 });
     await drainStreams();
     expect(await rows('location_points', tripId)).toHaveLength(2);
+  });
+
+  it('keeps an offline batch from the drive to the plant off the trip, as its approach (DB fallback)', async () => {
+    const driverId = randomUUID();
+    const { tripId, end } = await startTrip(driverId, 60);
+    await updateLoad(ds, tripId, {
+      truck_assigned_at: new Date(Date.now() - 180 * 60_000),
+      at_plant_at: new Date(Date.now() - 60 * 60_000),
+    });
+    await end();
+    const socket = client(token(driverId));
+    await connected(socket);
+
+    const ack = await socket.timeout(5000).emitWithAck('loc:batch', [fix(30), fix(120)]);
+    expect(ack).toEqual({ ok: true, accepted: 2, noTrip: 0 });
+    await drainStreams();
+    expect(await rows('location_points', tripId)).toHaveLength(1);
+    const approach = await ds.query(
+      `SELECT trip_id, flags->>'geofenceTripId' AS approach
+       FROM tracking.location_points_short WHERE flags->>'geofenceTripId' = $1`,
+      [tripId],
+    );
+    expect(approach).toEqual([{ trip_id: null, approach: tripId }]);
   });
 
   it('rate-limits loc and rejects invalid payloads', async () => {

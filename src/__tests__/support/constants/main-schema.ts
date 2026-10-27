@@ -21,6 +21,7 @@ export const MAIN_SCHEMA_SQL = `
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, vehicle_id uuid NOT NULL,
     gps_provider text, gps_enabled boolean NOT NULL DEFAULT false, deleted_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now());
+  ALTER TABLE masters.vehicle_telemetry_meta ADD COLUMN IF NOT EXISTS gps_device_imei varchar(15);
   CREATE TABLE IF NOT EXISTS masters.loading_points (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, title text NOT NULL, address_line_1 text,
     city text, state text, pin_code text, latitude numeric(10,6), longitude numeric(10,6),
@@ -29,6 +30,8 @@ export const MAIN_SCHEMA_SQL = `
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, customer_id uuid NOT NULL, location text NOT NULL,
     address_line_1 text, address_line_2 text, city text, state text, pin_code text,
     deleted_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now());
+  ALTER TABLE customers.customer_delivery_points ADD COLUMN IF NOT EXISTS latitude numeric(10,6);
+  ALTER TABLE customers.customer_delivery_points ADD COLUMN IF NOT EXISTS longitude numeric(10,6);
   CREATE TABLE IF NOT EXISTS loads.requisitions (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, customer_id uuid NOT NULL,
     loading_point_id uuid NOT NULL, customer_delivery_point_id uuid NOT NULL,
@@ -38,14 +41,23 @@ export const MAIN_SCHEMA_SQL = `
     source_type text NOT NULL, requisition_id uuid NOT NULL, vehicle_id uuid, vehicle_number text,
     driver_id uuid, driver_name text, driver_number text, planned_capacity_tonnes numeric,
     loading_confirmed_at timestamptz,
+    truck_assigned_at timestamptz, in_transit_loading_at timestamptz,
     at_plant_at timestamptz, in_transit_at timestamptz, reached_delivery_point_at timestamptz,
     delivered_at timestamptz, closed_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now());
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS planned_capacity_tonnes numeric;
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS posting_id uuid;
-  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS departed_drop_at timestamptz;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS truck_assigned_at timestamptz;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS in_transit_loading_at timestamptz;
+  DO $$ BEGIN
+    CREATE TYPE loads.loads_tracking_source_enum AS ENUM ('gps', 'driver_app', 'sim', 'fastag');
+  EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS tracking_source loads.loads_tracking_source_enum;
   CREATE TABLE IF NOT EXISTS loads.load_postings (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, pickup_loading_point_id uuid,
     drop_customer_delivery_point_id uuid, drop_loading_point_id uuid);
+  ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS customer_id uuid;
+  ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS deliver_by_at timestamptz;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS departed_drop_at timestamptz;
   CREATE SCHEMA IF NOT EXISTS auth;
   CREATE TABLE IF NOT EXISTS auth.organizations (
     id uuid PRIMARY KEY, late_delivery_threshold_minutes integer);

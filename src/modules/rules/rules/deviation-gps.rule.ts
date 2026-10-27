@@ -50,7 +50,7 @@ const DROP_SAMPLE_EVERY_MS = 60_000;
  */
 export const deviationGpsRule: FixRule<DeviationState> = {
   id: RULE,
-  sources: ['driver_app', 'blackrock'],
+  sources: ['driver_app', 'roadcast'],
 
   initial: () => ({
     phase: 'on',
