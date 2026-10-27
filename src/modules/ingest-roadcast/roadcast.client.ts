@@ -50,6 +50,6 @@ export class RoadcastClient implements PositionSource {
     if (!parsed.success) {
       throw new RoadcastError(`Roadcast response has an unexpected shape: ${parsed.error}`, null);
     }
-    return parsed.data.data.PositionsPull.rows;
+    return parsed.data.data.PositionsPull?.rows ?? [];
   }
 }

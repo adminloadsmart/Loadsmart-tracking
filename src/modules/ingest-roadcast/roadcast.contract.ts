@@ -10,17 +10,20 @@ import type { NormalizedPoint } from '../points/point.contract';
  */
 export const roadcastResponseSchema = z.object({
   data: z.object({
-    PositionsPull: z.object({
-      extras: z
-        .object({
-          deviceCount: z.number().nullish(),
-          maxDeviceCap: z.number().nullish(),
-          rowCount: z.number().nullish(),
-        })
-        .nullish(),
-      // Rows are validated one by one, so a single malformed row can't sink the whole batch.
-      rows: z.array(z.unknown()),
-    }),
+    // null when none of the requested devices has data yet.
+    PositionsPull: z
+      .object({
+        extras: z
+          .object({
+            deviceCount: z.number().nullish(),
+            maxDeviceCap: z.number().nullish(),
+            rowCount: z.number().nullish(),
+          })
+          .nullish(),
+        // Rows are validated one by one, so a single malformed row can't sink the whole batch.
+        rows: z.array(z.unknown()).nullish(),
+      })
+      .nullable(),
   }),
 });
 
