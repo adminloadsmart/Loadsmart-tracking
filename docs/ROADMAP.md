@@ -290,7 +290,7 @@ NormalizedPoint {
 
 1. **Main backend → tracking:** no events. Tracking reads main's tables directly (shared database).
    - The TripWatcher (scheduler leader) polls `loads.updated_at` every few seconds into the Redis active-trip index, with a full rebuild on leader takeover and every 10 min.
-   - A trip starts at `loading_confirmed` / `at_plant` and ends at `delivered` / `closed`.
+   - A trip starts at `truck_assigned` and ends at `delivered` / `closed`.
 2. **Tracking → main backend:** the stream `tracking.events` carries:
    - `trip.arrived_at_pickup`
    - `trip.departed_pickup`

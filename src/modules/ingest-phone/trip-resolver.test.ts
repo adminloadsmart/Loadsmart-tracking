@@ -33,26 +33,20 @@ describe('TripResolver', () => {
     expect(trip).toEqual({ tripId: 'trip-1', tenantId: TENANT, vehicleId: 'veh-1' });
   });
 
-  it('keeps an assigned load off the trip, as the approach to the plant', async () => {
+  it('stamps the trip on an assigned load, from the approach to the plant', async () => {
     const [trip] = await resolverFor(ref('truck_assigned')).resolve(
       'd1',
       [TENANT],
       [recordedAt],
       now,
     );
-    expect(trip).toEqual({
-      tripId: null,
-      tenantId: TENANT,
-      vehicleId: 'veh-1',
-      geofenceTripId: 'trip-1',
-    });
+    expect(trip).toEqual({ tripId: 'trip-1', tenantId: TENANT, vehicleId: 'veh-1' });
     const point = toNormalizedPoint(
       { lat: 30.9, lng: 75.85, recordedAt } as Parameters<typeof toNormalizedPoint>[0],
       { ...trip!, driverId: 'd1' },
       recordedAt,
     );
-    expect(point.tripId).toBeNull();
-    expect(point.flags).toMatchObject({ geofenceTripId: 'trip-1' });
+    expect(point.tripId).toBe('trip-1');
   });
 
   it('keeps a delivered load off the trip, while it leaves the delivery point', async () => {

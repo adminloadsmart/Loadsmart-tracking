@@ -7,6 +7,7 @@ import { createIngestPhoneModule, DRIVER_SOCKET_MAX_MESSAGE_BYTES } from '../mod
 import { createLiveModule } from '../modules/live';
 import { createPointsModule } from '../modules/points';
 import { createTripsModule } from '../modules/trips';
+import { createAddressResolver } from '../modules/geocoding';
 import { createTrackingApiModule } from '../modules/tracking-api';
 import { closeServer, listen } from '../shared/lifecycle/http-server';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
@@ -52,7 +53,11 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
   const fanout = await createLiveModule({
     subscriber: liveSubscriber,
     mainRedis,
-    service: createTrackingApiModule(dataSource, redis).service,
+    service: createTrackingApiModule(
+      dataSource,
+      redis,
+      createAddressResolver({ redis, logger, googleMapsApiKey: env.googleMapsApiKey }),
+    ).service,
     jwtSecret: env.jwtSecret,
     logger,
   }).attach(io.of('/live'));
