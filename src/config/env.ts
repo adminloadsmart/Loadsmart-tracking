@@ -75,6 +75,25 @@ export const env = {
   // Unit of the API's `speed` field: 'kmh' or 'knots' (unconfirmed by Roadcast).
   roadcastSpeedUnit: (process.env.ROADCAST_SPEED_UNIT === 'knots' ? 'knots' : 'kmh') as
     'kmh' | 'knots',
+  // Intugine SIM tracking (poller role). One account for all of Loadsmart. Optional: without
+  // credentials SIM tracking stays off.
+  intugineApiUrl: process.env.INTUGINE_API_URL || undefined,
+  intugineUsername: process.env.INTUGINE_USERNAME || undefined,
+  intuginePassword: process.env.INTUGINE_PASSWORD || undefined,
+  // Status and end calls…
+  intugineTimeoutMs: numberWithDefault('INTUGINE_TIMEOUT_MS', 15_000),
+  // …consent and start-trip wait on the telecom operators (~2 min).
+  intugineSlowTimeoutMs: numberWithDefault('INTUGINE_SLOW_TIMEOUT_MS', 120_000),
+  // How often a trip on SIM is polled. Intugine only has a new location once per its own ping
+  // rate, so keep this in step with the rate set on their side.
+  intuginePollIntervalMin: numberWithDefault('INTUGINE_POLL_INTERVAL_MIN', 20),
+  // Newest locations asked for per poll. Whether Intugine caps this, or returns history, is not known yet.
+  intugineStatusLimit: numberWithDefault('INTUGINE_STATUS_LIMIT', 50),
+  // How often a pending consent is re-checked. The consent call may re-send the driver's SMS, so
+  // keep this slow.
+  intugineConsentCheckMin: numberWithDefault('INTUGINE_CONSENT_CHECK_MIN', 60),
+  // Consent is asked once the load's source is `sim`, and a driver can take hours to approve: wait this long.
+  intugineConsentTtlMin: numberWithDefault('INTUGINE_CONSENT_TTL_MIN', 720),
   // Shared with the main loadsmart backend so this service can verify its access/driver tokens.
   // Optional until Phase 2 (driver socket auth) — nothing verifies tokens yet.
   jwtSecret: process.env.JWT_SECRET || undefined,

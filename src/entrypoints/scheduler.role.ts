@@ -3,6 +3,15 @@ import { redisManager } from '../db/redis';
 import { createRedisConnection } from '../db/redis-connection';
 import { createJobQueue } from '../jobs/queue-registry';
 import { ROADCAST_QUEUE, RoadcastDispatcher } from '../modules/ingest-roadcast';
+import {
+  IntugineClient,
+  SimConsentService,
+  SIM_POLL_QUEUE,
+  SimLifecycleService,
+  RedisSimCursors,
+  SimPollDispatcher,
+  SimTripRepository,
+} from '../modules/ingest-sim';
 import { PointRetentionJob } from '../modules/points/retention.job';
 import { createRoutesModule } from '../modules/routes';
 import { createRulesModule, OutboxRelay } from '../modules/rules';
@@ -20,6 +29,11 @@ const TRIP_REBUILD_MS = 10 * 60_000;
 const OUTBOX_RELAY_MS = 2_000;
 const ROUTE_PLANNER_MS = 30_000;
 const RETENTION_MS = 60 * 60_000;
+// SIM consent / trip start / trip end decisions. Minutes matter little (consent is re-checked hourly).
+const SIM_LIFECYCLE_MS = 5 * 60_000;
+// How often running SIM trips are checked for a poll that is due (the poll itself is every
+// INTUGINE_POLL_INTERVAL_MIN).
+const SIM_DISPATCH_MS = 60_000;
 
 // Exactly one scheduler leader across replicas runs the leader-only work: the active-trip index
 // rebuild on takeover, the time-driven rules tick (inactivity, delay), route planning, and the
@@ -58,6 +72,37 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
         )
       : null;
 
+  // SIM tracking (Intugine). Without credentials it stays off.
+  let sim: SimLifecycleService | null = null;
+  let simPolls: SimPollDispatcher | null = null;
+  if (env.intugineApiUrl && env.intugineUsername && env.intuginePassword) {
+    const provider = new IntugineClient({
+      url: env.intugineApiUrl,
+      username: env.intugineUsername,
+      password: env.intuginePassword,
+      timeoutMs: env.intugineTimeoutMs,
+      slowTimeoutMs: env.intugineSlowTimeoutMs,
+    });
+    const store = new SimTripRepository(dataSource);
+    sim = new SimLifecycleService(
+      trips.mainData,
+      store,
+      provider,
+      new SimConsentService(store, provider, {
+        checkIntervalMs: env.intugineConsentCheckMin * 60_000,
+        ttlMs: env.intugineConsentTtlMin * 60_000,
+      }),
+      new RedisSimCursors(redis),
+      logger,
+    );
+    simPolls = new SimPollDispatcher(
+      store,
+      createJobQueue(SIM_POLL_QUEUE),
+      { pollIntervalMs: env.intuginePollIntervalMin * 60_000 },
+      logger,
+    );
+  }
+
   const lock = new LeaderLock(redis, {
     key: SCHEDULER_LEADER_KEY,
     ttlMs: env.leaderLockTtlMs,
@@ -87,6 +132,21 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
     loops.push(
       leaderLoop('roadcast-dispatch', env.roadcastPollIntervalMs, () => roadcast.dispatch()),
     );
+  }
+
+  if (sim) {
+    const lifecycle = sim;
+    loops.push(
+      leaderLoop('sim-lifecycle', SIM_LIFECYCLE_MS, async () => {
+        const result = await lifecycle.run();
+        logger.info(result, 'SIM lifecycle tick');
+      }),
+    );
+  }
+
+  if (simPolls) {
+    const dispatcher = simPolls;
+    loops.push(leaderLoop('sim-dispatch', SIM_DISPATCH_MS, () => dispatcher.dispatch()));
   }
 
   /** Runs `work` every `everyMs` while this instance is leader; never overlaps itself. */
