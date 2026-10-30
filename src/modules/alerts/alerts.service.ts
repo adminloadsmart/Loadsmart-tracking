@@ -3,14 +3,28 @@ import type { StaffIdentity, TenantScope } from '../../shared/auth/staff-token';
 import { hasPermission } from '../../shared/auth/staff-token';
 import { AuthorizationError, NotFoundError, ValidationError } from '../../shared/errors';
 import { LIVE_ALERTS_CHANNEL, mergeParams, RULE_DEFAULTS, RuleId } from '../rules';
-import type { RulesRepository } from '../rules/rules.repository';
+import type { AlertRow, RulesRepository } from '../rules/rules.repository';
+import type { AddressResolver } from '../geocoding';
 import { toAlertView } from './alert-view';
 import { AlertFilter, AlertsRepository, EpisodeRow } from './alerts.repository';
 
 /** Permission (main backend permission key) needed to change a tenant's rule settings. */
 export const TRACKING_SETTINGS_MANAGE = 'tracking.settings.manage';
 
-function episodeView(row: EpisodeRow) {
+const isCoord = (v: unknown): v is { lat: number; lng: number } =>
+  typeof v === 'object' &&
+  v !== null &&
+  typeof (v as { lat?: unknown }).lat === 'number' &&
+  typeof (v as { lng?: unknown }).lng === 'number';
+
+/** Where an alert happened: its payload carries `anchor` (halts), `position` (overspeed, route
+ *  deviation) or top-level lat/lng (deviation notice), depending on the rule. */
+function alertLocation(payload: Record<string, unknown>) {
+  const found = [payload.anchor, payload.position, payload].find(isCoord);
+  return found ? { lat: found.lat, lng: found.lng } : null;
+}
+
+function episodeView(row: EpisodeRow, address: string | null = null) {
   return {
     episodeId: row.id,
     ruleId: row.rule_id,
@@ -26,6 +40,7 @@ function episodeView(row: EpisodeRow) {
       ((row.ended_at ?? new Date()).getTime() - row.started_at.getTime()) / 1000,
     ),
     anchor: row.anchor_lat === null ? null : { lat: row.anchor_lat, lng: row.anchor_lng },
+    address,
     metrics: row.metrics,
     tags: row.tags,
   };
@@ -41,34 +56,54 @@ export class AlertsService {
     private readonly repository: AlertsRepository,
     private readonly rules: RulesRepository,
     private readonly redis: Redis,
+    private readonly addresses?: AddressResolver,
   ) {}
 
+  /** The alert view plus the address of where it happened (its anchor), when it has one. */
+  private async withAddresses(rows: AlertRow[]) {
+    const addresses = await (this.addresses?.resolve(rows.map((r) => alertLocation(r.payload))) ??
+      Promise.resolve(rows.map(() => null)));
+    return rows.map((row, i) => ({ ...toAlertView(row), address: addresses[i] ?? null }));
+  }
+
   async list(scope: TenantScope, filter: AlertFilter) {
-    return { alerts: (await this.repository.list(scope, filter)).map(toAlertView) };
+    return { alerts: await this.withAddresses(await this.repository.list(scope, filter)) };
   }
 
   async acknowledge(scope: TenantScope, user: StaffIdentity, id: string) {
     await this.require(scope, id);
     const updated = await this.repository.acknowledge(id, user.userId);
     if (updated) await this.publish('alert.acknowledged', updated);
-    return toAlertView(updated ?? (await this.require(scope, id)));
+    return (await this.withAddresses([updated ?? (await this.require(scope, id))]))[0];
   }
 
   async close(scope: TenantScope, user: StaffIdentity, id: string, reason: string) {
     await this.require(scope, id);
     const closed = await this.repository.close(id, user.userId, reason);
     if (closed) await this.publish('alert.closed', closed);
-    return toAlertView(closed ?? (await this.require(scope, id)));
+    return (await this.withAddresses([closed ?? (await this.require(scope, id))]))[0];
+  }
+
+  /** Episode views plus the address of each one's anchor (where the halt / gap happened). */
+  private async episodeViews(rows: EpisodeRow[]) {
+    const addresses = await (this.addresses?.resolve(
+      rows.map((r) =>
+        r.anchor_lat === null || r.anchor_lng === null
+          ? null
+          : { lat: r.anchor_lat, lng: r.anchor_lng },
+      ),
+    ) ?? Promise.resolve(rows.map(() => null)));
+    return rows.map((row, i) => episodeView(row, addresses[i] ?? null));
   }
 
   async tripEvents(scope: TenantScope, tripId: string) {
-    return { events: (await this.repository.episodes(scope, { tripId })).map(episodeView) };
+    return { events: await this.episodeViews(await this.repository.episodes(scope, { tripId })) };
   }
 
   async vehicleEvents(scope: TenantScope, vehicleId: string, from: Date, to: Date) {
     if (to <= from) throw new ValidationError('`to` must be after `from`');
     return {
-      events: (await this.repository.episodes(scope, { vehicleId, from, to })).map(episodeView),
+      events: await this.episodeViews(await this.repository.episodes(scope, { vehicleId, from, to })),
     };
   }
 

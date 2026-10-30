@@ -144,6 +144,7 @@ interface LoadRow {
   customer_name: string | null;
   planned_tonnes: string | number | null;
   promised_delivery_at: Date | null;
+  truck_assigned_at: Date | null;
   loading_confirmed_at: Date | null;
   at_plant_at: Date | null;
   in_transit_at: Date | null;
@@ -174,7 +175,8 @@ const loadSelect = (columns: LoadColumns) => `
            ((r.expected_delivery_date::timestamp + time '23:59') AT TIME ZONE 'Asia/Kolkata'),
            p.deliver_by_at
          ) AS promised_delivery_at,
-         l.loading_confirmed_at, l.at_plant_at, l.in_transit_at, l.reached_delivery_point_at,
+         l.truck_assigned_at, l.loading_confirmed_at, l.at_plant_at, l.in_transit_at,
+         l.reached_delivery_point_at,
          l.delivered_at, ${columns.departedDrop ? 'l.departed_drop_at' : 'NULL::timestamptz'} AS departed_drop_at,
          l.closed_at, l.updated_at
   FROM loads.loads l
@@ -218,7 +220,7 @@ function toLoad(row: LoadRow): MainLoad {
     customerName: row.customer_name,
     plannedTonnes: row.planned_tonnes === null ? null : Number(row.planned_tonnes),
     promisedDeliveryAt: row.promised_delivery_at,
-    startedAt: row.at_plant_at ?? row.loading_confirmed_at,
+    startedAt: row.truck_assigned_at ?? row.at_plant_at ?? row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,
     deliveredAt: row.delivered_at,
     departedDropAt: row.departed_drop_at,

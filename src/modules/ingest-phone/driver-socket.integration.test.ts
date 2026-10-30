@@ -319,7 +319,7 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     expect(await rows('location_points', tripId)).toHaveLength(2);
   });
 
-  it('keeps an offline batch from the drive to the plant off the trip, as its approach (DB fallback)', async () => {
+  it('puts an offline batch from the drive to the plant on the trip (DB fallback)', async () => {
     const driverId = randomUUID();
     const { tripId, end } = await startTrip(driverId, 60);
     await updateLoad(ds, tripId, {
@@ -333,13 +333,7 @@ describe.skipIf(!available)('/driver socket → stream → processing (real Redi
     const ack = await socket.timeout(5000).emitWithAck('loc:batch', [fix(30), fix(120)]);
     expect(ack).toEqual({ ok: true, accepted: 2, noTrip: 0 });
     await drainStreams();
-    expect(await rows('location_points', tripId)).toHaveLength(1);
-    const approach = await ds.query(
-      `SELECT trip_id, flags->>'geofenceTripId' AS approach
-       FROM tracking.location_points_short WHERE flags->>'geofenceTripId' = $1`,
-      [tripId],
-    );
-    expect(approach).toEqual([{ trip_id: null, approach: tripId }]);
+    expect(await rows('location_points', tripId)).toHaveLength(2);
   });
 
   it('rate-limits loc and rejects invalid payloads', async () => {

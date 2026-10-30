@@ -67,12 +67,7 @@ export interface TrackPoint {
   motion: string | null;
 }
 
-const PENDING_STATUSES: readonly LoadStatus[] = [
-  'created',
-  'bids_received',
-  'truck_assigned',
-  'in_transit_loading',
-];
+const PENDING_STATUSES: readonly LoadStatus[] = ['created', 'bids_received'];
 const ENDED_STATUSES: readonly LoadStatus[] = [
   'delivered_ok',
   'delivered_with_issues',

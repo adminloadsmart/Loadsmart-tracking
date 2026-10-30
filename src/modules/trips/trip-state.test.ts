@@ -13,8 +13,8 @@ describe('trackingStateFor', () => {
   it.each([
     ['created', 'pending'],
     ['bids_received', 'pending'],
-    ['truck_assigned', 'pending'],
-    ['in_transit_loading', 'pending'],
+    ['truck_assigned', 'active'],
+    ['in_transit_loading', 'active'],
     ['loaded', 'active'],
     ['reached_loading', 'active'],
     ['in_transit_unloading', 'active'],

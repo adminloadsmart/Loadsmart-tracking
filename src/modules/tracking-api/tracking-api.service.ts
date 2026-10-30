@@ -1,5 +1,6 @@
 import type { TenantScope } from '../../shared/auth/staff-token';
 import { NotFoundError, ValidationError } from '../../shared/errors';
+import type { AddressResolver } from '../geocoding';
 import type { PointSource } from '../points';
 import type { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
 import {
@@ -150,7 +151,17 @@ export class TrackingApiService {
     private readonly positions: VehicleStateStore,
     /** Reads the latest ETA the DELAY rule computed (trk:trip:{id}:eta). */
     private readonly readEta: (tripId: string) => Promise<Record<string, string>>,
+    private readonly addresses?: AddressResolver,
   ) {}
+
+  /** Adds `address` (reverse-geocoded) to each position view; null where there's no position. */
+  private async withAddresses<T extends PositionView | null>(
+    positions: T[],
+  ): Promise<Array<(T & { address: string | null }) | null>> {
+    const addresses = await (this.addresses?.resolve(positions) ??
+      Promise.resolve(positions.map(() => null)));
+    return positions.map((p, i) => (p ? { ...p, address: addresses[i] ?? null } : null));
+  }
 
   async fleetLive(scope: TenantScope) {
     const vehicles = await this.repository.listVehicles(scope, MAX_FLEET_VEHICLES);
@@ -180,10 +191,11 @@ export class TrackingApiService {
       this.repository.activeTripsByVehicle([vehicleId]),
     ]);
     const position = latest.get(vehicleId);
+    const [withAddress] = await this.withAddresses([position ? toPositionView(position) : null]);
     return {
       ...vehicleView(vehicle),
       activeTripId: activeTrips.get(vehicleId) ?? null,
-      position: position ? toPositionView(position) : null,
+      position: withAddress,
     };
   }
 
@@ -235,16 +247,18 @@ export class TrackingApiService {
       Promise.all(trips.map((trip) => this.readEta(trip.id))),
     ]);
     const now = Date.now();
+    const views = trips.map((trip) => {
+      const position = trip.vehicle_id ? latest.get(trip.vehicle_id) : undefined;
+      // Only a position reported for THIS trip is the trip's position.
+      return position && position.tripId === trip.id ? toPositionView(position, now) : null;
+    });
+    const positions = await this.withAddresses(views);
     return {
-      trips: trips.map((trip, index) => {
-        const position = trip.vehicle_id ? latest.get(trip.vehicle_id) : undefined;
-        return {
-          ...tripView(trip),
-          // Only a position reported for THIS trip is the trip's position.
-          position: position && position.tripId === trip.id ? toPositionView(position, now) : null,
-          eta: etaView(etas[index]),
-        };
-      }),
+      trips: trips.map((trip, index) => ({
+        ...tripView(trip),
+        position: positions[index],
+        eta: etaView(etas[index]),
+      })),
     };
   }
 
@@ -274,6 +288,9 @@ export class TrackingApiService {
     // Until the waterfall (Phase 6) picks an authoritative source, report the largest source's
     // distance as the trip distance and expose the per-source breakdown.
     const distances = Object.values(metrics.distanceMBySource);
+    const [tripPosition] = await this.withAddresses([
+      position && position.tripId === trip.id ? toPositionView(position) : null,
+    ]);
     return {
       ...tripView(trip),
       distanceKm: distances.length ? Math.round(Math.max(...distances) / 10) / 100 : 0,
@@ -284,7 +301,7 @@ export class TrackingApiService {
         ]),
       ),
       fraudFlags: metrics.fraudFlags,
-      position: position && position.tripId === trip.id ? toPositionView(position) : null,
+      position: tripPosition,
       routeStatus: trip.route_status,
       promisedDeliveryAt: trip.promised_delivery_at?.toISOString() ?? null,
       route: routeView(route),

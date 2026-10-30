@@ -21,6 +21,8 @@ export type LoadStatus = (typeof LOAD_STATUSES)[number];
 export type TrackingState = 'pending' | 'active' | 'ended';
 
 export const ACTIVE_STATUSES: readonly LoadStatus[] = [
+  'truck_assigned',
+  'in_transit_loading',
   'reached_loading',
   'loaded',
   'in_transit_unloading',
@@ -53,7 +55,8 @@ export const IN_TRANSIT_STATUS: LoadStatus = 'in_transit_unloading';
 
 /**
  * The drive to the plant: a truck is on the load (truck_assigned) and, once the driver or staff
- * mark it, heading to loading (in_transit_loading). See GEOFENCE_ONLY_STATUSES.
+ * mark it, heading to loading (in_transit_loading). Tracked like the rest of the trip; the
+ * geofence check uses the status to see the truck arrive at the plant.
  */
 export const APPROACH_STATUSES: readonly LoadStatus[] = ['truck_assigned', 'in_transit_loading'];
 export function isApproachStatus(status: string | null | undefined): boolean {
@@ -71,15 +74,12 @@ export const AFTER_DELIVERY_STATUSES: readonly LoadStatus[] = ENDED_STATUSES;
 export const DELIVERED_FOLLOW_MS = 24 * 60 * 60_000;
 
 /**
- * Indexed only for the geofence check, outside the tracked window: the drive to the plant and
- * leaving the delivery point after the E-POD. Points then carry the trip only as
- * `flags.geofenceTripId` (not `tripId`), so they never join the trip's track, distance or alert
- * rules; the geofence check uses them to see the truck arrive at the plant / leave the drop.
+ * Indexed only for the geofence check, outside the tracked window: leaving the delivery point
+ * after the E-POD. Points then carry the trip only as `flags.geofenceTripId` (not `tripId`), so
+ * they never join the trip's track, distance or alert rules; the geofence check uses them to see
+ * the truck leave the drop.
  */
-export const GEOFENCE_ONLY_STATUSES: readonly LoadStatus[] = [
-  ...APPROACH_STATUSES,
-  ...AFTER_DELIVERY_STATUSES,
-];
+export const GEOFENCE_ONLY_STATUSES: readonly LoadStatus[] = AFTER_DELIVERY_STATUSES;
 
 /** Takes a raw status (e.g. read back from Redis), so callers don't have to cast it. */
 export const isAfterDelivery = (status: string | null | undefined): boolean =>
@@ -89,9 +89,9 @@ export const isAfterDelivery = (status: string | null | undefined): boolean =>
 export const isGeofenceOnly = (status: string | null | undefined): boolean =>
   (GEOFENCE_ONLY_STATUSES as readonly string[]).includes(status ?? '');
 
-/** Statuses the active-trip index follows: the tracked ones plus the approach. A delivered load
- *  is followed too, until its truck leaves the delivery point (see isIndexed). */
-export const INDEXED_STATUSES: readonly LoadStatus[] = [...APPROACH_STATUSES, ...ACTIVE_STATUSES];
+/** Statuses the active-trip index follows: the tracked ones. A delivered load is followed too,
+ *  until its truck leaves the delivery point (see isIndexed). */
+export const INDEXED_STATUSES: readonly LoadStatus[] = ACTIVE_STATUSES;
 
 /** Whether the active-trip index holds this load right now: an indexed status, or delivered but
  *  not yet seen leaving the delivery point, within DELIVERED_FOLLOW_MS of the E-POD. */
@@ -109,8 +109,8 @@ export function isIndexed(
 }
 
 /**
- * Tracking runs from reaching the plant until delivery: before that the truck is still on the
- * approach; after it, the load's tracking is done (the vehicle timeline keeps going).
+ * Tracking runs from truck assignment until delivery; after it, the load's tracking is done (the
+ * vehicle timeline keeps going).
  */
 export function trackingStateFor(status: LoadStatus, deleted: boolean): TrackingState {
   if (deleted || ENDED_STATUSES.includes(status)) return 'ended';

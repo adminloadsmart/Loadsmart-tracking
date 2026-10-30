@@ -3,6 +3,7 @@ import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import { DataSource } from 'typeorm';
 import { createAlertsModule } from './modules/alerts';
+import { createAddressResolver } from './modules/geocoding';
 import { createRoutesModule, RouteProvider } from './modules/routes';
 import { createTrackingApiModule } from './modules/tracking-api';
 import { createTokenBlocklist } from './shared/auth/token-blocklist';
@@ -40,8 +41,13 @@ export interface ContainerDeps {
  * createXModule(...) factory returning { service, router }, wired here.
  */
 export function buildContainer(deps: ContainerDeps): Container {
-  const trackingApi = createTrackingApiModule(deps.dataSource, deps.redis);
-  const alerts = createAlertsModule(deps.dataSource, deps.redis);
+  const addresses = createAddressResolver({
+    redis: deps.redis,
+    logger: deps.logger,
+    googleMapsApiKey: deps.googleMapsApiKey,
+  });
+  const trackingApi = createTrackingApiModule(deps.dataSource, deps.redis, addresses);
+  const alerts = createAlertsModule(deps.dataSource, deps.redis, addresses);
   const routes = createRoutesModule({
     dataSource: deps.dataSource,
     redis: deps.redis,
