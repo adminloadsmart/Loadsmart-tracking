@@ -150,6 +150,9 @@ export class DelayMonitor {
         promisedAt: String(Math.round(promisedMs)),
         projectedDelayMin: String(estimate.delayMin),
         remainingKm: String(estimate.remainingKm),
+        // Let the trip API keep remainingKm / ETA live between evaluations (tracking-api/live-eta).
+        vehicleId: trip.vehicle_id,
+        routeLengthM: String(Math.round(primary.geometry.lengthM)),
         speedKmh: String(estimate.speedKmh),
         basis: estimate.basis,
         stale: '0',
