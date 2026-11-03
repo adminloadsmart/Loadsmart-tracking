@@ -173,8 +173,14 @@ describe('ownerFor', () => {
     expect(owner(trip(), T0 - 5 * MIN).tripId).toBe('load-1');
   });
 
-  it('flags a drive-to-plant fix instead of joining the trip', () => {
+  it('joins the trip from truck assignment (the drive to the plant is tracked)', () => {
     const result = owner(trip({ loadStatus: 'truck_assigned' }));
+    expect(result.tripId).toBe('load-1');
+    expect(result.geofenceTripId).toBeUndefined();
+  });
+
+  it('flags a fix after delivery instead of joining the trip', () => {
+    const result = owner(trip({ loadStatus: 'delivered_ok' }));
     expect(result.tripId).toBeNull();
     expect(result.geofenceTripId).toBe('load-1');
   });

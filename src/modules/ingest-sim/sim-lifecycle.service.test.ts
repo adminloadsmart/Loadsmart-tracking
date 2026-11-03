@@ -115,7 +115,7 @@ describe('SimLifecycleService', () => {
     },
   );
 
-  it('starts the trip as soon as consent is allowed and loading is confirmed', async () => {
+  it('starts the trip as soon as consent is allowed and the load is tracked', async () => {
     const { service, store, provider } = setup();
     const result = await service.run(at(0));
     expect(result.started).toBe(1);

@@ -48,7 +48,7 @@ const transitions = new Counter({
  * fallback: only loads whose `loads.tracking_source` is `sim` (chosen by the main backend when the
  * truck has neither GPS nor a driver app) are looked at, and this service never writes that column.
  *  - consent is asked once the load is `sim` (it costs nothing and a driver can take hours to approve);
- *  - the billed Intugine trip starts once consent is allowed and loading is confirmed;
+ *  - the billed Intugine trip starts once consent is allowed and the load is in a tracked status (from truck assignment);
  *  - it ends when the load leaves the tracked statuses or its source is no longer `sim` (Intugine
  *    bills by trip length, so stopping to poll is not enough).
  * If consent is denied, unsupported or times out, the row just ends: nothing falls back for now.
@@ -119,7 +119,7 @@ export class SimLifecycleService {
       if (outcome !== 'no_phone') result.consentRequested += 1;
       row = await this.store.findLiveByTrip(load.id);
     }
-    // Before loading is confirmed there is nothing to track yet (and nothing to bill).
+    // Tracked statuses start at truck assignment, so the trip starts as soon as consent is allowed.
     if (!ACTIVE_STATUSES.includes(load.status) || !load.startedAt) return;
     if (row?.state === 'consented') await this.startTrip(row, load, now, result);
   }
