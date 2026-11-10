@@ -27,6 +27,7 @@ export function createTrackingApiRoutes(controller: TrackingApiController): Rout
   router.get('/trips/summary', controller.tripsSummary);
   router.get('/trips/:tripId', validate(tripParamsSchema), controller.trip);
   router.get('/trips/:tripId/route', validate(tripParamsSchema), controller.tripRoute);
+  router.get('/trips/:tripId/fastag', validate(tripParamsSchema), controller.tripFastag);
   router.get('/trips/:tripId/track', validate(tripTrackSchema), controller.tripTrack);
 
   return router;

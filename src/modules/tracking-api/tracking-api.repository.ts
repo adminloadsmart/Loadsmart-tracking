@@ -3,6 +3,7 @@ import { detectFeatures, DbFeatures } from '../../db/db-features';
 import { encodePolyline, simplifyPolyline } from '../routes/route-geometry';
 import type { TenantScope } from '../../shared/auth/staff-token';
 import type { PointSource } from '../points';
+import { FastagCrossingRepository, type CrossingRow } from '../ingest-ulip';
 import { MainDataRepository, MainLoad, MainVehicle } from '../main-data';
 import { ACTIVE_STATUSES, LoadStatus, trackingStateFor } from '../trips';
 
@@ -122,9 +123,16 @@ export interface TrackPolyline {
  */
 export class TrackingApiRepository {
   private readonly mainData: MainDataRepository;
+  private readonly fastag: FastagCrossingRepository;
 
   constructor(private readonly dataSource: DataSource) {
     this.mainData = new MainDataRepository(dataSource);
+    this.fastag = new FastagCrossingRepository(dataSource);
+  }
+
+  /** The FASTag toll crossings stored for a trip, oldest first (collected by the ULIP poller). */
+  tripFastagCrossings(tripId: string, limit: number): Promise<CrossingRow[]> {
+    return this.fastag.listByLoad(tripId, limit);
   }
 
   // Loads, vehicles and places are the main backend's — read through main-data, never copied.

@@ -22,6 +22,8 @@ const TOLERANCE_DEG: Record<TrackResolution, number> = { low: 0.0005, medium: 0.
 
 const MAX_PLAYBACK_POINTS = 20_000;
 const MAX_FLEET_VEHICLES = 5_000;
+// A trip crosses a few dozen tolls at most; the cap only guards against a runaway.
+const MAX_FASTAG_CROSSINGS = 1_000;
 const RAW_TIMELINE_MAX_MS = 24 * 3_600_000;
 const TIMELINE_MAX_MS = 7 * 24 * 3_600_000;
 
@@ -348,6 +350,25 @@ export class TrackingApiService {
     }
     const line = await this.repository.tripPolyline(tripId, source, TOLERANCE_DEG[resolution]);
     return { tripId, resolution, format, ...polylineView(line) };
+  }
+
+  /** Toll plazas the trip's truck crossed since it was assigned, oldest first. */
+  async tripFastag(scope: TenantScope, tripId: string) {
+    await this.requireTrip(scope, tripId);
+    const rows = await this.repository.tripFastagCrossings(tripId, MAX_FASTAG_CROSSINGS + 1);
+    return {
+      tripId,
+      count: Math.min(rows.length, MAX_FASTAG_CROSSINGS),
+      truncated: rows.length > MAX_FASTAG_CROSSINGS,
+      crossings: rows.slice(0, MAX_FASTAG_CROSSINGS).map((row) => ({
+        seqNo: row.seqNo,
+        vehicleNumber: row.vehicleNumber,
+        crossedAt: row.crossedAt.toISOString(),
+        tollPlaza: { name: row.tollPlazaName, lat: row.lat, lng: row.lng },
+        laneDirection: row.laneDirection,
+        vehicleType: row.vehicleType,
+      })),
+    };
   }
 
   private async requireVehicle(scope: TenantScope, vehicleId: string): Promise<VehicleRow> {

@@ -16,6 +16,14 @@ import {
   SimPollJobData,
   SimTripRepository,
 } from '../modules/ingest-sim';
+import {
+  FASTAG_POLL_QUEUE,
+  FastagCrossingRepository,
+  FastagPollJob,
+  FastagPollJobData,
+  FastagTripRepository,
+  UlipClient,
+} from '../modules/ingest-ulip';
 import { createPointsModule } from '../modules/points';
 import { createTripsModule } from '../modules/trips';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
@@ -28,16 +36,22 @@ interface ProviderHealth {
 /**
  * Provider pull workers (docs/ROADMAP.md §3.2). The scheduler leader enqueues the polls; any
  * number of pollers run them. Roadcast GPS devices and Intugine SIM each start on their own
- * credentials; ULIP will join here.
+ * credentials; ULIP FASTag crossings are a third worker.
  */
 export const startPollerRole: RoleStarter = async ({ dataSource, health, logger }) => {
   const roadcastOn = Boolean(env.roadcastApiKey && env.roadcastApiUrl);
   const simOn = Boolean(env.intugineApiUrl && env.intugineUsername && env.intuginePassword);
+  const ulipOn = Boolean(env.ulipApiUrl && env.ulipUsername && env.ulipPassword);
   if (!roadcastOn)
     logger.info('ROADCAST_API_KEY/ROADCAST_API_URL not set — Roadcast poller is off');
   if (!simOn) logger.info('INTUGINE_* not set — SIM poller is off');
-  if (!roadcastOn && !simOn) {
-    health.register('poller', async () => ({ roadcast: 'disabled', sim: 'disabled' }));
+  if (!ulipOn) logger.info('ULIP_* not set — FASTag poller is off');
+  if (!roadcastOn && !simOn && !ulipOn) {
+    health.register('poller', async () => ({
+      roadcast: 'disabled',
+      sim: 'disabled',
+      ulip: 'disabled',
+    }));
     return {
       async stop() {
         health.unregister('poller');
@@ -56,11 +70,12 @@ export const startPollerRole: RoleStarter = async ({ dataSource, health, logger 
   const healthOf: Record<string, ProviderHealth | 'disabled'> = {
     roadcast: 'disabled',
     sim: 'disabled',
+    ulip: 'disabled',
   };
 
   /** One BullMQ worker per provider, with the same success / failure bookkeeping. */
   function startWorker<T>(
-    name: 'roadcast' | 'sim',
+    name: 'roadcast' | 'sim' | 'ulip',
     queue: string,
     run: (data: T) => Promise<unknown>,
     describe: (data: T) => Record<string, unknown>,
@@ -132,6 +147,26 @@ export const startPollerRole: RoleStarter = async ({ dataSource, health, logger 
       SIM_POLL_QUEUE,
       (data) => job.run(data),
       (data) => ({ tripId: data.tripId }),
+    );
+  }
+
+  if (ulipOn) {
+    const job = new FastagPollJob(
+      new UlipClient({
+        url: env.ulipApiUrl!,
+        username: env.ulipUsername!,
+        password: env.ulipPassword!,
+        timeoutMs: env.ulipTimeoutMs,
+        tokenTtlMs: env.ulipTokenTtlMin * 60_000,
+      }),
+      new FastagTripRepository(dataSource),
+      new FastagCrossingRepository(dataSource),
+    );
+    startWorker<FastagPollJobData>(
+      'ulip',
+      FASTAG_POLL_QUEUE,
+      (data) => job.run(data),
+      (data) => ({ tripId: data.loadId }),
     );
   }
 
