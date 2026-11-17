@@ -2,6 +2,7 @@ import { OpenApiGeneratorV31 } from '@asteasolutions/zod-to-openapi';
 import { Router } from 'express';
 import swaggerUi from 'swagger-ui-express';
 import { registerAlertsOpenApi } from '../../modules/alerts/alerts.openapi';
+import { registerSimConsentOpenApi } from '../../modules/ingest-sim/sim-consent.openapi';
 import { registerRoutesOpenApi } from '../../modules/routes/routes.openapi';
 import { registerTrackingApiOpenApi } from '../../modules/tracking-api/tracking-api.openapi';
 import { registry, TAGS } from './core';
@@ -25,6 +26,7 @@ export function getOpenApiDocument() {
     registerTrackingApiOpenApi(registry);
     registerAlertsOpenApi(registry);
     registerRoutesOpenApi(registry);
+    registerSimConsentOpenApi(registry);
 
     cached = new OpenApiGeneratorV31(registry.definitions).generateDocument({
       openapi: '3.1.0',

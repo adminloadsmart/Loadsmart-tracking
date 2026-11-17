@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { MainGeofence, MainTripPoints } from '../main-data';
 import {
+  advanceDwell,
+  dwellEventFor,
   evaluateVehicle,
+  GeofenceDwell,
   GeofenceFix,
   GeofenceTransition,
   tripEventFor,
@@ -32,18 +35,24 @@ const plant: MainGeofence = {
 };
 
 /** A fix `metres` north of the plant, `seconds` after T0. */
-const fix = (seconds: number, metres: number, tripId: string | null = TRIP): GeofenceFix => ({
+const fix = (
+  seconds: number,
+  metres: number,
+  tripId: string | null = TRIP,
+  extra: Partial<GeofenceFix> = {},
+): GeofenceFix => ({
   t: T0 + seconds * 1000,
   lat: 30.9 + metres * M,
   lng: 75.85,
   tripId,
+  ...extra,
 });
 
 describe('evaluateVehicle', () => {
   it('records the first sighting without an event', () => {
     const result = evaluateVehicle(VEHICLE, [fix(0, 0)], [plant], {});
     expect(result.transitions).toEqual([]);
-    expect(result.state[plant.id]).toEqual({ inside: true, enteredAt: T0, lastT: T0 });
+    expect(result.state[plant.id]).toMatchObject({ inside: true, enteredAt: T0, lastT: T0 });
   });
 
   it('raises enter, then exit, as the truck drives in and out', () => {
@@ -54,6 +63,7 @@ describe('evaluateVehicle', () => {
       ['exit', T0 + 600_000],
     ]);
     expect(result.state[plant.id]).toEqual({ inside: false, enteredAt: null, lastT: T0 + 600_000 });
+    expect(result.dwells).toEqual([]);
   });
 
   it('keeps the entry time while the truck stays inside', () => {
@@ -114,14 +124,10 @@ describe('tripEventFor', () => {
     customerDeliveryPointId: DROP,
   };
 
-  it('entering the pickup while assigned is the arrival at the plant', () => {
-    expect(tripEventFor(transition('enter'), 'truck_assigned', points)).toBe(
-      'trip.arrived_at_pickup',
-    );
-    expect(tripEventFor(transition('enter'), 'in_transit_loading', points)).toBe(
-      'trip.arrived_at_pickup',
-    );
-    expect(tripEventFor(transition('enter'), 'reached_loading', points)).toBeNull();
+  it('entering the pickup is no longer the arrival: that waits for the stop (dwellEventFor)', () => {
+    for (const status of ['truck_assigned', 'in_transit_loading', 'reached_loading']) {
+      expect(tripEventFor(transition('enter'), status, points)).toBeNull();
+    }
   });
 
   it('leaving the pickup once loading is confirmed is the departure', () => {
@@ -133,9 +139,9 @@ describe('tripEventFor', () => {
     expect(tripEventFor(transition('exit'), 'reached_loading', points)).toBeNull();
   });
 
-  it('entering the drop while in transit is the arrival at the drop', () => {
+  it('entering the drop while in transit is announced at once, not yet the arrival', () => {
     expect(tripEventFor(transition('enter', dropFence), 'in_transit_unloading', points)).toBe(
-      'trip.arrived_at_drop',
+      'trip.entered_drop_geofence',
     );
     expect(tripEventFor(transition('enter', dropFence), 'truck_assigned', points)).toBeNull();
   });
@@ -157,16 +163,234 @@ describe('tripEventFor', () => {
     const ownDrop = { ...dropFence, loadingPointId: 'own-site', customerDeliveryPointId: null };
     const posted = { ...points, dropCustomerDeliveryPointId: null, dropLoadingPointId: 'own-site' };
     expect(tripEventFor(transition('enter', ownDrop), 'in_transit_unloading', posted)).toBe(
-      'trip.arrived_at_drop',
+      'trip.entered_drop_geofence',
     );
   });
 
   it("ignores geofences not linked to this trip's points, and fixes with no trip", () => {
     const otherPlant = { ...plant, loadingPointId: 'another-plant' };
-    expect(tripEventFor(transition('enter', otherPlant), 'truck_assigned', points)).toBeNull();
-    expect(tripEventFor(transition('enter', plant, null), 'truck_assigned', points)).toBeNull();
+    expect(tripEventFor(transition('exit', otherPlant), 'loaded', points)).toBeNull();
+    expect(tripEventFor(transition('exit', plant, null), 'loaded', points)).toBeNull();
     expect(
-      tripEventFor(transition('enter', { ...plant, type: 'yard' }), 'truck_assigned', points),
+      tripEventFor(transition('exit', { ...plant, type: 'yard' }), 'loaded', points),
+    ).toBeNull();
+  });
+});
+
+describe('dwell: arrival after the stop wait, detention after 24 h', () => {
+  const stopped = { speedKmh: 0 };
+  const moving = { speedKmh: 30 };
+  const MIN = 60;
+
+  it('a stopped truck arrives once it has been stopped 10 min inside, at a deterministic time', () => {
+    const fixes = [
+      fix(0, 1000, TRIP, moving),
+      fix(60, 100, TRIP, stopped),
+      fix(5 * MIN, 50, TRIP, stopped),
+      fix(11 * MIN, 50, TRIP, stopped),
+    ];
+    const result = evaluateVehicle(VEHICLE, fixes, [plant], {});
+    expect(result.dwells).toHaveLength(1);
+    expect(result.dwells[0]).toMatchObject({
+      kind: 'arrival',
+      since: T0 + 60_000,
+      t: T0 + 60_000 + 10 * 60_000,
+      tripId: TRIP,
+    });
+    // Not raised a second time.
+    const again = evaluateVehicle(
+      VEHICLE,
+      [fix(14 * MIN, 50, TRIP, stopped)],
+      [plant],
+      result.state,
+    );
+    expect(again.dwells).toEqual([]);
+  });
+
+  it('driving through, or moving again before the wait is over, is not an arrival', () => {
+    const fixes = [
+      fix(0, 1000, TRIP, moving),
+      fix(60, 100, TRIP, stopped),
+      fix(5 * MIN, 80, TRIP, moving), // moved: the stop starts over
+      fix(12 * MIN, 60, TRIP, stopped),
+      fix(20 * MIN, 60, TRIP, stopped),
+    ];
+    const result = evaluateVehicle(VEHICLE, fixes, [plant], {});
+    expect(result.dwells).toEqual([]);
+    expect(result.state[plant.id].stoppedSince).toBe(T0 + 12 * 60_000);
+  });
+
+  it('ignition off counts as stopped, whatever the speed says', () => {
+    const fixes = [
+      fix(0, 1000, TRIP, moving),
+      fix(60, 100, TRIP, { speedKmh: 8, ignition: false }),
+      fix(12 * MIN, 100, TRIP, { speedKmh: 8, ignition: false }),
+    ];
+    expect(evaluateVehicle(VEHICLE, fixes, [plant], {}).dwells).toHaveLength(1);
+  });
+
+  it('SIM fixes (no speed, no ignition): two close pings 20 min apart are the same stop', () => {
+    const fixes = [fix(0, 1000), fix(60, 100), fix(21 * MIN, 120)];
+    const result = evaluateVehicle(VEHICLE, fixes, [plant], {});
+    expect(result.dwells.map((d) => d.kind)).toEqual(['arrival']);
+    // A SIM ping that is a long way from the last one inside is movement, not a stop.
+    const far: MainGeofence = { ...plant, radiusM: 5000 };
+    const moved = evaluateVehicle(
+      VEHICLE,
+      [fix(0, 3000), fix(60, 2000), fix(21 * MIN, 4000)],
+      [far],
+      {},
+    );
+    expect(moved.dwells).toEqual([]);
+  });
+
+  it('a truck already inside at the first sighting arrives once the wait is over', () => {
+    const result = evaluateVehicle(
+      VEHICLE,
+      [fix(0, 10, TRIP, stopped), fix(11 * MIN, 10, TRIP, stopped)],
+      [plant],
+      {},
+    );
+    expect(result.transitions).toEqual([]);
+    expect(result.dwells.map((d) => d.kind)).toEqual(['arrival']);
+  });
+
+  it('leaving ends the visit: the next visit times from scratch', () => {
+    const fixes = [
+      fix(0, 10, TRIP, stopped),
+      fix(5 * MIN, 2000, TRIP, moving),
+      fix(8 * MIN, 10, TRIP, stopped),
+      fix(15 * MIN, 10, TRIP, stopped),
+    ];
+    expect(evaluateVehicle(VEHICLE, fixes, [plant], {}).dwells).toEqual([]);
+  });
+
+  it('detention is raised once, 24 h after entering, even if the truck keeps moving inside', () => {
+    const fixes = [
+      fix(0, 1000, TRIP, moving),
+      fix(60, 100, TRIP, moving),
+      fix(23 * 3600, 100, TRIP, moving),
+      fix(25 * 3600, 100, TRIP, moving),
+      fix(26 * 3600, 100, TRIP, moving),
+    ];
+    const result = evaluateVehicle(VEHICLE, fixes, [plant], {});
+    expect(result.dwells).toHaveLength(1);
+    expect(result.dwells[0]).toMatchObject({
+      kind: 'detention',
+      since: T0 + 60_000,
+      t: T0 + 60_000 + 24 * 3600_000,
+    });
+  });
+
+  it('state stored before dwell existed keeps working: the stop is timed from the next fix', () => {
+    const old = { [plant.id]: { inside: true, enteredAt: T0, lastT: T0 } };
+    const first = evaluateVehicle(VEHICLE, [fix(11 * MIN, 10, TRIP, stopped)], [plant], old);
+    expect(first.dwells).toEqual([]);
+    const later = evaluateVehicle(
+      VEHICLE,
+      [fix(22 * MIN, 10, TRIP, stopped)],
+      [plant],
+      first.state,
+    );
+    expect(later.dwells.map((d) => d.kind)).toEqual(['arrival']);
+  });
+
+  it('applies the default radius to a circle with none of its own', () => {
+    const noRadius: MainGeofence = { ...plant, radiusM: null };
+    const result = evaluateVehicle(VEHICLE, [fix(0, 1000), fix(60, 200)], [noRadius], {});
+    expect(result.transitions.map((t) => t.event)).toEqual(['enter']);
+  });
+
+  describe('advanceDwell (the clock, when no new fix arrives)', () => {
+    const inside = evaluateVehicle(
+      VEHICLE,
+      [fix(0, 1000, TRIP, moving), fix(60, 100, TRIP, stopped)],
+      [plant],
+      {},
+    ).state;
+    const STALE = 45 * 60_000;
+
+    it('arrives once the wait has passed, then not again', () => {
+      expect(advanceDwell([plant], inside, T0 + 5 * 60_000, STALE).dwells).toEqual([]);
+      const due = advanceDwell([plant], inside, T0 + 11 * 60_000 + 60_000, STALE);
+      expect(due.dwells).toHaveLength(1);
+      expect(due.dwells[0].t).toBe(T0 + 60_000 + 10 * 60_000);
+      expect(advanceDwell([plant], due.state, T0 + 12 * 60_000 + 60_000, STALE).dwells).toEqual([]);
+    });
+
+    it('does not take a truck not seen for a long time to still be there', () => {
+      expect(advanceDwell([plant], inside, T0 + 2 * 3600_000, STALE).dwells).toEqual([]);
+    });
+
+    it('produces the same event time as the per-fix check (so the two never double up)', () => {
+      const byFix = evaluateVehicle(VEHICLE, [fix(12 * MIN, 100, TRIP, stopped)], [plant], inside);
+      const byClock = advanceDwell([plant], inside, T0 + 12 * 60_000, STALE);
+      expect(byFix.dwells[0].t).toBe(byClock.dwells[0].t);
+    });
+  });
+});
+
+describe('dwellEventFor', () => {
+  const points: MainTripPoints = {
+    vehicleNumber: 'PB10AB1234',
+    pickupLoadingPointId: PICKUP,
+    dropCustomerDeliveryPointId: DROP,
+    dropLoadingPointId: null,
+  };
+  const dropFence: MainGeofence = {
+    ...plant,
+    id: 'geo-drop',
+    type: 'unloading_point',
+    loadingPointId: null,
+    customerDeliveryPointId: DROP,
+  };
+  const dwell = (
+    kind: 'arrival' | 'detention',
+    geofence: MainGeofence = plant,
+    tripId: string | null = TRIP,
+  ): GeofenceDwell => ({ geofence, kind, t: T0, since: T0, lat: 30.9, lng: 75.85, tripId });
+
+  it('an arrival at the pickup counts on the approach only', () => {
+    for (const status of ['truck_assigned', 'in_transit_loading']) {
+      expect(dwellEventFor(dwell('arrival'), status, points)).toEqual({
+        type: 'trip.arrived_at_pickup',
+        point: 'loading',
+      });
+    }
+    expect(dwellEventFor(dwell('arrival'), 'reached_loading', points)).toBeNull();
+  });
+
+  it('an arrival at the drop counts while in transit only', () => {
+    expect(dwellEventFor(dwell('arrival', dropFence), 'in_transit_unloading', points)).toEqual({
+      type: 'trip.arrived_at_drop',
+      point: 'unloading',
+    });
+    expect(dwellEventFor(dwell('arrival', dropFence), 'reached_unloading', points)).toBeNull();
+  });
+
+  it('detention counts at either of the trip’s own points, while the truck is there', () => {
+    expect(dwellEventFor(dwell('detention'), 'reached_loading', points)).toEqual({
+      type: 'trip.detention_detected',
+      point: 'loading',
+    });
+    expect(dwellEventFor(dwell('detention', dropFence), 'reached_unloading', points)).toEqual({
+      type: 'trip.detention_detected',
+      point: 'unloading',
+    });
+    expect(dwellEventFor(dwell('detention'), 'delivered_ok', points)).toBeNull();
+  });
+
+  it('ignores other places and fixes with no trip', () => {
+    expect(
+      dwellEventFor(
+        dwell('arrival', { ...plant, loadingPointId: 'elsewhere' }),
+        'truck_assigned',
+        points,
+      ),
+    ).toBeNull();
+    expect(dwellEventFor(dwell('arrival', plant, null), 'truck_assigned', points)).toBeNull();
+    expect(
+      dwellEventFor(dwell('detention', { ...plant, type: 'yard' }), 'reached_loading', points),
     ).toBeNull();
   });
 });

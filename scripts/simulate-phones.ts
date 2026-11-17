@@ -220,9 +220,9 @@ async function seed(
     [phones.map((phone) => phone.driverId), TENANT, indexes],
   );
   await pg.query(
-    `INSERT INTO loads.loads (id, tenant_id, code, status, source_type, requisition_id, vehicle_number,
+    `INSERT INTO loads.loads (id, tenant_id, code, status, posting_type, route, requisition_id, vehicle_number,
        driver_id, planned_capacity_tonnes, loading_confirmed_at, in_transit_at)
-     SELECT id, $3, 'SIM-' || n, 'in_transit', 'market', $4, 'SIM' || n, driver_id, 1,
+     SELECT id, $3, 'SIM-' || n, 'in_transit_unloading', 'market_fleet', 'own_transporter', $4, 'SIM' || n, driver_id, 1,
        now() - interval '1 minute', now()
      FROM unnest($1::uuid[], $2::uuid[], $5::text[]) AS l(id, driver_id, n)`,
     [

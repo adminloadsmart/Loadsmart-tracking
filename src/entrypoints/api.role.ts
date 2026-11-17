@@ -3,6 +3,7 @@ import { createApp } from '../app';
 import { buildContainer } from '../composition-root';
 import { env } from '../config/env';
 import { redisManager } from '../db/redis';
+import { IntugineClient, simConsentOptionsFromEnv } from '../modules/ingest-sim';
 import { createRedisConnection } from '../db/redis-connection';
 import { closeServer, listen } from '../shared/lifecycle/http-server';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
@@ -21,6 +22,18 @@ export const startApiRole: RoleStarter = async ({ dataSource, health, logger }) 
       jwtSecret: env.jwtSecret,
       logger,
       googleMapsApiKey: env.googleMapsApiKey,
+      // Only to send a consent SMS again by hand; the status is readable without it.
+      simProvider:
+        env.intugineApiUrl && env.intugineUsername && env.intuginePassword
+          ? new IntugineClient({
+              url: env.intugineApiUrl,
+              username: env.intugineUsername,
+              password: env.intuginePassword,
+              timeoutMs: env.intugineTimeoutMs,
+              slowTimeoutMs: env.intugineSlowTimeoutMs,
+            })
+          : null,
+      simConsentOptions: simConsentOptionsFromEnv(env),
     }),
   );
   const server = createServer(app);

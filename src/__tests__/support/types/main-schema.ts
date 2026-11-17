@@ -3,7 +3,7 @@ export interface SeedLoadInput {
   status?: string;
   /** loads.tracking_source as the main backend set it (gps | driver_app | sim | fastag). */
   trackingSource?: string | null;
-  sourceType?: 'own_fleet' | 'market';
+  postingType?: 'own_fleet' | 'market_fleet' | 'indent';
   vehicleId?: string;
   /** Market trucks: no vehicle row, only the plate on the load. */
   vehicleNumber?: string;

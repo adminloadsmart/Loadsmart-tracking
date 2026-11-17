@@ -17,6 +17,13 @@ import {
  * (local and staging differ, e.g. driver tenancy), so a main migration has one place to land here.
  */
 
+/** loads.loads_posting_type_enum in the main backend (replaced source_type). */
+export const LOAD_POSTING_TYPES = ['market_fleet', 'indent', 'own_fleet'] as const;
+export type LoadPostingType = (typeof LOAD_POSTING_TYPES)[number];
+/** loads.loads_route_enum: who carries the load. */
+export const LOAD_ROUTES = ['loadsmart', 'own_transporter', 'indent', 'own_fleet'] as const;
+export type LoadRoute = (typeof LOAD_ROUTES)[number];
+
 /** loads.loads_tracking_source_enum in the main backend. */
 export const LOAD_TRACKING_SOURCES = ['gps', 'driver_app', 'sim', 'fastag'] as const;
 export type LoadTrackingSource = (typeof LOAD_TRACKING_SOURCES)[number];
@@ -26,7 +33,10 @@ export interface MainLoad {
   tenantId: string;
   code: string;
   status: LoadStatus;
-  sourceType: 'own_fleet' | 'market';
+  /** How the shipper posted the load (loads.posting_type in the main backend). */
+  postingType: LoadPostingType;
+  /** Who carries it; null until someone wins a market load (loads.route). */
+  route: LoadRoute | null;
   /** Tracking's vehicle id: the fleet vehicle, or a stable id derived from a market truck's plate. */
   vehicleId: string | null;
   vehicleNumber: string | null;
@@ -51,6 +61,8 @@ export interface MainLoad {
   trackingSource: LoadTrackingSource | null;
   /** E-POD uploaded; a delivered load stays indexed until its truck leaves the drop (isIndexed). */
   deliveredAt: Date | null;
+  /** loads.pod_status: the E-POD's review (null until one is uploaded). SIM tracking stops at 'accepted'. */
+  podStatus: 'pending' | 'accepted' | 'rejected' | null;
   /** When the truck left the delivery point's geofence (the main backend records trip.departed_drop). */
   departedDropAt: Date | null;
   milestones: Record<string, string | null>;
@@ -130,7 +142,8 @@ interface LoadRow {
   tenant_id: string;
   code: string;
   status: LoadStatus;
-  source_type: 'own_fleet' | 'market';
+  posting_type: LoadPostingType;
+  route: LoadRoute | null;
   vehicle_id: string | null;
   vehicle_number: string | null;
   device_imei: string | null;
@@ -150,6 +163,7 @@ interface LoadRow {
   in_transit_at: Date | null;
   reached_delivery_point_at: Date | null;
   delivered_at: Date | null;
+  pod_status: string | null;
   departed_drop_at: Date | null;
   closed_at: Date | null;
   updated_at: Date;
@@ -162,7 +176,8 @@ interface LoadColumns {
 }
 
 const loadSelect = (columns: LoadColumns) => `
-  SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.source_type::text AS source_type,
+  SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.posting_type::text AS posting_type,
+         l.route::text AS route,
          l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
          NULLIF(btrim(tm.gps_device_imei), '') AS device_imei,
          ${columns.trackingSource ? 'l.tracking_source::text' : 'NULL::text'} AS tracking_source,
@@ -177,14 +192,14 @@ const loadSelect = (columns: LoadColumns) => `
          ) AS promised_delivery_at,
          l.truck_assigned_at, l.loading_confirmed_at, l.at_plant_at, l.in_transit_at,
          l.reached_delivery_point_at,
-         l.delivered_at, ${columns.departedDrop ? 'l.departed_drop_at' : 'NULL::timestamptz'} AS departed_drop_at,
+         l.delivered_at, l.pod_status::text AS pod_status, ${columns.departedDrop ? 'l.departed_drop_at' : 'NULL::timestamptz'} AS departed_drop_at,
          l.closed_at, l.updated_at
   FROM loads.loads l
   LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
   LEFT JOIN loads.load_postings p ON p.id = l.posting_id
   LEFT JOIN customers.customers c ON c.id = COALESCE(r.customer_id, p.customer_id)
   LEFT JOIN masters.vehicle_telemetry_meta tm
-    ON tm.vehicle_id = l.vehicle_id AND tm.deleted_at IS NULL AND l.source_type = 'own_fleet'`;
+    ON tm.vehicle_id = l.vehicle_id AND tm.deleted_at IS NULL AND l.posting_type = 'own_fleet'`;
 
 const iso = (value: Date | null) => (value ? new Date(value).toISOString() : null);
 
@@ -196,7 +211,7 @@ function toTrackingSource(value: string | null): LoadTrackingSource | null {
 
 function toLoad(row: LoadRow): MainLoad {
   const vehicleId =
-    row.source_type === 'own_fleet'
+    row.posting_type === 'own_fleet'
       ? row.vehicle_id
       : row.vehicle_number?.trim()
         ? marketVehicleId(row.tenant_id, row.vehicle_number)
@@ -206,7 +221,8 @@ function toLoad(row: LoadRow): MainLoad {
     tenantId: row.tenant_id,
     code: row.code,
     status: row.status,
-    sourceType: row.source_type,
+    postingType: row.posting_type,
+    route: row.route,
     vehicleId,
     vehicleNumber: row.vehicle_number ? normalizePlate(row.vehicle_number) : null,
     deviceImei: row.device_imei,
@@ -223,6 +239,10 @@ function toLoad(row: LoadRow): MainLoad {
     startedAt: row.truck_assigned_at ?? row.at_plant_at ?? row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,
     deliveredAt: row.delivered_at,
+    podStatus:
+      row.pod_status === 'pending' || row.pod_status === 'accepted' || row.pod_status === 'rejected'
+        ? row.pod_status
+        : null,
     departedDropAt: row.departed_drop_at,
     milestones: {
       loadingConfirmedAt: iso(row.loading_confirmed_at),
@@ -475,7 +495,7 @@ export class MainDataRepository {
   /** Market trucks aren't in the vehicle master; they exist for tracking only while on a load. */
   private async marketTrucks(scope: TenantScope): Promise<MainVehicle[]> {
     const loads = (await this.activeLoads(scope)).filter(
-      (l) => l.sourceType === 'market' && l.vehicleId,
+      (l) => l.postingType !== 'own_fleet' && l.vehicleId,
     );
     const unique = new Map(loads.map((l) => [l.vehicleId!, l]));
     return [...unique.values()].map((l) => ({

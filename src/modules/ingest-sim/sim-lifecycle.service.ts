@@ -6,6 +6,7 @@ import type { MainLoad, MainPlace, MainTripPoints } from '../main-data';
 import type { LoadStatus } from '../trips/trip-state';
 import { ACTIVE_STATUSES, INDEXED_STATUSES } from '../trips/trip-state';
 import type { SimProvider, StartTripInput } from './intugine.client';
+import { normalizePhone } from './intugine.contract';
 import type { SimConsentService } from './sim-consent.service';
 import type { SimCursorStore } from './sim-poll.job';
 import type { SimTripRow, SimTripStore } from './sim-trip.repository';
@@ -25,7 +26,14 @@ export interface SimMainData {
 export interface SimLifecycleOptions {
   /** Start attempts before the row gives up (the trip is then not tracked by SIM). */
   maxStartAttempts?: number;
+  /** A delivered load stays on SIM until its POD is accepted, but no longer than this after the
+   *  delivery (Intugine bills by trip length; 0 = no limit). */
+  maxAfterDeliveryMs?: number;
 }
+
+/** Delivered, with the POD still to be accepted: SIM keeps tracking until it is. */
+const AWAITING_POD_STATUSES: readonly LoadStatus[] = ['delivered_ok', 'delivered_with_issues'];
+const DEFAULT_MAX_AFTER_DELIVERY_MS = 72 * 60 * 60_000;
 
 export interface LifecycleResult {
   consentRequested: number;
@@ -68,12 +76,19 @@ export class SimLifecycleService {
     const result: LifecycleResult = { consentRequested: 0, started: 0, ended: 0, skipped: 0 };
     await this.consent.checkDue(now);
 
+    // A load whose POD is accepted is done (tracking stops there), whatever stage it is in.
     const loads = (await this.mainData.loadsByStatus(null, INDEXED_STATUSES, 50_000)).filter(
-      (load) => load.vehicleId && load.trackingSource === 'sim',
+      (load) => load.vehicleId && load.trackingSource === 'sim' && load.podStatus !== 'accepted',
     );
+    // Delivered loads keep their running SIM trip until the POD is accepted (never started anew).
+    const awaitingPod = (await this.mainData.loadsByStatus(null, AWAITING_POD_STATUSES, 50_000))
+      .filter((load) => this.keepsAfterDelivery(load, now))
+      .map((load) => load.id);
     const live = new Map((await this.store.liveRows()).map((row) => [row.tripId, row]));
-    const finished = await this.store.loadsWithFinishedConsent(loads.map((load) => load.id));
-    const simIds = new Set(loads.map((load) => load.id));
+    const finished = await this.store.loadsWithFinishedConsent(
+      loads.map((load) => ({ id: load.id, phone: normalizePhone(load.driverNumber) })),
+    );
+    const simIds = new Set([...loads.map((load) => load.id), ...awaitingPod]);
 
     for (const load of loads) {
       try {
@@ -103,6 +118,17 @@ export class SimLifecycleService {
     now: Date,
     result: LifecycleResult,
   ) {
+    // The truck was cancelled and another assigned (or the driver changed) between two ticks: the
+    // row still holds the old driver's number and vehicle. End it (and its billed Intugine trip)
+    // so the new driver is asked for consent and the old phone is no longer polled.
+    if (
+      row &&
+      (row.vehicleId !== load.vehicleId || row.phone !== normalizePhone(load.driverNumber))
+    ) {
+      await this.endTrip(row, load, now, 'truck_changed');
+      result.ended += 1;
+      row = null;
+    }
     // Consent first. A number that already ended as denied / unsupported / failed is never asked
     // again (each ask texts a pending driver).
     if (!row && !consentFinished) {
@@ -163,6 +189,8 @@ export class SimLifecycleService {
     try {
       const started = await this.provider.startTrip(input);
       if (started.consent && started.consent.status !== 'allowed') {
+        // A consent we had as valid that the operator no longer allows was withdrawn.
+        await this.consent.observe(row.phone, started.consent, now);
         // Intugine does not consider the number approved: don't leave a billed trip open.
         await this.provider.endTrip(started.intugineTripId).catch(() => undefined);
         await this.store.markEnded(row, {
@@ -221,10 +249,38 @@ export class SimLifecycleService {
   private async endIfNoLongerSim(row: SimTripRow, now: Date): Promise<boolean> {
     const load = await this.mainData.load(null, row.tripId);
     const tracked = load !== null && INDEXED_STATUSES.includes(load.status);
-    // The list is capped; a load that is still a tracked SIM load is left alone.
-    if (tracked && load.trackingSource === 'sim') return false;
-    await this.endTrip(row, load, now, tracked ? 'source_changed' : 'load_ended');
+    if (load?.podStatus === 'accepted') {
+      await this.endTrip(row, load, now, 'pod_accepted');
+      return true;
+    }
+    // The lists are capped; a load that is still a tracked SIM load (or a delivered one waiting
+    // for its POD) is left alone.
+    if (load?.trackingSource === 'sim' && (tracked || this.keepsAfterDelivery(load, now))) {
+      return false;
+    }
+    const waitedTooLong =
+      load !== null && load.trackingSource === 'sim' && AWAITING_POD_STATUSES.includes(load.status);
+    await this.endTrip(
+      row,
+      load,
+      now,
+      tracked ? 'source_changed' : waitedTooLong ? 'delivery_timeout' : 'load_ended',
+    );
     return true;
+  }
+
+  /** Delivered, on SIM, POD not accepted yet, and not past the time limit after the delivery. */
+  private keepsAfterDelivery(load: MainLoad, now: Date): boolean {
+    if (
+      load.trackingSource !== 'sim' ||
+      !load.vehicleId ||
+      !AWAITING_POD_STATUSES.includes(load.status) ||
+      load.podStatus === 'accepted'
+    ) {
+      return false;
+    }
+    const limit = this.options.maxAfterDeliveryMs ?? DEFAULT_MAX_AFTER_DELIVERY_MS;
+    return limit === 0 || !load.deliveredAt || now.getTime() - load.deliveredAt.getTime() < limit;
   }
 
   private async endTrip(row: SimTripRow, load: MainLoad | null, now: Date, reason: string) {

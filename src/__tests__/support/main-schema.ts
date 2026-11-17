@@ -5,12 +5,13 @@ import type { SeededLoad, SeedLoadInput } from './types/main-schema';
 /** Inserts a load (with vehicle, truck type, places and requisition) as the main backend would. */
 export async function seedLoad(ds: DataSource, input: SeedLoadInput): Promise<SeededLoad> {
   const tenantId = input.tenantId;
-  const sourceType = input.sourceType ?? 'own_fleet';
+  const postingType = input.postingType ?? 'own_fleet';
+  const route = postingType === 'own_fleet' ? 'own_fleet' : 'own_transporter';
   const [loadId, loadingPointId, deliveryPointId, requisitionId, customerId] = [1, 2, 3, 4, 5].map(
     () => randomUUID(),
   );
   let vehicleId: string | null = null;
-  if (sourceType === 'own_fleet') {
+  if (postingType === 'own_fleet') {
     vehicleId = input.vehicleId ?? randomUUID();
     let truckTypeId: string | null = null;
     if (input.bodyType) {
@@ -68,16 +69,17 @@ export async function seedLoad(ds: DataSource, input: SeedLoadInput): Promise<Se
   const started =
     input.startedAt === undefined ? new Date(Date.now() - 3_600_000) : input.startedAt;
   await ds.query(
-    `INSERT INTO loads.loads (id, tenant_id, code, status, source_type, requisition_id, vehicle_id, vehicle_number,
+    `INSERT INTO loads.loads (id, tenant_id, code, status, posting_type, route, requisition_id, vehicle_id, vehicle_number,
        driver_id, driver_name, driver_number, planned_capacity_tonnes, loading_confirmed_at,
        delivered_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, clock_timestamp())`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, clock_timestamp())`,
     [
       loadId,
       tenantId,
       input.code ?? 'LOAD-T1',
       input.status ?? 'in_transit_unloading',
-      sourceType,
+      postingType,
+      route,
       requisitionId,
       vehicleId,
       input.vehicleNumber ?? input.registrationNumber ?? 'MH12AB0001',

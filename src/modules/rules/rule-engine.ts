@@ -18,8 +18,10 @@ export const lastSeenKey = (source: PointSource) => `trk:rules:lastseen:${source
 export const inactiveFlagKey = (vehicleId: string, source: PointSource) =>
   `trk:rules:inactive:${vehicleId}:${source}`;
 
-/** Fixes older than this when processed are "buffered": recorded, but raise no alert. */
+/** Fixes older than this when processed are "buffered": recorded, but raise no alert. SIM fixes
+ *  are polled every 10-20 min, so they are already minutes old when they arrive. */
 const LIVE_WINDOW_MS = 10 * 60_000;
+const SIM_LIVE_WINDOW_MS = 60 * 60_000;
 const SETTINGS_TTL_MS = 60_000;
 const PROFILE_TTL_MS = 5 * 60_000;
 
@@ -106,7 +108,9 @@ export class RuleEngine {
           source: point.source,
           tripId: point.tripId ?? null,
           inTransit: !!point.tripId && loadStatuses.get(point.tripId) === IN_TRANSIT_STATUS,
-          live: !point.flags?.supplementary && nowMs - t <= LIVE_WINDOW_MS,
+          live:
+            !point.flags?.supplementary &&
+            nowMs - t <= (point.source === 'sim' ? SIM_LIVE_WINDOW_MS : LIVE_WINDOW_MS),
           ignition: typeof point.flags?.ignition === 'boolean' ? point.flags.ignition : null,
           accuracyM: point.accuracyM ?? null,
           satellites: typeof point.flags?.satellites === 'number' ? point.flags.satellites : null,

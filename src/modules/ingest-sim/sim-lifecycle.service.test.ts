@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import { describe, expect, it, vi } from 'vitest';
 import type { SimProvider } from './intugine.client';
 import type { SimConsent } from './intugine.contract';
+import { MemoryConsentStore } from './sim-consent.repository';
 import { SimConsentService } from './sim-consent.service';
 import { SimLifecycleService, type SimMainData } from './sim-lifecycle.service';
 import { MemoryStore } from './sim-trip.memory-store';
@@ -74,10 +75,13 @@ function setup(opts: { load?: Record<string, unknown> | null; consent?: SimConse
       ]),
   };
   const cursorDelete = vi.fn(async (_id: string) => {});
-  const consent = new SimConsentService(store, provider as unknown as SimProvider, {
-    checkIntervalMs: 60 * MIN,
-    ttlMs: 240 * MIN,
-  });
+  const consents = new MemoryConsentStore();
+  const consent = new SimConsentService(
+    store,
+    provider as unknown as SimProvider,
+    { checkIntervalMs: 60 * MIN, ttlMs: 240 * MIN },
+    consents,
+  );
   const service = new SimLifecycleService(
     mainData,
     store,
@@ -86,7 +90,14 @@ function setup(opts: { load?: Record<string, unknown> | null; consent?: SimConse
     { delete: cursorDelete },
     { warn: vi.fn(), info: vi.fn() } as unknown as Logger,
   );
-  return { service, store, provider, cursorDelete, setLoad: (l: typeof load) => (load = l) };
+  return {
+    service,
+    store,
+    provider,
+    cursorDelete,
+    consents,
+    setLoad: (l: typeof load) => (load = l),
+  };
 }
 
 describe('SimLifecycleService', () => {
@@ -245,6 +256,33 @@ describe('SimLifecycleService', () => {
     expect(store.rows[0].state).toBe('ended');
   });
 
+  it('ends the old driver’s trip and asks the new driver when the truck was cancelled and replaced', async () => {
+    const { service, store, provider, setLoad } = setup();
+    await service.run(at(0));
+    await service.run(at(1));
+    expect(store.rows[0].state).toBe('active');
+    // Cancelled and re-assigned between two ticks: same load, same source, new truck and driver.
+    setLoad(makeLoad({ vehicleId: 'veh-2', driverId: 'drv-2', driverNumber: '9123456780' }));
+    const result = await service.run(at(10));
+    expect(result.ended).toBe(1);
+    expect(provider.endTrip).toHaveBeenCalledWith('INT-1');
+    expect(store.rows[0].state).toBe('ended');
+    expect(store.rows[1]).toMatchObject({ phone: '9123456780', vehicleId: 'veh-2' });
+    expect(provider.checkConsent).toHaveBeenLastCalledWith('9123456780');
+  });
+
+  it('a denied number does not block the next driver on the same load', async () => {
+    const { service, store, provider, setLoad } = setup({
+      consent: { status: 'denied', operator: 'airtel', suggestion: null },
+    });
+    await service.run(at(0));
+    expect(store.rows[0].state).toBe('unsupported');
+    setLoad(makeLoad({ vehicleId: 'veh-2', driverId: 'drv-2', driverNumber: '9123456780' }));
+    await service.run(at(5));
+    expect(provider.checkConsent).toHaveBeenCalledTimes(2);
+    expect(store.rows).toHaveLength(2);
+  });
+
   it('closes a row that never started when its load finishes, without calling Intugine', async () => {
     const { service, store, provider, setLoad } = setup({
       consent: { status: 'pending', operator: 'airtel', suggestion: null },
@@ -254,5 +292,106 @@ describe('SimLifecycleService', () => {
     await service.run(at(40));
     expect(store.rows[0].state).toBe('ended');
     expect(provider.endTrip).not.toHaveBeenCalled();
+  });
+
+  describe('stops at POD accepted, not at delivery', () => {
+    const delivered = (over: Record<string, unknown> = {}) =>
+      makeLoad({ status: 'delivered_ok', podStatus: 'pending', deliveredAt: at(60), ...over });
+
+    it('a delivered load keeps its running SIM trip while the POD is not accepted', async () => {
+      const { service, store, provider, setLoad } = setup();
+      await service.run(at(0));
+      setLoad(delivered());
+      const result = await service.run(at(90));
+      expect(result.ended).toBe(0);
+      expect(provider.endTrip).not.toHaveBeenCalled();
+      expect(store.rows[0].state).toBe('active');
+    });
+
+    it('ends the Intugine trip once the POD is accepted', async () => {
+      const { service, store, provider, setLoad } = setup();
+      await service.run(at(0));
+      setLoad(delivered());
+      await service.run(at(90));
+      setLoad(delivered({ podStatus: 'accepted' }));
+      const result = await service.run(at(120));
+      expect(result.ended).toBe(1);
+      expect(provider.endTrip).toHaveBeenCalledWith('INT-1');
+      expect(store.rows[0]).toMatchObject({ state: 'ended', endReason: 'pod_accepted' });
+    });
+
+    it('a POD accepted before the load leaves a tracked stage ends it too', async () => {
+      const { service, store, setLoad } = setup();
+      await service.run(at(0));
+      setLoad(makeLoad({ status: 'loaded', podStatus: 'accepted' }));
+      await service.run(at(30));
+      expect(store.rows[0]).toMatchObject({ state: 'ended', endReason: 'pod_accepted' });
+    });
+
+    it('never waits for a POD forever: ends after the limit past the delivery', async () => {
+      const { service, store, provider, setLoad } = setup();
+      await service.run(at(0));
+      setLoad(delivered({ deliveredAt: at(60) }));
+      await service.run(at(60 + 71 * 60));
+      expect(store.rows[0].state).toBe('active');
+      await service.run(at(60 + 73 * 60));
+      expect(provider.endTrip).toHaveBeenCalledWith('INT-1');
+      expect(store.rows[0]).toMatchObject({ state: 'ended', endReason: 'delivery_timeout' });
+    });
+
+    it('a delivered load that never had a SIM trip does not start one', async () => {
+      const { service, store, provider } = setup({
+        load: { status: 'delivered_ok', podStatus: 'pending', deliveredAt: at(0) },
+      });
+      await service.run(at(10));
+      expect(store.rows).toHaveLength(0);
+      expect(provider.checkConsent).not.toHaveBeenCalled();
+    });
+
+    it('a load that is no longer on SIM is still ended after delivery', async () => {
+      const { service, store, setLoad } = setup();
+      await service.run(at(0));
+      setLoad(delivered({ trackingSource: 'gps' }));
+      await service.run(at(90));
+      expect(store.rows[0].state).toBe('ended');
+    });
+  });
+
+  describe('consent across loads and withdrawal', () => {
+    it('a driver already approved on another load is not asked again', async () => {
+      const { service, store, provider, consents } = setup({
+        load: { status: 'truck_assigned', startedAt: null },
+      });
+      await consents.save({
+        phone: '9876543210',
+        operator: 'airtel',
+        status: 'allowed',
+        suggestion: null,
+        firstSentAt: at(-60 * 24),
+        sentAt: at(-60 * 24),
+        givenAt: at(-60 * 24),
+        validUntil: new Date(T0 + 200 * 86_400_000),
+        withdrawnAt: null,
+        lastCheckedAt: at(-60 * 24),
+      });
+      await service.run(at(0));
+      expect(provider.checkConsent).not.toHaveBeenCalled();
+      expect(store.rows[0]).toMatchObject({ state: 'consented', consentReused: true });
+    });
+
+    it('Intugine refusing a number we had as valid records the withdrawal and ends the row', async () => {
+      const { service, store, provider, consents } = setup();
+      provider.startTrip.mockResolvedValueOnce({
+        intugineTripId: 'INT-X',
+        consent: { status: 'denied', operator: 'airtel', suggestion: null },
+      } as never);
+      await service.run(at(0));
+      expect(store.rows[0].state).toBe('unsupported');
+      expect(provider.endTrip).toHaveBeenCalledWith('INT-X');
+      expect(consents.records.get('9876543210')).toMatchObject({
+        status: 'denied',
+        withdrawnAt: at(0),
+      });
+    });
   });
 });

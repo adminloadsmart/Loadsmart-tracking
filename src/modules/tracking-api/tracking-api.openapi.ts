@@ -96,7 +96,7 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: {
         description:
-          'tripId, loadCode, loadStatus, sourceType, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null',
+          'tripId, loadCode, loadStatus, postingType, route, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null',
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,

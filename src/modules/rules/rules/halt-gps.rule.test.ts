@@ -9,13 +9,31 @@ const driving = (fromS: number, durationS: number, startM: number) =>
   every(fromS, durationS, 15, (s) => ({ speedKmh: 50, ...north(startM + (s - fromS) * 14) }));
 
 describe('HALT-GPS', () => {
-  it('records and alerts once when a stop reaches 10 minutes (back-dated start)', () => {
+  it('records a stop at 10 minutes (back-dated start) but does not alert yet', () => {
     const { opened, raised, state } = run(haltGpsRule, parked(0, 660), C);
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatchObject({ op: 'open', startedAt: fix(0).t });
-    expect(raised).toHaveLength(1);
-    expect(raised[0]).toMatchObject({ severity: 'warning', occurredAt: fix(0).t });
+    expect(raised).toHaveLength(0);
     expect(state.halting).toBe(true);
+  });
+
+  it('alerts once when the stop reaches 30 minutes (back-dated start)', () => {
+    const before = run(haltGpsRule, parked(0, 1785), C);
+    expect(before.raised).toHaveLength(0);
+    const { opened, raised } = run(haltGpsRule, parked(0, 1860), C);
+    expect(opened).toHaveLength(1);
+    expect(raised).toHaveLength(1);
+    expect(raised[0]).toMatchObject({
+      severity: 'warning',
+      occurredAt: fix(0).t,
+      title: 'Vehicle halted for 30+ minutes',
+    });
+  });
+
+  it('the alert time is a setting', () => {
+    const { raised } = run(haltGpsRule, parked(0, 660), ctx('HALT-GPS', { alertAfterS: 600 }));
+    expect(raised).toHaveLength(1);
+    expect(raised[0]).toMatchObject({ title: 'Vehicle halted for 10+ minutes' });
   });
 
   it('does not record a stop shorter than 10 minutes', () => {
@@ -43,12 +61,12 @@ describe('HALT-GPS', () => {
 
   it('ends after 120 s at ≥ 10 km/h, back-dated to when movement started', () => {
     const fixes = [
-      ...parked(0, 900),
-      ...every(915, 150, 15, (s) => ({ speedKmh: 15, ...north((s - 915) * 0.5) })), // within radius
+      ...parked(0, 1860),
+      ...every(1875, 150, 15, (s) => ({ speedKmh: 15, ...north((s - 1875) * 0.5) })), // within radius
     ];
     const { effects } = run(haltGpsRule, fixes, C);
     const close = effects.episodes.find((e) => e.op === 'close');
-    expect(close).toMatchObject({ endedAt: fix(915).t, metrics: { endReason: 'moving' } });
+    expect(close).toMatchObject({ endedAt: fix(1875).t, metrics: { endReason: 'moving' } });
     expect(effects.alerts.find((a) => a.op === 'close')).toBeTruthy();
   });
 
@@ -66,9 +84,9 @@ describe('HALT-GPS', () => {
 
   it('clubs a new halt within 5 min and 500 m into the previous one (one alert, duration includes the gap)', () => {
     const fixes = [
-      ...parked(0, 900), // halt 1: 15 min, alerted
-      ...every(915, 120, 15, (s) => ({ speedKmh: 20, ...north(100 + (s - 915)) })), // short move
-      ...every(1050, 600, 15, () => ({ speedKmh: 0, ...north(400) })), // stops again 400 m away
+      ...parked(0, 1860), // halt 1: 31 min, alerted
+      ...every(1875, 120, 15, (s) => ({ speedKmh: 20, ...north(100 + (s - 1875)) })), // short move
+      ...every(2010, 600, 15, () => ({ speedKmh: 0, ...north(400) })), // stops again 400 m away
     ];
     const { effects, raised } = run(haltGpsRule, fixes, C);
     expect(raised).toHaveLength(1);
@@ -77,9 +95,9 @@ describe('HALT-GPS', () => {
 
   it('does not club when the new stop is far away', () => {
     const fixes = [
-      ...parked(0, 900),
-      ...driving(915, 300, 400),
-      ...every(1230, 660, 15, () => ({ speedKmh: 0, ...north(5000) })),
+      ...parked(0, 1860),
+      ...driving(1875, 300, 400),
+      ...every(2190, 1860, 15, () => ({ speedKmh: 0, ...north(5000) })),
     ];
     const { raised, opened } = run(haltGpsRule, fixes, C);
     expect(opened).toHaveLength(2);

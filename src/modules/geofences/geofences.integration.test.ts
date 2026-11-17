@@ -27,6 +27,7 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
   let redis: Redis;
   let trips: ReturnType<typeof createTripsModule>;
   let points: ReturnType<typeof createPointsModule>;
+  let geofences: ReturnType<typeof createGeofencesModule>;
 
   beforeAll(async () => {
     ds = await testDataSource();
@@ -37,7 +38,7 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
     await redis.flushdb();
     await truncateTrackingTables(ds);
     // A fresh module per test: its geofence cache would otherwise outlive the truncate.
-    const geofences = createGeofencesModule({
+    geofences = createGeofencesModule({
       dataSource: ds,
       redis,
       activeTrips: trips.activeTrips,
@@ -72,7 +73,11 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
   }
 
   /** Approach fixes (load still assigned, as phone ingest stamps them): [seconds ago, metres north]. */
-  async function feed(trip: { tripId: string; vehicleId: string }, fixes: Array<[number, number]>) {
+  async function feed(
+    trip: { tripId: string; vehicleId: string },
+    fixes: Array<[number, number]>,
+    speedKmh = 20,
+  ) {
     const batch: NormalizedPoint[] = fixes.map(([agoS, northM]) => ({
       tenantId: TENANT,
       vehicleId: trip.vehicleId,
@@ -83,7 +88,7 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
       receivedAt: new Date().toISOString(),
       lat: Number((PLANT.lat + northM / 111_195).toFixed(6)),
       lng: PLANT.lng,
-      speedKmh: 20,
+      speedKmh,
       heading: 0,
       accuracyM: 5,
       flags: { geofenceTripId: trip.tripId },
@@ -99,7 +104,7 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
       (r: { event_type: string; payload: Record<string, unknown> }) => [r.event_type, r.payload],
     );
 
-  it('driving into the plant geofence while assigned → geofence.entered + trip.arrived_at_pickup', async () => {
+  it('driving into the plant geofence while assigned → only geofence.entered (the arrival waits for the stop)', async () => {
     const trip = await assignedTrip();
     await feed(trip, [
       [180, 2000],
@@ -108,37 +113,69 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
     ]);
 
     const events = await outbox();
+    expect(events.map(([type]) => type)).toEqual(['geofence.entered']);
+    const logged = await ds.query(`SELECT event, load_id FROM tracking.geofence_events`);
+    expect(logged).toEqual([{ event: 'enter', load_id: trip.tripId }]);
+  });
+
+  it('stopped inside for 10 min → trip.arrived_at_pickup, once, stamped with when the stop began', async () => {
+    const trip = await assignedTrip();
+    await feed(trip, [[900, 2000]]);
+    await feed(trip, [[800, 100]], 0);
+    await feed(trip, [[400, 60]], 0);
+    expect((await outbox()).map(([type]) => type)).toEqual(['geofence.entered']);
+    await feed(trip, [[100, 60]], 0); // 700 s after stopping: past the 10 min wait
+
+    const events = await outbox();
     expect(events.map(([type]) => type)).toEqual(['geofence.entered', 'trip.arrived_at_pickup']);
     expect(events[1][1]).toMatchObject({
       tenant_id: TENANT,
       loadId: trip.tripId,
       vehicleId: trip.vehicleId,
+      point: 'loading',
     });
-    const logged = await ds.query(`SELECT event, load_id FROM tracking.geofence_events`);
-    expect(logged).toEqual([{ event: 'enter', load_id: trip.tripId }]);
+    const stoppedAt = Date.parse(events[1][1].occurredAt as string);
+    const confirmedAt = Date.parse(events[1][1].confirmedAt as string);
+    expect(confirmedAt - stoppedAt).toBe(10 * 60_000);
+
+    // More fixes, a redelivery: nothing new.
+    await feed(trip, [[50, 60]], 0);
+    await feed(trip, [[100, 60]], 0);
+    expect((await outbox()).map(([type]) => type)).toEqual([
+      'geofence.entered',
+      'trip.arrived_at_pickup',
+    ]);
+    expect(await ds.query(`SELECT kind FROM tracking.geofence_dwell_events`)).toEqual([
+      { kind: 'arrival' },
+    ]);
   });
 
-  it('staying inside raises nothing more; a redelivered fix adds no event', async () => {
+  it('a truck that stops sending still arrives: the tick checks the clock, and the batch does not repeat it', async () => {
     const trip = await assignedTrip();
-    await feed(trip, [
-      [180, 2000],
-      [60, 100],
+    await feed(trip, [[600, 2000]]);
+    await feed(trip, [[500, 100]], 0);
+    await feed(trip, [[40, 60]], 0); // 460 s stopped so far
+    expect(await geofences.tick(Date.now())).toBe(0);
+    expect(await geofences.tick(Date.now() + 200_000)).toBe(1); // now past the wait
+    expect(await geofences.tick(Date.now() + 210_000)).toBe(0);
+    expect((await outbox()).map(([type]) => type)).toEqual([
+      'geofence.entered',
+      'trip.arrived_at_pickup',
     ]);
-    await feed(trip, [[30, 50]]);
+    await feed(trip, [[1, 60]], 0); // the next fix: same arrival, same id, no second event
     expect((await outbox()).map(([type]) => type)).toEqual([
       'geofence.entered',
       'trip.arrived_at_pickup',
     ]);
   });
 
-  it('a load past assigned gets only the geofence event', async () => {
+  it('a load past assigned gets only the geofence event, even after the stop', async () => {
     const trip = await assignedTrip();
     await updateLoad(ds, trip.tripId, { status: 'reached_loading' });
     await trips.watcher.poll();
-    await feed(trip, [
-      [180, 2000],
-      [60, 100],
-    ]);
+    await feed(trip, [[900, 2000]]);
+    await feed(trip, [[800, 100]], 0);
+    await feed(trip, [[100, 60]], 0);
     expect((await outbox()).map(([type]) => type)).toEqual(['geofence.entered']);
   });
 });

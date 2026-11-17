@@ -1,7 +1,15 @@
 import { Counter } from 'prom-client';
+import { ConflictError, ValidationError } from '../../shared/errors';
 import { metricsRegistry } from '../../shared/metrics';
 import { IntugineError, type SimProvider } from './intugine.client';
 import { normalizePhone, type SimConsent } from './intugine.contract';
+import {
+  applyObservation,
+  isConsentValid,
+  type ConsentRecord,
+  type SimConsentView,
+} from './sim-consent.record';
+import type { SimConsentStore } from './sim-consent.repository';
 import type { ConsentUpdate, SimTripRow, SimTripStore } from './sim-trip.repository';
 
 export interface SimConsentOptions {
@@ -11,6 +19,10 @@ export interface SimConsentOptions {
   ttlMs: number;
   /** Failed consent calls before the row gives up. */
   maxAttempts?: number;
+  /** How long a given consent stays valid (months; ~9). */
+  validityMonths?: number;
+  /** Minimum gap before the consent SMS can be sent again by hand (resend). */
+  resendGapMs?: number;
 }
 
 /** A load that wants SIM tracking. */
@@ -26,6 +38,8 @@ export interface SimLoad {
 export type ConsentOutcome = 'ready' | 'waiting' | 'fallback' | 'no_phone';
 
 const DEFAULT_MAX_ATTEMPTS = 5;
+export const DEFAULT_CONSENT_VALIDITY_MONTHS = 9;
+const DEFAULT_RESEND_GAP_MS = 10 * 60_000;
 
 const consentChecks = new Counter({
   name: 'tracking_sim_consent_checks_total',
@@ -34,29 +48,61 @@ const consentChecks = new Counter({
   registers: [metricsRegistry],
 });
 
+/** What the console shows for a load's SIM consent (see SimConsentView). */
+export interface SimConsentSummary {
+  /** Masked: only the last 4 digits. */
+  phone: string | null;
+  status: SimConsentView;
+  /** The operator's last answer, for ops. */
+  operatorStatus: string | null;
+  /** When the consent SMS last went out. */
+  sentAt: string | null;
+  givenAt: string | null;
+  /** The consent's validity date (shown with "Valid"). */
+  validUntil: string | null;
+  withdrawnAt: string | null;
+  /** The SMS can be sent again: only while no valid consent is available. */
+  canResend: boolean;
+  /** Why not, when it can't. */
+  resendBlockedReason: string | null;
+}
+
 /**
- * Consent for SIM tracking, per trip. The driver approves by phone after Intugine's SMS; here we
- * only ask and then look. A number that is already ALLOWED is not texted again, so it is checked
- * first; a pending one is re-checked rarely because every call re-sends the SMS. Denied, unsupported
- * operators, timeouts and repeated failures all end the row (no fallback source is set for now).
+ * Consent for SIM tracking, per driver mobile number (reused across loads). The driver approves by
+ * phone after Intugine's SMS; here we only ask and then look.
+ *  - A number with a valid consent on file (given, not withdrawn, inside its ~9 months) is never
+ *    asked again: the load's row starts consented, no call, no SMS.
+ *  - Otherwise the first check sends the SMS (Intugine texts a pending number on every call), so a
+ *    pending one is re-checked rarely, and not at all while the number was texted recently for
+ *    another load. A number that is already ALLOWED is not texted again.
+ *  - Denied, unsupported operators, timeouts and repeated failures end the row (no fallback source
+ *    is set for now). Sending again by hand (resend) is allowed only without a valid consent.
  */
 export class SimConsentService {
   constructor(
     private readonly store: SimTripStore,
     private readonly provider: SimProvider,
     private readonly options: SimConsentOptions,
+    private readonly consents: SimConsentStore,
   ) {}
+
+  private get validityMonths() {
+    return this.options.validityMonths ?? DEFAULT_CONSENT_VALIDITY_MONTHS;
+  }
 
   /** Starts (or reports on) consent for a load. Safe to call repeatedly: one live row per trip. */
   async request(load: SimLoad, now = new Date()): Promise<ConsentOutcome> {
     const phone = normalizePhone(load.driverNumber);
     if (!phone) return 'no_phone';
 
+    const live = await this.store.findLiveByTrip(load.tripId);
+    const reused = !live && isConsentValid(await this.consents.find(phone), now);
     const existing =
-      (await this.store.findLiveByTrip(load.tripId)) ??
-      (await this.store.insert({ ...load, phone })) ??
+      live ??
+      (await this.store.insert({ ...load, phone, reusedConsent: reused })) ??
       (await this.store.findLiveByTrip(load.tripId));
     if (!existing) return 'waiting';
+    if (reused && existing.consentReused) consentChecks.inc({ result: 'reused' });
     // Already asked: later checks belong to checkDue, which paces them.
     if (existing.consentRequestedAt || existing.state !== 'awaiting_consent') {
       return outcomeOf(existing);
@@ -77,7 +123,50 @@ export class SimConsentService {
     return tally;
   }
 
-  private async check(row: SimTripRow, now: Date): Promise<ConsentOutcome> {
+  /** The number's consent, as the operator last told us (null: never asked). */
+  async recordFor(phone: string): Promise<ConsentRecord | null> {
+    return this.consents.find(phone);
+  }
+
+  /** Applies an operator answer to the number's consent: given, withdrawn, or text sent. */
+  async observe(phone: string, answer: SimConsent, now: Date): Promise<ConsentRecord> {
+    const existing = await this.consents.find(phone);
+    const updated = applyObservation(existing, answer, now, this.validityMonths);
+    updated.phone = phone;
+    await this.consents.save(updated);
+    return updated;
+  }
+
+  private async check(row: SimTripRow, now: Date, force = false): Promise<ConsentOutcome> {
+    const record = await this.consents.find(row.phone);
+    // Another load of the same driver already got the consent: no call, no SMS.
+    if (isConsentValid(record, now)) {
+      await this.store.updateConsent(row.id, {
+        state: 'consented',
+        consentStatus: 'allowed',
+        operator: record!.operator,
+        checkedAt: now,
+        requestedAt: now,
+      });
+      consentChecks.inc({ result: 'reused' });
+      return 'ready';
+    }
+    // …and a number texted a moment ago for another load is not texted again yet.
+    if (
+      !force &&
+      record?.sentAt &&
+      (record.status === 'pending' || record.status === 'not_registered') &&
+      now.getTime() - record.sentAt.getTime() < this.options.checkIntervalMs
+    ) {
+      await this.store.updateConsent(row.id, {
+        state: 'awaiting_consent',
+        checkedAt: now,
+        requestedAt: now,
+        expiresAt: row.consentExpiresAt ? undefined : new Date(now.getTime() + this.options.ttlMs),
+      });
+      consentChecks.inc({ result: 'recently_sent' });
+      return 'waiting';
+    }
     // Past the TTL: give up before calling, so no further SMS goes out.
     if (row.consentExpiresAt && row.consentExpiresAt.getTime() <= now.getTime()) {
       await this.store.updateConsent(row.id, {
@@ -96,6 +185,7 @@ export class SimConsentService {
       return this.failed(row, now, err);
     }
     consentChecks.inc({ result: consent.status });
+    await this.observe(row.phone, consent, now);
 
     const update = this.updateFor(row, consent, now);
     await this.store.updateConsent(row.id, update);
@@ -123,6 +213,99 @@ export class SimConsentService {
       default: // pending, not_registered: the driver still has to act
         return base;
     }
+  }
+
+  /**
+   * Sends the consent SMS again, by hand — only while no valid consent is available, and not
+   * within `resendGapMs` of the last send. A trip whose consent ended (timeout, repeated failures,
+   * denied or withdrawn) gets a fresh row; an operator Intugine cannot track is not retried.
+   */
+  async resend(load: SimLoad, now = new Date()): Promise<ConsentOutcome> {
+    const phone = normalizePhone(load.driverNumber);
+    if (!phone) throw new ValidationError('The load has no usable driver mobile number');
+    const record = await this.consents.find(phone);
+    if (isConsentValid(record, now)) {
+      throw new ConflictError('A valid consent is already on file for this number', {
+        validUntil: record!.validUntil!.toISOString(),
+      });
+    }
+    const gap = this.options.resendGapMs ?? DEFAULT_RESEND_GAP_MS;
+    if (record?.sentAt && now.getTime() - record.sentAt.getTime() < gap) {
+      throw new ConflictError('The consent link was sent a moment ago; wait before sending again', {
+        retryAt: new Date(record.sentAt.getTime() + gap).toISOString(),
+      });
+    }
+    let row = await this.store.findLiveByTrip(load.tripId);
+    if (!row) {
+      const latest = await this.store.findLatestByTrip(load.tripId);
+      if (latest?.endReason === 'consent_unsupported') {
+        throw new ConflictError(
+          "The driver's operator cannot be tracked by SIM; sending again will not help",
+        );
+      }
+      row =
+        (await this.store.insert({ ...load, phone, reusedConsent: false })) ??
+        (await this.store.findLiveByTrip(load.tripId));
+    }
+    if (!row) return 'waiting';
+    return this.check(row, now, true);
+  }
+
+  /** The consent status of a load, for the console. `trip` is the load's newest SIM row, if any. */
+  async summarize(
+    driverNumber: string | null,
+    trip: SimTripRow | null,
+    now = new Date(),
+  ): Promise<SimConsentSummary> {
+    const phone = normalizePhone(driverNumber);
+    const empty = {
+      phone: null,
+      operatorStatus: null,
+      sentAt: null,
+      givenAt: null,
+      validUntil: null,
+      withdrawnAt: null,
+      canResend: false,
+    };
+    if (!phone) {
+      return {
+        ...empty,
+        status: 'no_number',
+        resendBlockedReason: 'The load has no usable driver mobile number',
+      };
+    }
+    const record = await this.consents.find(phone);
+    const iso = (date: Date | null | undefined) => date?.toISOString() ?? null;
+    const base = {
+      phone: `XXXXXX${phone.slice(-4)}`,
+      operatorStatus: record?.status ?? trip?.consentStatus ?? null,
+      sentAt: iso(record?.sentAt),
+      givenAt: iso(record?.givenAt),
+      validUntil: iso(record?.validUntil),
+      withdrawnAt: iso(record?.withdrawnAt),
+    };
+    if (isConsentValid(record, now)) {
+      return {
+        ...base,
+        // A consent already on file when the load asked is "Valid"; one the driver gave in answer
+        // to this load's SMS is "Given".
+        status: trip && !trip.consentReused ? 'given' : 'valid',
+        canResend: false,
+        resendBlockedReason: 'A valid consent is already on file',
+      };
+    }
+    const waiting = trip?.state === 'awaiting_consent' || (!trip && record?.status === 'pending');
+    if (waiting) {
+      return { ...base, status: 'link_sent', canResend: true, resendBlockedReason: null };
+    }
+    const unsupported =
+      trip?.endReason === 'consent_unsupported' || record?.status === 'unsupported';
+    return {
+      ...base,
+      status: 'unavailable',
+      canResend: !unsupported,
+      resendBlockedReason: unsupported ? "The driver's operator cannot be tracked by SIM" : null,
+    };
   }
 
   private async failed(row: SimTripRow, now: Date, err: unknown): Promise<ConsentOutcome> {

@@ -11,7 +11,7 @@ export interface VehicleEffects {
   notices: NoticeOp[];
 }
 
-/** Minutes a trip has spent halted (HALT-GPS) and off route (DEV-GPS) so far. */
+/** Minutes a trip has spent halted (HALT-GPS / HALT-SIM) and off route (DEV-GPS) so far. */
 export interface TripDelayCauses {
   haltMin: number;
   deviationMin: number;
@@ -268,7 +268,7 @@ export class RulesRepository {
 
   /** What LS_N_0030 names as the main reason for a delay (see TripDelayCauses). */
   async tripDelayCauses(tripId: string): Promise<TripDelayCauses> {
-    const causeRules: RuleId[] = ['HALT-GPS', 'DEV-GPS'];
+    const causeRules: RuleId[] = ['HALT-GPS', 'HALT-SIM', 'DEV-GPS'];
     const rows: Array<{ rule_id: RuleId; minutes: string | number }> = await this.dataSource.query(
       `SELECT rule_id,
               SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at)) / 60) AS minutes
@@ -277,9 +277,13 @@ export class RulesRepository {
        GROUP BY rule_id`,
       [tripId, causeRules],
     );
-    const minutes = (ruleId: RuleId) =>
-      Math.round(Number(rows.find((r) => r.rule_id === ruleId)?.minutes ?? 0));
-    return { haltMin: minutes('HALT-GPS'), deviationMin: minutes('DEV-GPS') };
+    const minutes = (...ruleIds: RuleId[]) =>
+      Math.round(
+        rows
+          .filter((r) => ruleIds.includes(r.rule_id))
+          .reduce((sum, r) => sum + Number(r.minutes ?? 0), 0),
+      );
+    return { haltMin: minutes('HALT-GPS', 'HALT-SIM'), deviationMin: minutes('DEV-GPS') };
   }
 
   loadSettings(tenantId: string): Promise<RuleSettingRow[]> {

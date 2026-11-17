@@ -2,9 +2,9 @@ import { haversineMeters, LatLng } from '../processing/geo';
 import type { MainGeofence } from '../main-data';
 
 /** Inside a geofence: within the circle's radius, or inside the drawn polygon. */
-export function containsPoint(geofence: MainGeofence, point: LatLng): boolean {
+export function containsPoint(geofence: MainGeofence, point: LatLng, defaultRadiusM = 0): boolean {
   if (geofence.shape === 'polygon') return isInsidePolygon(point, geofence.polygon ?? []);
-  return haversineMeters(point, geofence) <= (geofence.radiusM ?? 0);
+  return haversineMeters(point, geofence) <= (geofence.radiusM ?? defaultRadiusM);
 }
 
 /** Ray-casting point-in-polygon on lat/lng treated as planar — accurate for the site-sized
