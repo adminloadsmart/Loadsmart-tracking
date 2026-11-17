@@ -163,4 +163,23 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
       404: { description: 'Trip not found or outside scope', ...errorContent },
     },
   });
+
+  registry.registerPath({
+    method: 'get',
+    path: `${BASE}/trips/{tripId}/fastag`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.fastag',
+    ...authenticated(
+      'FASTag toll plazas the trip’s truck crossed from truck assignment to delivery, oldest first (collected from ULIP).',
+    ),
+    request: { params: tripParamsSchema.shape.params },
+    responses: {
+      200: {
+        description:
+          '{ tripId, count, truncated, crossings: [{ seqNo, vehicleNumber, crossedAt, tollPlaza: { name, lat, lng }, laneDirection, vehicleType }] }',
+      },
+      ...authErrors,
+      404: { description: 'Trip not found or outside scope', ...errorContent },
+    },
+  });
 }

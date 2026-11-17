@@ -94,6 +94,18 @@ export const env = {
   intugineConsentCheckMin: numberWithDefault('INTUGINE_CONSENT_CHECK_MIN', 60),
   // Consent is asked once the load's source is `sim`, and a driver can take hours to approve: wait this long.
   intugineConsentTtlMin: numberWithDefault('INTUGINE_CONSENT_TTL_MIN', 720),
+  // ULIP FASTag toll crossings (poller role). One account for all of Loadsmart. Optional: without
+  // credentials FASTag collection stays off.
+  ulipApiUrl: process.env.ULIP_API_URL || undefined,
+  ulipUsername: process.env.ULIP_USERNAME || undefined,
+  ulipPassword: process.env.ULIP_PASSWORD || undefined,
+  ulipTimeoutMs: numberWithDefault('ULIP_TIMEOUT_MS', 20_000),
+  // The login token carries no expiry, so it is trusted for this long (ROADMAP: refresh every 30 min).
+  ulipTokenTtlMin: numberWithDefault('ULIP_TOKEN_TTL_MIN', 30),
+  // How often a load in transit is polled. ULIP keeps ~72 h per vehicle, so this is about freshness, not safety.
+  ulipPollIntervalMin: numberWithDefault('ULIP_POLL_INTERVAL_MIN', 15),
+  // A delivered load gets one last poll this long after delivery, for tolls ULIP posts late.
+  ulipFinalPollDelayMin: numberWithDefault('ULIP_FINAL_POLL_DELAY_MIN', 30),
   // Shared with the main loadsmart backend so this service can verify its access/driver tokens.
   // Optional until Phase 2 (driver socket auth) — nothing verifies tokens yet.
   jwtSecret: process.env.JWT_SECRET || undefined,

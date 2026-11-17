@@ -23,6 +23,7 @@ describe('API docs', () => {
       '/v1/trips/summary',
       '/v1/trips/{tripId}',
       '/v1/trips/{tripId}/events',
+      '/v1/trips/{tripId}/fastag',
       '/v1/trips/{tripId}/route',
       '/v1/trips/{tripId}/route/approve',
       '/v1/trips/{tripId}/track',
@@ -34,7 +35,7 @@ describe('API docs', () => {
     const operations = Object.values(res.body.paths).flatMap((item) =>
       Object.values(item as Record<string, { security?: unknown }>),
     );
-    expect(operations).toHaveLength(16);
+    expect(operations).toHaveLength(17);
     for (const operation of operations) {
       expect(operation.security).toEqual([{ bearerAuth: [] }]);
     }

@@ -52,6 +52,10 @@ export class TrackingApiController {
     respond(res, await this.service.trip(scopeOf(req), String(req.params.tripId)));
   };
 
+  tripFastag = async (req: Request, res: Response) => {
+    respond(res, await this.service.tripFastag(scopeOf(req), String(req.params.tripId)));
+  };
+
   tripTrack = async (req: Request, res: Response) => {
     const { resolution, format, source } = req.validatedQuery as TripTrackQuery;
     respond(

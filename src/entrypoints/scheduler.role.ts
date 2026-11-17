@@ -12,6 +12,12 @@ import {
   SimPollDispatcher,
   SimTripRepository,
 } from '../modules/ingest-sim';
+import {
+  FASTAG_POLL_QUEUE,
+  FastagLifecycleService,
+  FastagPollDispatcher,
+  FastagTripRepository,
+} from '../modules/ingest-ulip';
 import { PointRetentionJob } from '../modules/points/retention.job';
 import { createRoutesModule } from '../modules/routes';
 import { createRulesModule, OutboxRelay } from '../modules/rules';
@@ -34,6 +40,9 @@ const SIM_LIFECYCLE_MS = 5 * 60_000;
 // How often running SIM trips are checked for a poll that is due (the poll itself is every
 // INTUGINE_POLL_INTERVAL_MIN).
 const SIM_DISPATCH_MS = 60_000;
+// FASTag: which loads are followed (open / close), and which are due a ULIP poll.
+const FASTAG_LIFECYCLE_MS = 5 * 60_000;
+const FASTAG_DISPATCH_MS = 60_000;
 
 // Exactly one scheduler leader across replicas runs the leader-only work: the active-trip index
 // rebuild on takeover, the time-driven rules tick (inactivity, delay), route planning, and the
@@ -103,6 +112,23 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
     );
   }
 
+  // FASTag crossings (ULIP). Without credentials it stays off.
+  let fastag: FastagLifecycleService | null = null;
+  let fastagPolls: FastagPollDispatcher | null = null;
+  if (env.ulipApiUrl && env.ulipUsername && env.ulipPassword) {
+    const store = new FastagTripRepository(dataSource);
+    fastag = new FastagLifecycleService(trips.mainData, store, logger);
+    fastagPolls = new FastagPollDispatcher(
+      store,
+      createJobQueue(FASTAG_POLL_QUEUE),
+      {
+        pollIntervalMs: env.ulipPollIntervalMin * 60_000,
+        finalDelayMs: env.ulipFinalPollDelayMin * 60_000,
+      },
+      logger,
+    );
+  }
+
   const lock = new LeaderLock(redis, {
     key: SCHEDULER_LEADER_KEY,
     ttlMs: env.leaderLockTtlMs,
@@ -147,6 +173,21 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
   if (simPolls) {
     const dispatcher = simPolls;
     loops.push(leaderLoop('sim-dispatch', SIM_DISPATCH_MS, () => dispatcher.dispatch()));
+  }
+
+  if (fastag) {
+    const lifecycle = fastag;
+    loops.push(
+      leaderLoop('fastag-lifecycle', FASTAG_LIFECYCLE_MS, async () => {
+        const result = await lifecycle.run();
+        logger.info(result, 'FASTag lifecycle tick');
+      }),
+    );
+  }
+
+  if (fastagPolls) {
+    const dispatcher = fastagPolls;
+    loops.push(leaderLoop('fastag-dispatch', FASTAG_DISPATCH_MS, () => dispatcher.dispatch()));
   }
 
   /** Runs `work` every `everyMs` while this instance is leader; never overlaps itself. */
