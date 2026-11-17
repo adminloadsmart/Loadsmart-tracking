@@ -102,7 +102,7 @@ export async function migratedDatabase(name: string, { plain = false } = {}): Pr
 export async function truncateTrackingTables(ds: DataSource): Promise<void> {
   await ds.query(
     `TRUNCATE tracking.location_points, tracking.location_points_short, tracking.episodes,
-              tracking.alerts, tracking.rule_settings, tracking.alert_outbox, tracking.trip_routes,
+              tracking.alerts, tracking.rule_settings, tracking.alert_outbox, tracking.trip_routes, tracking.trip_approach_routes,
               tracking.trip_route_status, tracking.place_geocodes, tracking.trip_notices,
               ${MAIN_TABLES}`,
   );

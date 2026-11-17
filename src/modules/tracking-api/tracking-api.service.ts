@@ -314,11 +314,25 @@ export class TrackingApiService {
   /** The route in force for the trip (planned, or the ops-approved alternate), for the map. */
   async tripRoute(scope: TenantScope, tripId: string) {
     const trip = await this.requireTrip(scope, tripId);
-    const route = (await this.repository.currentRoutes([tripId])).get(tripId);
+    const [routes, approach] = await Promise.all([
+      this.repository.currentRoutes([tripId]),
+      this.repository.approachRoute(tripId),
+    ]);
+    const route = routes.get(tripId);
     return {
       tripId,
       routeStatus: trip.route_status,
       route: routeView(route),
+      // First tracked point → loading point; display-only, null until planned / when not needed.
+      approach: approach
+        ? {
+            distanceKm: round1(Number(approach.distance_m) / 1000),
+            durationMin:
+              approach.duration_s === null ? null : Math.round(Number(approach.duration_s) / 60),
+            encoding: 'google-polyline-5',
+            polyline: approach.polyline,
+          }
+        : null,
       ...(route
         ? { encoding: 'google-polyline-5', polyline: route.polyline }
         : { encoding: null, polyline: null }),

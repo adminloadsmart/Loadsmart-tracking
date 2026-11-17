@@ -1,8 +1,11 @@
 import type { Logger } from 'pino';
 import { Geocoder, ProviderError, RouteProvider } from './google.client';
-import { RoutesRepository, TripNeedingRoute } from './routes.repository';
+import { haversineMeters } from '../processing/geo';
+import { RoutesRepository, TripNeedingApproach, TripNeedingRoute } from './routes.repository';
 
 const BATCH = 20;
+/** A first point this close to the loading point has no approach leg worth drawing. */
+const APPROACH_MIN_M = 1_000;
 
 /**
  * Plans each active trip's road route ONCE (Google Routes API), from the loading point to the
@@ -31,7 +34,38 @@ export class RoutePlanner {
         await this.repository.setRouteStatus(trip.id, 'error', true);
       }
     }
+    await this.planApproaches();
     return planned;
+  }
+
+  /**
+   * The approach leg — first tracked point → loading point — planned once per trip as soon as its first
+   * point arrives (not waiting for the main route), display-only. Provider failures are left to retry on the next run; "no route" or "already
+   * there" is stored as an empty row so it is not asked again.
+   */
+  private async planApproaches(): Promise<void> {
+    if (!this.provider) return;
+    const trips = await this.repository.tripsNeedingApproach(BATCH);
+    for (const trip of trips) {
+      try {
+        await this.planApproach(this.provider, trip);
+      } catch (err) {
+        this.logger.warn({ err, tripId: trip.id }, 'Approach route planning failed');
+      }
+    }
+  }
+
+  private async planApproach(provider: RouteProvider, trip: TripNeedingApproach): Promise<void> {
+    const route =
+      haversineMeters(trip.origin, trip.destination) < APPROACH_MIN_M
+        ? null
+        : await provider.computeRoute(trip.origin, trip.destination);
+    await this.repository.saveApproachRoute({
+      tripId: trip.id,
+      origin: trip.origin,
+      route,
+      provider: provider.name,
+    });
   }
 
   private async plan(trip: TripNeedingRoute): Promise<boolean> {

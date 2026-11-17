@@ -37,7 +37,27 @@ export interface InTransitTrip {
   promised_delivery_at: Date | null;
 }
 
+export interface TripNeedingApproach {
+  id: string;
+  origin: { lat: number; lng: number };
+  destination: { lat: number; lng: number };
+}
+
+export interface ApproachRouteRow {
+  trip_id: string;
+  polyline: string | null;
+  distance_m: number | null;
+  duration_s: number | null;
+}
+
 const MAX_BACKOFF_MIN = 360;
+/** The drive to the plant — after loading, a first point no longer starts an approach. */
+const APPROACH_STATUSES: readonly string[] = [
+  'truck_assigned',
+  'in_transit_loading',
+  'reached_loading',
+];
+const APPROACH_TABLE = 'tracking.trip_approach_routes';
 
 export class RoutesRepository {
   private readonly mainData: MainDataRepository;
@@ -103,6 +123,89 @@ export class RoutesRepository {
           : null,
       };
     });
+  }
+
+  /**
+   * Trips still heading to the plant with no approach leg yet, with the first point the
+   * truck was tracked at (origin) and the loading point (destination). Trips with no tracked
+   * point yet are left for a later run.
+   */
+  async tripsNeedingApproach(limit: number): Promise<TripNeedingApproach[]> {
+    const active = await this.mainData.activeLoads();
+    if (active.length === 0) return [];
+    const ids = active.map((l) => l.id);
+
+    const done = await this.dataSource
+      .createQueryBuilder()
+      .select('a.trip_id', 'trip_id')
+      .from(APPROACH_TABLE, 'a')
+      .where('a.trip_id IN (:...ids)', { ids })
+      .getRawMany<{ trip_id: string }>();
+    const hasApproach = new Set(done.map((r) => r.trip_id));
+    // Only while the truck is still on its way to the plant: its first point as soon as the truck
+    // is assigned, independent of whether the loading → delivery route is planned yet.
+    const pending = active
+      .filter(
+        (l) => APPROACH_STATUSES.includes(l.status) && !hasApproach.has(l.id) && l.loadingPointId,
+      )
+      .slice(0, limit);
+    if (pending.length === 0) return [];
+
+    const places = await this.mainData.places(
+      pending.map((l) => l.loadingPointId).filter((x): x is string => !!x),
+      [],
+    );
+    const result: TripNeedingApproach[] = [];
+    for (const load of pending) {
+      const loading = load.loadingPointId ? places.get(load.loadingPointId) : undefined;
+      if (!loading || loading.lat === null || loading.lng === null) continue;
+      const first = await this.dataSource
+        .createQueryBuilder()
+        .select(['p.lat AS lat', 'p.lng AS lng'])
+        .from('tracking.location_points', 'p')
+        .where('p.trip_id = :tripId', { tripId: load.id })
+        .orderBy('p.recorded_at', 'ASC')
+        .limit(1)
+        .getRawOne<{ lat: number; lng: number }>();
+      if (!first) continue;
+      result.push({
+        id: load.id,
+        origin: { lat: Number(first.lat), lng: Number(first.lng) },
+        destination: { lat: loading.lat, lng: loading.lng },
+      });
+    }
+    return result;
+  }
+
+  async saveApproachRoute(input: {
+    tripId: string;
+    origin: { lat: number; lng: number };
+    route: { polyline: string; distanceM: number; durationS: number | null } | null;
+    provider: string | null;
+  }): Promise<void> {
+    await this.dataSource
+      .createQueryBuilder()
+      .insert()
+      .into(APPROACH_TABLE, [
+        'trip_id',
+        'origin_lat',
+        'origin_lng',
+        'polyline',
+        'distance_m',
+        'duration_s',
+        'provider',
+      ])
+      .values({
+        trip_id: input.tripId,
+        origin_lat: input.origin.lat,
+        origin_lng: input.origin.lng,
+        polyline: input.route?.polyline ?? null,
+        distance_m: input.route?.distanceM ?? null,
+        duration_s: input.route?.durationS ?? null,
+        provider: input.route ? input.provider : null,
+      })
+      .orIgnore()
+      .execute();
   }
 
   async setRouteStatus(tripId: string, status: string, attempted: boolean): Promise<void> {

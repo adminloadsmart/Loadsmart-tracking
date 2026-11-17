@@ -34,6 +34,13 @@ export interface PlannedRouteRow {
   created_at: Date;
 }
 
+export interface ApproachRouteRow {
+  trip_id: string;
+  polyline: string;
+  distance_m: number;
+  duration_s: number | null;
+}
+
 export interface TripRow {
   id: string;
   tenant_id: string;
@@ -222,6 +229,20 @@ export class TrackingApiRepository {
       [tripIds],
     );
     return new Map(rows.map((row) => [row.trip_id, row]));
+  }
+
+  /** The display-only approach leg (first tracked point → loading point), when one was drawn. */
+  async approachRoute(tripId: string): Promise<ApproachRouteRow | null> {
+    const row = await this.dataSource
+      .createQueryBuilder()
+      .select(['a.trip_id AS trip_id', 'a.polyline AS polyline'])
+      .addSelect('a.distance_m', 'distance_m')
+      .addSelect('a.duration_s', 'duration_s')
+      .from('tracking.trip_approach_routes', 'a')
+      .where('a.trip_id = :tripId', { tripId })
+      .andWhere('a.polyline IS NOT NULL')
+      .getRawOne<ApproachRouteRow>();
+    return row ?? null;
   }
 
   /** Raw trip points in time order (playback). */
