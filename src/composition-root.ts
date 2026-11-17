@@ -4,10 +4,25 @@ import type { Logger } from 'pino';
 import { DataSource } from 'typeorm';
 import { createAlertsModule } from './modules/alerts';
 import { createAddressResolver } from './modules/geocoding';
+import {
+  createSimConsentRoutes,
+  SimConsentApiService,
+  SimConsentRepository,
+  SimConsentService,
+  SimTripRepository,
+  type SimConsentOptions,
+  type SimProvider,
+} from './modules/ingest-sim';
+import { MainDataRepository } from './modules/main-data';
 import { createRoutesModule, RouteProvider } from './modules/routes';
 import { createTrackingApiModule } from './modules/tracking-api';
 import { createTokenBlocklist } from './shared/auth/token-blocklist';
 import { createStaffAuth } from './shared/middleware/staff-auth.middleware';
+
+/** Stands in for Intugine where it is not configured: only the consent status is read there. */
+const UNCONFIGURED_SIM_PROVIDER = new Proxy({} as SimProvider, {
+  get: () => () => Promise.reject(new Error('SIM provider is not configured')),
+});
 
 export interface RouterMount {
   path: string;
@@ -34,6 +49,9 @@ export interface ContainerDeps {
   googleMapsApiKey?: string;
   /** Test override for route planning (fixture provider). */
   routeProvider?: RouteProvider | null;
+  /** Intugine, for sending the SIM consent SMS again; without it the consent status is still shown. */
+  simProvider?: SimProvider | null;
+  simConsentOptions?: SimConsentOptions;
 }
 
 /**
@@ -55,6 +73,18 @@ export function buildContainer(deps: ContainerDeps): Container {
     googleMapsApiKey: deps.googleMapsApiKey,
     provider: deps.routeProvider,
   });
+  const simTrips = new SimTripRepository(deps.dataSource);
+  const simConsent = new SimConsentApiService(
+    new MainDataRepository(deps.dataSource),
+    simTrips,
+    new SimConsentService(
+      simTrips,
+      deps.simProvider ?? UNCONFIGURED_SIM_PROVIDER,
+      deps.simConsentOptions ?? { checkIntervalMs: 60 * 60_000, ttlMs: 12 * 60 * 60_000 },
+      new SimConsentRepository(deps.dataSource),
+    ),
+    !!deps.simProvider,
+  );
   return {
     publicRouters: [],
     authMiddleware: createStaffAuth({
@@ -65,6 +95,7 @@ export function buildContainer(deps: ContainerDeps): Container {
       { path: '', router: trackingApi.router },
       { path: '', router: alerts.router },
       { path: '', router: routes.router },
+      { path: '', router: createSimConsentRoutes(simConsent) },
     ],
   };
 }

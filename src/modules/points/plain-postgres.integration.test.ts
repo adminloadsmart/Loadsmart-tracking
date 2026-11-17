@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { readdirSync } from 'fs';
+import { join } from 'path';
 import { Client } from 'pg';
 import pino from 'pino';
 import { DataSource } from 'typeorm';
@@ -29,7 +31,9 @@ describe.skipIf(!available)('plain PostgreSQL (no TimescaleDB / PostGIS)', () =>
     await admin.query(`DROP DATABASE IF EXISTS ${DB}`);
     await admin.end();
     ds = await migratedDatabase(DB, { plain: true });
-  });
+    // A whole database is created and migrated here, with the other suites using Postgres at the
+    // same time; the default 10 s hook timeout was not enough once there were 10 migrations.
+  }, 60_000);
   afterAll(async () => {
     await ds?.destroy();
   });
@@ -51,7 +55,11 @@ describe.skipIf(!available)('plain PostgreSQL (no TimescaleDB / PostGIS)', () =>
       ]),
     );
     expect(await ds.query(`SELECT count(*)::int AS n FROM public.tracking_migrations`)).toEqual([
-      { n: 6 },
+      // Every migration file ran (the count used to be hard-coded and went stale).
+      {
+        n: readdirSync(join(__dirname, '../../db/migrations')).filter((f) => f.endsWith('.ts'))
+          .length,
+      },
     ]);
     expect(await ds.query(`SELECT to_regclass('public.migrations') AS t`)).toEqual([{ t: null }]);
     // Tracking keeps no copies of the main backend's data (it reads main's tables directly).

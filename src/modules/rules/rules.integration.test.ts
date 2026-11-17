@@ -142,9 +142,40 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
       northM,
     ]);
 
-  it('a 12-minute halt on a trip → one episode, one Warning alert, on /live and in the outbox', async () => {
+  it('a SIM truck parked across 20-minute pings → HALT-SIM alert once past 30 minutes (SIM pings are old when they arrive)', async () => {
     const trip = await startTrip();
-    await feed(trip, parked(-12 * 60, 0));
+    const simPoint = (offsetS: number, northM: number): NormalizedPoint => ({
+      tenantId: trip.tenantId,
+      vehicleId: trip.vehicleId,
+      tripId: trip.tripId,
+      source: 'sim',
+      sourceRef: 'intugine-1',
+      recordedAt: new Date(Date.now() + offsetS * 1000).toISOString(),
+      receivedAt: new Date().toISOString(),
+      lat: Number((28.6 + northM / 111_195).toFixed(6)),
+      lng: 77.2,
+      speedKmh: null,
+      heading: null,
+      accuracyM: 300,
+      flags: null,
+    });
+    // Oldest ping 57 min old: past the 10-min window GPS fixes get, inside the SIM one.
+    await points.publisher.publish([
+      simPoint(-3400, 0),
+      simPoint(-2200, 200),
+      simPoint(-1000, -300),
+      simPoint(-10, 150),
+    ]);
+    await drainPointStreams(redis, allPointStreamKeys(PARTITIONS), (s, e) =>
+      points.processing.handleBatch(s, e),
+    );
+    const alerts = await ds.query(`SELECT rule_id, severity, status FROM tracking.alerts`);
+    expect(alerts).toEqual([{ rule_id: 'HALT-SIM', severity: 'warning', status: 'open' }]);
+  });
+
+  it('a 32-minute halt on a trip → one episode, one Warning alert, on /live and in the outbox', async () => {
+    const trip = await startTrip();
+    await feed(trip, parked(-32 * 60, 0));
 
     const [episode] = await ds.query(`SELECT * FROM tracking.episodes WHERE trip_id = $1`, [
       trip.tripId,
@@ -195,7 +226,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
 
   it('redelivering the same batch changes nothing (idempotent effects)', async () => {
     const trip = await startTrip();
-    const fixes = parked(-12 * 60, 0);
+    const fixes = parked(-32 * 60, 0);
     await feed(trip, fixes);
     await feed(trip, fixes); // same device times → late → no rule input
     expect(await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts`)).toEqual([{ n: 1 }]);
@@ -204,7 +235,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
 
   it('acknowledge and close via the API; closing writes an outbox event; tenant isolation', async () => {
     const trip = await startTrip();
-    await feed(trip, parked(-12 * 60, 0));
+    await feed(trip, parked(-32 * 60, 0));
     const alertId = (await api('get', '/v1/alerts')).body.data.alerts[0].alertId;
 
     const ack = await api('post', `/v1/alerts/${alertId}/acknowledge`);
@@ -231,7 +262,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
 
   it('outbox relay publishes to tracking.events and empties the outbox', async () => {
     const trip = await startTrip();
-    await feed(trip, parked(-12 * 60, 0));
+    await feed(trip, parked(-32 * 60, 0));
     const relay = new OutboxRelay(ds, redis);
     expect(await relay.relay()).toBe(1);
     const [[, fields]] = (await redis.xrange(TRACKING_EVENTS_STREAM, '-', '+')) as Array<
@@ -297,16 +328,16 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
     });
     expect(bad.status).toBe(400);
     const ok = await api('put', '/v1/rule-settings/HALT-GPS', admin).send({
-      params: { recordAfterS: 300 },
+      params: { recordAfterS: 300, alertAfterS: 300 },
     });
     expect(ok.body.data).toMatchObject({
       ruleId: 'HALT-GPS',
-      params: { recordAfterS: 300, haltRadiusM: 150 },
+      params: { recordAfterS: 300, alertAfterS: 300, haltRadiusM: 150 },
     });
 
     rules.engine.invalidateSettings(TENANT);
     const trip = await startTrip();
-    await feed(trip, parked(-6 * 60, 0)); // 6 min: enough with the 5-min override
+    await feed(trip, parked(-6 * 60, 0)); // 6 min: enough with the 5-min overrides
     expect(
       await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts WHERE rule_id = 'HALT-GPS'`),
     ).toEqual([{ n: 1 }]);

@@ -5,7 +5,9 @@ import { createJobQueue } from '../jobs/queue-registry';
 import { ROADCAST_QUEUE, RoadcastDispatcher } from '../modules/ingest-roadcast';
 import {
   IntugineClient,
+  SimConsentRepository,
   SimConsentService,
+  simConsentOptionsFromEnv,
   SIM_POLL_QUEUE,
   SimLifecycleService,
   RedisSimCursors,
@@ -18,6 +20,7 @@ import {
   FastagPollDispatcher,
   FastagTripRepository,
 } from '../modules/ingest-ulip';
+import { createGeofencesModule, dwellOptionsFromEnv } from '../modules/geofences';
 import { PointRetentionJob } from '../modules/points/retention.job';
 import { createRoutesModule } from '../modules/routes';
 import { createRulesModule, OutboxRelay } from '../modules/rules';
@@ -28,6 +31,7 @@ import { RoleStarter } from '../shared/lifecycle/role-runner';
 export const SCHEDULER_LEADER_KEY = 'tracking:scheduler:leader';
 
 const RULES_TICK_MS = 60_000;
+const GEOFENCE_DWELL_TICK_MS = 30_000;
 // Loads (= trips) are read from the main backend's table: poll changes, plus a periodic full
 // rebuild as a safety net for writes that don't touch updated_at.
 const TRIP_WATCH_MS = 5_000;
@@ -55,6 +59,13 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
     redis,
     logger,
     googleMapsApiKey: env.googleMapsApiKey,
+  });
+  const geofences = createGeofencesModule({
+    dataSource,
+    redis,
+    activeTrips: trips.activeTrips,
+    logger,
+    dwell: dwellOptionsFromEnv(env),
   });
   const rules = createRulesModule({
     dataSource,
@@ -97,12 +108,15 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
       trips.mainData,
       store,
       provider,
-      new SimConsentService(store, provider, {
-        checkIntervalMs: env.intugineConsentCheckMin * 60_000,
-        ttlMs: env.intugineConsentTtlMin * 60_000,
-      }),
+      new SimConsentService(
+        store,
+        provider,
+        simConsentOptionsFromEnv(env),
+        new SimConsentRepository(dataSource),
+      ),
       new RedisSimCursors(redis),
       logger,
+      { maxAfterDeliveryMs: env.simMaxAfterDeliveryHours * 60 * 60_000 },
     );
     simPolls = new SimPollDispatcher(
       store,
@@ -147,6 +161,7 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
     leaderLoop('trip-watcher', TRIP_WATCH_MS, () => trips.watcher.poll()),
     leaderLoop('trip-index-rebuild', TRIP_REBUILD_MS, () => trips.watcher.rebuild()),
     leaderLoop('rules-tick', RULES_TICK_MS, () => rules.tick()),
+    leaderLoop('geofence-dwell', GEOFENCE_DWELL_TICK_MS, () => geofences.tick()),
     leaderLoop('route-planner', ROUTE_PLANNER_MS, () => routes.planner.planPending()),
     leaderLoop('point-retention', RETENTION_MS, () => retention.run()),
     leaderLoop('outbox-relay', OUTBOX_RELAY_MS, async () => {

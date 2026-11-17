@@ -9,7 +9,7 @@ import type { ActiveTripIndex } from '../trips';
 import { InactivityMonitor } from './inactivity.monitor';
 import { RuleEngine } from './rule-engine';
 import { AlertChange, RulesRepository } from './rules.repository';
-import { haltGpsRule } from './rules/halt-gps.rule';
+import { haltGpsRule, haltSimRule } from './rules/halt-gps.rule';
 import { nightGpsRule } from './rules/night-gps.rule';
 import { overspeedGpsRule } from './rules/overspeed-gps.rule';
 import { deviationGpsRule } from './rules/deviation-gps.rule';
@@ -21,6 +21,7 @@ import type { FixRule } from './rule.types';
 /** Fix-driven rules active today (docs/rules.md). Device and SIM rules join as their sources land. */
 export const FIX_RULES: FixRule[] = [
   haltGpsRule as FixRule,
+  haltSimRule as FixRule,
   overspeedGpsRule as FixRule,
   nightGpsRule as FixRule,
   deviationGpsRule as FixRule,

@@ -144,6 +144,26 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     }
   });
 
+  it('stops tracking the old truck when the truck is cancelled (back to bids_received)', async () => {
+    const load = await seedLoad(ds, { tenantId: TENANT, status: 'truck_assigned' });
+    await trips.watcher.poll();
+    expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBe(load.loadId);
+    // What main's TruckCancellationService writes: stage back, truck, driver and source cleared.
+    await updateLoad(ds, load.loadId, {
+      status: 'bids_received',
+      vehicle_id: null,
+      vehicle_number: null,
+      driver_id: null,
+      driver_name: null,
+      driver_number: null,
+      tracking_source: null,
+    });
+    await trips.watcher.poll();
+    expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBeNull();
+    expect(await redis.get(driverActiveTripKey(load.driverId!))).toBeNull();
+    expect(await redis.exists(tripRefKey(load.loadId))).toBe(0);
+  });
+
   it('releases the old driver when a load is reassigned', async () => {
     const load = await seedLoad(ds, { tenantId: TENANT });
     await trips.watcher.poll();
@@ -157,7 +177,7 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
   it('market trucks get a stable vehicle id from the plate (no vehicle row needed)', async () => {
     const load = await seedLoad(ds, {
       tenantId: TENANT,
-      sourceType: 'market',
+      postingType: 'market_fleet',
       vehicleNumber: 'mh12 ab-9999',
     });
     await trips.watcher.poll();

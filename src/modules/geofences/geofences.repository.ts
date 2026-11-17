@@ -15,6 +15,22 @@ export interface GeofenceEventRecord {
   outbox: Array<{ type: string; payload: Record<string, unknown> }>;
 }
 
+/** One dwell milestone to record (arrival after the stop wait, detention), with its outbox events. */
+export interface GeofenceDwellRecord {
+  /** Deterministic (vehicle|geofence|kind|time), so a re-run inserts nothing new. */
+  id: string;
+  tenantId: string;
+  geofenceId: string;
+  vehicleId: string;
+  loadId: string | null;
+  kind: 'arrival' | 'detention';
+  since: Date;
+  occurredAt: Date;
+  lat: number;
+  lng: number;
+  outbox: Array<{ type: string; payload: Record<string, unknown> }>;
+}
+
 /**
  * Writes geofence transitions: the enter/exit log (tracking.geofence_events, the table main's
  * CreateGeofences migration made for it) and the outbox rows the relay forwards on
@@ -45,6 +61,44 @@ export class GeofencesRepository {
             e.lat.toFixed(6),
             e.lng.toFixed(6),
             e.occurredAt,
+          ],
+        );
+        if (rows.length === 0) continue;
+        inserted += 1;
+        for (const { type, payload } of e.outbox) {
+          await manager.query(
+            `INSERT INTO tracking.alert_outbox (event_type, payload) VALUES ($1, $2)`,
+            [type, JSON.stringify(payload)],
+          );
+        }
+      }
+      return inserted;
+    });
+  }
+
+  /** Same shape as record(): the dwell log row and its outbox events in one transaction. */
+  async recordDwell(events: GeofenceDwellRecord[]): Promise<number> {
+    if (events.length === 0) return 0;
+    return this.dataSource.transaction(async (manager) => {
+      let inserted = 0;
+      for (const e of events) {
+        const rows: Array<{ id: string }> = await manager.query(
+          `INSERT INTO tracking.geofence_dwell_events
+             (id, tenant_id, geofence_id, vehicle_id, load_id, kind, since, occurred_at, latitude, longitude)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (id) DO NOTHING
+           RETURNING id`,
+          [
+            e.id,
+            e.tenantId,
+            e.geofenceId,
+            e.vehicleId,
+            e.loadId,
+            e.kind,
+            e.since,
+            e.occurredAt,
+            e.lat.toFixed(6),
+            e.lng.toFixed(6),
           ],
         );
         if (rows.length === 0) continue;

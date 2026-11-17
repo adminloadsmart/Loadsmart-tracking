@@ -1,7 +1,8 @@
 import { env } from '../config/env';
 import { createRedisConnection } from '../db/redis-connection';
 import { redisManager } from '../db/redis';
-import { createGeofencesModule } from '../modules/geofences';
+import { createGeofencesModule, dwellOptionsFromEnv } from '../modules/geofences';
+import { createTripStartModule, tripStartOptionsFromEnv } from '../modules/trip-start';
 import { createLivePublisher } from '../modules/live';
 import { composeHooks, createPointsModule } from '../modules/points';
 import { createRoutesModule } from '../modules/routes';
@@ -27,7 +28,19 @@ export const startProcessorRole: RoleStarter = async ({ dataSource, health, logg
   const { activeTrips } = createTripsModule(dataSource, redis, logger);
   const routes = createRoutesModule({ dataSource, redis, logger });
   const rules = createRulesModule({ dataSource, redis, activeTrips, logger, routes });
-  const geofences = createGeofencesModule({ dataSource, redis, activeTrips, logger });
+  const geofences = createGeofencesModule({
+    dataSource,
+    redis,
+    activeTrips,
+    logger,
+    dwell: dwellOptionsFromEnv(env),
+  });
+  const tripStart = createTripStartModule({
+    dataSource,
+    redis,
+    logger,
+    options: tripStartOptionsFromEnv(env),
+  });
   const points = createPointsModule(
     dataSource,
     redis,
@@ -37,7 +50,7 @@ export const startProcessorRole: RoleStarter = async ({ dataSource, health, logg
     },
     { maxAccuracyM: env.phoneMaxAccuracyM },
     { onLatestPositions: createLivePublisher(redis).publish, logger },
-    composeHooks(rules.hook, geofences.hook),
+    composeHooks(rules.hook, geofences.hook, tripStart.hook),
   );
 
   const leases = new PartitionLeaseManager({

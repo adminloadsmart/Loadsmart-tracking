@@ -18,7 +18,9 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
     params: {
       haltSpeedKmh: 5, // a fix is halted below this speed…
       haltRadiusM: 150, // …AND within this distance of the anchor
-      recordAfterS: 600, // halt recorded (and alerted) once it lasts 10 min
+      recordAfterS: 600, // halt recorded (an episode, for the journey timeline) once it lasts 10 min
+      alertAfterS: 1800, // …and alerted (alert.opened → main backend) once it lasts 30 min
+      anchorFixes: 3, // anchor = median of this many first halted fixes
       endSpeedKmh: 10, // ends when speed ≥ this…
       endSpeedHoldS: 120, // …for 120 s
       endRadiusM: 300, // …or a fix is further than this from the anchor
@@ -27,6 +29,27 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
       gapS: 600, // fixes further apart than this are a data gap…
       gapSameSpotM: 200, // …which continues the halt only if both sides are within 200 m
       reminderEveryMin: 0, // 0 = alert once
+    },
+  },
+  // SIM: a coarse fix (cell tower, ±hundreds of m to km) every 10-20 min and no speed, so the
+  // speed is the one implied by two fixes and every radius / gap is wider than GPS's.
+  'HALT-SIM': {
+    enabled: true,
+    audience: ['shipper', 'trip_ops', 'fleet_owner'],
+    params: {
+      haltSpeedKmh: 5,
+      haltRadiusM: 1000,
+      recordAfterS: 600,
+      alertAfterS: 1800, // reached by the first fix after 30 min: up to one poll interval late
+      anchorFixes: 2, // 3 fixes would be 40+ min of the halt
+      endSpeedKmh: 10,
+      endSpeedHoldS: 0, // a second fix 20 min later would delay the end by a whole interval
+      endRadiusM: 2500,
+      clubGapS: 2400,
+      clubRadiusM: 1500,
+      gapS: 3000, // two missed polls (20 min each) are not yet "no data"
+      gapSameSpotM: 1000,
+      reminderEveryMin: 0,
     },
   },
   'OVER-GPS': {

@@ -436,7 +436,7 @@ Durations assume 1–2 backend developers. Phases 4, 5 and 8 depend on provider 
 - The "planned distance" figure used for SIM distance travelled: ours or Intugine's (before Phase 5).
 - Retention windows (before Phase 1 migrations).
 - Boundary dataset licence (before Phase 7).
-- Market trucks (`sourceType=market`, free-text `vehicleNumber`) only have phone, SIM and ULIP. Decide how a tracking vehicle identity is created for them (before Phase 1).
+- Market trucks (`posting_type` other than `own_fleet`, free-text `vehicleNumber`; main replaced `source_type` with `posting_type` + `route`) only have phone, SIM and ULIP. Decide how a tracking vehicle identity is created for them (before Phase 1).
 
 ## 13. Verification
 - **Unit tests (vitest):**

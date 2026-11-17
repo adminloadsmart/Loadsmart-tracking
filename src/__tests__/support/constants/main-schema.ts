@@ -41,12 +41,17 @@ export const MAIN_SCHEMA_SQL = `
     expected_delivery_date date NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
   CREATE TABLE IF NOT EXISTS loads.loads (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, code text NOT NULL, status text NOT NULL,
-    source_type text NOT NULL, requisition_id uuid NOT NULL, vehicle_id uuid, vehicle_number text,
+    posting_type text NOT NULL, route text, requisition_id uuid NOT NULL, vehicle_id uuid, vehicle_number text,
     driver_id uuid, driver_name text, driver_number text, planned_capacity_tonnes numeric,
     loading_confirmed_at timestamptz,
     truck_assigned_at timestamptz, in_transit_loading_at timestamptz,
     at_plant_at timestamptz, in_transit_at timestamptz, reached_delivery_point_at timestamptz,
     delivered_at timestamptz, closed_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now());
+  -- A test database made before main's load-module change still has the dropped source_type.
+  ALTER TABLE loads.loads DROP COLUMN IF EXISTS source_type;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS posting_type text NOT NULL DEFAULT 'own_fleet';
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS route text;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS pod_status text;
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS planned_capacity_tonnes numeric;
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS posting_id uuid;
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS truck_assigned_at timestamptz;

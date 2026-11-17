@@ -24,6 +24,10 @@ export interface SimTripRow {
   lastError: string | null;
   /** A start-trip call was made (so Intugine may hold a trip even if we never saw its id). */
   startAttempted: boolean;
+  /** The load found a valid consent for this number already on file (shown as "Valid"). */
+  consentReused: boolean;
+  endReason: string | null;
+  createdAt: Date;
 }
 
 export interface NewSimTrip {
@@ -32,6 +36,8 @@ export interface NewSimTrip {
   vehicleId: string;
   driverId: string | null;
   phone: string;
+  /** A valid consent is already on file for the number: the row starts consented, no SMS. */
+  reusedConsent?: boolean;
 }
 
 /** What a consent answer (or failure) changes on a row. */
@@ -54,6 +60,8 @@ export interface ConsentUpdate {
 export interface SimTripStore {
   /** The trip's row unless it has finished (ended, unsupported or failed). */
   findLiveByTrip(tripId: string): Promise<SimTripRow | null>;
+  /** The trip's newest row, finished or not (what the console's consent status is read from). */
+  findLatestByTrip(tripId: string): Promise<SimTripRow | null>;
   /** Null if another process created the live row first. */
   insert(input: NewSimTrip): Promise<SimTripRow | null>;
   updateConsent(id: string, update: ConsentUpdate): Promise<void>;
@@ -68,8 +76,11 @@ export interface SimTripStore {
    * moves forward; `error` records a failed poll and is cleared by the next good one.
    */
   markPolled(id: string, now: Date, result: { lastPointAt?: Date; error?: string }): Promise<void>;
-  /** Of these loads, the ones whose SIM row already ended as unsupported / failed (never ask again). */
-  loadsWithFinishedConsent(loadIds: string[]): Promise<Set<string>>;
+  /** Of these loads, the ones whose SIM row for the SAME number already ended as unsupported / failed
+   *  (never ask again). A new driver after a truck change is a new number, so is asked afresh. */
+  loadsWithFinishedConsent(
+    loads: Array<{ id: string; phone: string | null }>,
+  ): Promise<Set<string>>;
   /** Another trip already using this number on Intugine. */
   activeByPhone(phone: string, exceptTripId: string): Promise<SimTripRow | null>;
   /** Records the payload about to be sent, before the call, so a lost response can be traced. */
@@ -94,7 +105,8 @@ const COLUMNS = `
   consent_last_checked_at AS "consentLastCheckedAt",
   consent_expires_at AS "consentExpiresAt",
   state, intugine_trip_id AS "intugineTripId", attempts, last_error AS "lastError",
-  (start_payload IS NOT NULL) AS "startAttempted"`;
+  (start_payload IS NOT NULL) AS "startAttempted", consent_reused AS "consentReused",
+  end_reason AS "endReason", created_at AS "createdAt"`;
 
 const LIVE = `state IN ('awaiting_consent', 'consented', 'active', 'paused')`;
 
@@ -111,13 +123,35 @@ export class SimTripRepository implements SimTripStore {
     return rows[0] ?? null;
   }
 
-  async insert(input: NewSimTrip): Promise<SimTripRow | null> {
+  async findLatestByTrip(tripId: string): Promise<SimTripRow | null> {
     const rows: SimTripRow[] = await this.dataSource.query(
-      `INSERT INTO tracking.sim_trips (id, tenant_id, load_id, vehicle_id, driver_id, phone)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `SELECT ${COLUMNS} FROM tracking.sim_trips WHERE load_id = $1
+       ORDER BY created_at DESC LIMIT 1`,
+      [tripId],
+    );
+    return rows[0] ?? null;
+  }
+
+  async insert(input: NewSimTrip): Promise<SimTripRow | null> {
+    const reused = input.reusedConsent ?? false;
+    const rows: SimTripRow[] = await this.dataSource.query(
+      `INSERT INTO tracking.sim_trips
+         (id, tenant_id, load_id, vehicle_id, driver_id, phone, consent_reused,
+          state, operator_consent_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7,
+               CASE WHEN $7 THEN 'consented' ELSE 'awaiting_consent' END,
+               CASE WHEN $7 THEN 'allowed' ELSE 'pending' END)
        ON CONFLICT (load_id) WHERE state NOT IN ('ended', 'unsupported', 'failed') DO NOTHING
        RETURNING ${COLUMNS}`,
-      [randomUUID(), input.tenantId, input.tripId, input.vehicleId, input.driverId, input.phone],
+      [
+        randomUUID(),
+        input.tenantId,
+        input.tripId,
+        input.vehicleId,
+        input.driverId,
+        input.phone,
+        reused,
+      ],
     );
     return rows[0] ?? null;
   }
@@ -197,12 +231,17 @@ export class SimTripRepository implements SimTripStore {
     );
   }
 
-  async loadsWithFinishedConsent(loadIds: string[]): Promise<Set<string>> {
-    if (loadIds.length === 0) return new Set();
+  async loadsWithFinishedConsent(
+    loads: Array<{ id: string; phone: string | null }>,
+  ): Promise<Set<string>> {
+    const withPhone = loads.filter((l): l is { id: string; phone: string } => !!l.phone);
+    if (withPhone.length === 0) return new Set();
     const rows: Array<{ load_id: string }> = await this.dataSource.query(
-      `SELECT DISTINCT load_id FROM tracking.sim_trips
-       WHERE load_id = ANY($1::uuid[]) AND state IN ('unsupported', 'failed')`,
-      [loadIds],
+      `SELECT DISTINCT s.load_id FROM tracking.sim_trips s
+       JOIN unnest($1::uuid[], $2::text[]) AS l(load_id, phone)
+         ON l.load_id = s.load_id AND l.phone = s.phone
+       WHERE s.state IN ('unsupported', 'failed')`,
+      [withPhone.map((l) => l.id), withPhone.map((l) => l.phone)],
     );
     return new Set(rows.map((r) => r.load_id));
   }

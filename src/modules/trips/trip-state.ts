@@ -11,7 +11,6 @@ export const LOAD_STATUSES = [
   'reached_unloading',
   'delivered_ok',
   'delivered_with_issues',
-  'original_pod_received',
   'invoice_generated',
   'payment',
   'closed',
@@ -31,7 +30,6 @@ export const ACTIVE_STATUSES: readonly LoadStatus[] = [
 const ENDED_STATUSES: readonly LoadStatus[] = [
   'delivered_ok',
   'delivered_with_issues',
-  'original_pod_received',
   'invoice_generated',
   'payment',
   'closed',

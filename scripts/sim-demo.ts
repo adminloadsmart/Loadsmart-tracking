@@ -37,6 +37,10 @@ import type { ActiveTripIndex, TripRef } from '../src/modules/trips';
 import type { LoadStatus } from '../src/modules/trips/trip-state';
 import { IntugineError, type SimProvider } from '../src/modules/ingest-sim/intugine.client';
 import type { SimConsent } from '../src/modules/ingest-sim/intugine.contract';
+import {
+  MemoryConsentStore,
+  SimConsentRepository,
+} from '../src/modules/ingest-sim/sim-consent.repository';
 import { SimConsentService } from '../src/modules/ingest-sim/sim-consent.service';
 import {
   SimLifecycleService,
@@ -412,10 +416,12 @@ const mainData: SimMainData = realMainData
         realMainData.places(loadingPointIds, deliveryPointIds),
     }
   : memoryMainData;
-const consent = new SimConsentService(store, provider, {
-  checkIntervalMs: CONSENT_CHECK_MIN * MIN,
-  ttlMs: CONSENT_TTL_MIN * MIN,
-});
+const consent = new SimConsentService(
+  store,
+  provider,
+  { checkIntervalMs: CONSENT_CHECK_MIN * MIN, ttlMs: CONSENT_TTL_MIN * MIN },
+  dataSource ? new SimConsentRepository(dataSource) : new MemoryConsentStore(),
+);
 const lifecycle = new SimLifecycleService(mainData, store, provider, consent, cursorStore, logger);
 const pollJob = new SimPollJob(provider, store, cursorStore, activeTrips, publisher, {
   limit: STATUS_LIMIT,
@@ -476,10 +482,10 @@ async function seedDb() {
       [DRIVER_ID, PHONE],
     );
     await tx.query(
-      `INSERT INTO loads.loads (id, tenant_id, code, status, source_type, requisition_id, vehicle_id,
+      `INSERT INTO loads.loads (id, tenant_id, code, status, posting_type, route, requisition_id, vehicle_id,
          vehicle_number, driver_id, driver_number, driver_name, planned_capacity_tonnes,
          tracking_source, truck_assigned_at, loading_point_id)
-       VALUES ($1, $2, $3, 'truck_assigned', 'market', $4, $5, $6, $7, $8, 'SIM demo driver', 1,
+       VALUES ($1, $2, $3, 'truck_assigned', 'market_fleet', 'own_transporter', $4, $5, $6, $7, $8, 'SIM demo driver', 1,
          'sim', $9, $10)`,
       [
         LOAD_ID,

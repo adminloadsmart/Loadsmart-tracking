@@ -94,6 +94,26 @@ export const env = {
   intugineConsentCheckMin: numberWithDefault('INTUGINE_CONSENT_CHECK_MIN', 60),
   // Consent is asked once the load's source is `sim`, and a driver can take hours to approve: wait this long.
   intugineConsentTtlMin: numberWithDefault('INTUGINE_CONSENT_TTL_MIN', 720),
+  // Geofence timing (to move to Super Admin settings; these are the defaults).
+  // Stopped (idle / ignition off) inside the pickup or drop geofence this long = arrived.
+  geofenceArrivalWaitMin: numberWithDefault('GEOFENCE_ARRIVAL_WAIT_MIN', 10),
+  // Inside a loading or unloading geofence this long = detention.
+  geofenceDetentionHours: numberWithDefault('GEOFENCE_DETENTION_HOURS', 24),
+  // Radius of a circle geofence that has none of its own.
+  geofenceDefaultRadiusM: numberWithDefault('GEOFENCE_DEFAULT_RADIUS_M', 300),
+  // Below this speed a truck counts as stopped.
+  geofenceStopSpeedKmh: numberWithDefault('GEOFENCE_STOP_SPEED_KMH', 5),
+  // trip.started: the truck has moved this far from where it was assigned (m)…
+  tripStartDistanceM: numberWithDefault('TRIP_START_DISTANCE_M', 3000),
+  // …and for SIM (coarse, 10-20 min apart) this many distinct pings must be that far.
+  tripStartSimMinPings: numberWithDefault('TRIP_START_SIM_MIN_PINGS', 2),
+  // A driver's SIM consent stays valid this long (months), for every load they are on.
+  simConsentValidityMonths: numberWithDefault('SIM_CONSENT_VALIDITY_MONTHS', 9),
+  // The consent SMS can be sent again by hand only after this long since the last send.
+  simConsentResendGapMin: numberWithDefault('SIM_CONSENT_RESEND_GAP_MIN', 10),
+  // A delivered load stays on SIM until its POD is accepted, but no longer than this (0 = no
+  // limit): Intugine bills by trip length, and a POD can wait for days.
+  simMaxAfterDeliveryHours: numberWithDefault('SIM_MAX_AFTER_DELIVERY_HOURS', 72),
   // ULIP FASTag toll crossings (poller role). One account for all of Loadsmart. Optional: without
   // credentials FASTag collection stays off.
   ulipApiUrl: process.env.ULIP_API_URL || undefined,

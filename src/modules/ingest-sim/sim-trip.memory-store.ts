@@ -8,17 +8,24 @@ export class MemoryStore implements SimTripStore {
   async findLiveByTrip(tripId: string) {
     return this.rows.find((r) => r.tripId === tripId && this.live(r)) ?? null;
   }
+  async findLatestByTrip(tripId: string) {
+    return [...this.rows].reverse().find((r) => r.tripId === tripId) ?? null;
+  }
   async insert(input: NewSimTrip) {
+    const { reusedConsent, ...rest } = input;
     const row: SimTripRow = {
-      ...input,
+      ...rest,
       id: `row-${this.rows.length + 1}`,
       operator: null,
-      consentStatus: 'pending',
+      consentReused: reusedConsent ?? false,
+      endReason: null,
+      createdAt: new Date(),
+      consentStatus: reusedConsent ? 'allowed' : 'pending',
       consentSuggestion: null,
       consentRequestedAt: null,
       consentLastCheckedAt: null,
       consentExpiresAt: null,
-      state: 'awaiting_consent',
+      state: reusedConsent ? 'consented' : 'awaiting_consent',
       intugineTripId: null,
       attempts: 0,
       lastError: null,
@@ -37,6 +44,7 @@ export class MemoryStore implements SimTripStore {
     row.consentExpiresAt = u.expiresAt ?? row.consentExpiresAt;
     row.attempts = u.error ? row.attempts + 1 : 0;
     row.lastError = u.error ?? null;
+    if (u.endReason) row.endReason = u.endReason;
   }
   async awaitingConsentDue(now: Date, intervalMs: number) {
     return this.rows.filter(
@@ -46,10 +54,14 @@ export class MemoryStore implements SimTripStore {
     );
   }
 
-  async loadsWithFinishedConsent(loadIds: string[]) {
+  async loadsWithFinishedConsent(loads: Array<{ id: string; phone: string | null }>) {
     return new Set(
       this.rows
-        .filter((r) => loadIds.includes(r.tripId) && ['unsupported', 'failed'].includes(r.state))
+        .filter(
+          (r) =>
+            loads.some((l) => l.id === r.tripId && l.phone === r.phone) &&
+            ['unsupported', 'failed'].includes(r.state),
+        )
         .map((r) => r.tripId),
     );
   }
@@ -103,5 +115,6 @@ export class MemoryStore implements SimTripStore {
   async markEnded(row: SimTripRow, end: Parameters<SimTripStore['markEnded']>[1]) {
     const stored = this.rows.find((r) => r.id === row.id)!;
     stored.state = end.state;
+    stored.endReason = end.reason;
   }
 }

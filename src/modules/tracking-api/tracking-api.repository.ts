@@ -47,7 +47,8 @@ export interface TripRow {
   tenant_id: string;
   load_code: string;
   load_status: string;
-  source_type: string;
+  posting_type: string;
+  route: string | null;
   vehicle_id: string | null;
   vehicle_number: string | null;
   driver_id: string | null;
@@ -79,7 +80,6 @@ const PENDING_STATUSES: readonly LoadStatus[] = ['created', 'bids_received'];
 const ENDED_STATUSES: readonly LoadStatus[] = [
   'delivered_ok',
   'delivered_with_issues',
-  'original_pod_received',
   'invoice_generated',
   'payment',
   'closed',
@@ -208,7 +208,8 @@ export class TrackingApiRepository {
       tenant_id: load.tenantId,
       load_code: load.code,
       load_status: load.status,
-      source_type: load.sourceType,
+      posting_type: load.postingType,
+      route: load.route,
       vehicle_id: load.vehicleId,
       vehicle_number: load.vehicleNumber,
       driver_id: load.driverId,
