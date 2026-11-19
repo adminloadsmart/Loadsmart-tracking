@@ -26,6 +26,8 @@ export interface SimTripRow {
   startAttempted: boolean;
   /** The load found a valid consent for this number already on file (shown as "Valid"). */
   consentReused: boolean;
+  /** Furthest load stage whose consent re-check ran (see consentStageOf). */
+  consentStage: number;
   endReason: string | null;
   createdAt: Date;
 }
@@ -65,6 +67,8 @@ export interface SimTripStore {
   /** Null if another process created the live row first. */
   insert(input: NewSimTrip): Promise<SimTripRow | null>;
   updateConsent(id: string, update: ConsentUpdate): Promise<void>;
+  /** Records that the consent re-check for this load stage ran. */
+  setConsentStage(id: string, stage: number): Promise<void>;
   /** Rows waiting on consent that have not been checked for `intervalMs` (or never). */
   awaitingConsentDue(now: Date, intervalMs: number, limit: number): Promise<SimTripRow[]>;
   /** Every row that has not finished. */
@@ -105,7 +109,7 @@ const COLUMNS = `
   consent_last_checked_at AS "consentLastCheckedAt",
   consent_expires_at AS "consentExpiresAt",
   state, intugine_trip_id AS "intugineTripId", attempts, last_error AS "lastError",
-  (start_payload IS NOT NULL) AS "startAttempted", consent_reused AS "consentReused",
+  (start_payload IS NOT NULL) AS "startAttempted", consent_reused AS "consentReused", consent_stage AS "consentStage",
   end_reason AS "endReason", created_at AS "createdAt"`;
 
 const LIVE = `state IN ('awaiting_consent', 'consented', 'active', 'paused')`;
@@ -184,6 +188,14 @@ export class SimTripRepository implements SimTripStore {
         update.endReason ?? null,
         update.error ?? null,
       ],
+    );
+  }
+
+  async setConsentStage(id: string, stage: number): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE tracking.sim_trips SET consent_stage = GREATEST(consent_stage, $2), updated_at = now()
+       WHERE id = $1`,
+      [id, stage],
     );
   }
 

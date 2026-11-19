@@ -19,7 +19,7 @@ export interface SimConsentOptions {
   ttlMs: number;
   /** Failed consent calls before the row gives up. */
   maxAttempts?: number;
-  /** How long a given consent stays valid (months; ~9). */
+  /** How long a given consent stays valid (months; 6, per the operator message). */
   validityMonths?: number;
   /** Minimum gap before the consent SMS can be sent again by hand (resend). */
   resendGapMs?: number;
@@ -38,7 +38,7 @@ export interface SimLoad {
 export type ConsentOutcome = 'ready' | 'waiting' | 'fallback' | 'no_phone';
 
 const DEFAULT_MAX_ATTEMPTS = 5;
-export const DEFAULT_CONSENT_VALIDITY_MONTHS = 9;
+export const DEFAULT_CONSENT_VALIDITY_MONTHS = 6;
 const DEFAULT_RESEND_GAP_MS = 10 * 60_000;
 
 const consentChecks = new Counter({
@@ -70,7 +70,7 @@ export interface SimConsentSummary {
 /**
  * Consent for SIM tracking, per driver mobile number (reused across loads). The driver approves by
  * phone after Intugine's SMS; here we only ask and then look.
- *  - A number with a valid consent on file (given, not withdrawn, inside its ~9 months) is never
+ *  - A number with a valid consent on file (given, not withdrawn, inside its 6 months) is never
  *    asked again: the load's row starts consented, no call, no SMS.
  *  - Otherwise the first check sends the SMS (Intugine texts a pending number on every call), so a
  *    pending one is re-checked rarely, and not at all while the number was texted recently for
@@ -110,7 +110,7 @@ export class SimConsentService {
     return this.check(existing, now);
   }
 
-  /** Re-checks pending rows that are due; expires the ones past their TTL without calling. */
+  /** Re-checks pending rows that are due; a row past its TTL gets one last call (a late approval still counts) and then gives up. */
   async checkDue(now = new Date(), limit = 50): Promise<Record<ConsentOutcome, number>> {
     const tally: Record<ConsentOutcome, number> = {
       ready: 0,
@@ -121,6 +121,22 @@ export class SimConsentService {
     const due = await this.store.awaitingConsentDue(now, this.options.checkIntervalMs, limit);
     for (const row of due) tally[await this.check(row, now)] += 1;
     return tally;
+  }
+
+  /**
+   * Re-checks a still-pending consent because its load reached a new stage (see consentStageOf),
+   * on top of the hourly re-check. Runs once per stage: the stage is recorded either way. The
+   * check re-sends the SMS, so it is skipped (but still recorded) if the number was texted within
+   * `resendGapMs`. Past the TTL it is the row's last call: a late approval still counts, otherwise it gives up.
+   */
+  async checkAtStage(row: SimTripRow, stage: number, now = new Date()): Promise<ConsentOutcome> {
+    if (row.state !== 'awaiting_consent' || stage <= row.consentStage) return outcomeOf(row);
+    await this.store.setConsentStage(row.id, stage);
+    const record = await this.consents.find(row.phone);
+    const gap = this.options.resendGapMs ?? DEFAULT_RESEND_GAP_MS;
+    if (record?.sentAt && now.getTime() - record.sentAt.getTime() < gap) return 'waiting';
+    consentChecks.inc({ result: 'stage_check' });
+    return this.check(row, now, true);
   }
 
   /** The number's consent, as the operator last told us (null: never asked). */
@@ -152,8 +168,10 @@ export class SimConsentService {
       return 'ready';
     }
     // …and a number texted a moment ago for another load is not texted again yet.
+    const expired = !!row.consentExpiresAt && row.consentExpiresAt.getTime() <= now.getTime();
     if (
       !force &&
+      !expired &&
       record?.sentAt &&
       (record.status === 'pending' || record.status === 'not_registered') &&
       now.getTime() - record.sentAt.getTime() < this.options.checkIntervalMs
@@ -167,27 +185,21 @@ export class SimConsentService {
       consentChecks.inc({ result: 'recently_sent' });
       return 'waiting';
     }
-    // Past the TTL: give up before calling, so no further SMS goes out.
-    if (row.consentExpiresAt && row.consentExpiresAt.getTime() <= now.getTime()) {
-      await this.store.updateConsent(row.id, {
-        state: 'failed',
-        checkedAt: now,
-        endReason: 'consent_timeout',
-      });
-      consentChecks.inc({ result: 'timeout' });
-      return 'fallback';
-    }
-
+    // Past the TTL this is the last call: it still accepts a late approval, otherwise the row gives up.
     let consent: SimConsent;
     try {
       consent = await this.provider.checkConsent(row.phone);
     } catch (err) {
-      return this.failed(row, now, err);
+      return this.failed(row, now, err, expired);
     }
     consentChecks.inc({ result: consent.status });
     await this.observe(row.phone, consent, now);
 
-    const update = this.updateFor(row, consent, now);
+    let update = this.updateFor(row, consent, now);
+    if (expired && update.state === 'awaiting_consent') {
+      update = { ...update, state: 'failed', endReason: 'consent_timeout' };
+      consentChecks.inc({ result: 'timeout' });
+    }
     await this.store.updateConsent(row.id, update);
     if (update.state === 'consented') return 'ready';
     return update.state === 'awaiting_consent' ? 'waiting' : 'fallback';
@@ -308,15 +320,20 @@ export class SimConsentService {
     };
   }
 
-  private async failed(row: SimTripRow, now: Date, err: unknown): Promise<ConsentOutcome> {
+  private async failed(
+    row: SimTripRow,
+    now: Date,
+    err: unknown,
+    expired = false,
+  ): Promise<ConsentOutcome> {
     const message = err instanceof Error ? err.message : String(err);
-    const giveUp = row.attempts + 1 >= (this.options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+    const giveUp = expired || row.attempts + 1 >= (this.options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
     const rateLimited = err instanceof IntugineError && err.rateLimited;
     consentChecks.inc({ result: rateLimited ? 'rate_limited' : 'error' });
     await this.store.updateConsent(row.id, {
       state: giveUp ? 'failed' : 'awaiting_consent',
       checkedAt: now,
-      endReason: giveUp ? 'consent_error' : undefined,
+      endReason: giveUp ? (expired ? 'consent_timeout' : 'consent_error') : undefined,
       error: message.slice(0, 500),
     });
     return giveUp ? 'fallback' : 'waiting';

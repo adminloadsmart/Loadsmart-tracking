@@ -162,6 +162,97 @@ describe('SimLifecycleService', () => {
     expect(store.rows[0].state).toBe('active');
   });
 
+  describe('extra consent checks at the loading and transit statuses', () => {
+    const pending: SimConsent = { status: 'pending', operator: 'airtel', suggestion: null };
+    const allowed: SimConsent = { status: 'allowed', operator: 'airtel', suggestion: null };
+
+    it('re-checks a pending consent once at in_transit_loading, reached_loading and in_transit_unloading', async () => {
+      const { service, provider, setLoad } = setup({
+        load: { status: 'truck_assigned', startedAt: new Date(T0) },
+        consent: pending,
+      });
+      await service.run(at(0)); // assignment: the first SMS
+      expect(provider.checkConsent).toHaveBeenCalledTimes(1);
+
+      const at_ = (status: string) => setLoad(makeLoad({ status }));
+      at_('in_transit_loading');
+      await service.run(at(20));
+      await service.run(at(25)); // same stage again: no second check
+      expect(provider.checkConsent).toHaveBeenCalledTimes(2);
+
+      at_('reached_loading');
+      await service.run(at(40));
+      expect(provider.checkConsent).toHaveBeenCalledTimes(3);
+
+      at_('loaded'); // still the same stage as reached_loading
+      await service.run(at(45));
+      expect(provider.checkConsent).toHaveBeenCalledTimes(3);
+
+      at_('in_transit_unloading');
+      await service.run(at(60));
+      expect(provider.checkConsent).toHaveBeenCalledTimes(4);
+    });
+
+    it('a skipped status still gets one check', async () => {
+      const { service, provider, setLoad } = setup({
+        load: { status: 'truck_assigned', startedAt: new Date(T0) },
+        consent: pending,
+      });
+      await service.run(at(0));
+      setLoad(makeLoad({ status: 'in_transit_unloading' }));
+      await service.run(at(30));
+      expect(provider.checkConsent).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not text again within the resend gap, but records the stage', async () => {
+      const { service, store, provider, setLoad } = setup({
+        load: { status: 'truck_assigned', startedAt: new Date(T0) },
+        consent: pending,
+      });
+      await service.run(at(0));
+      setLoad(makeLoad({ status: 'in_transit_loading' }));
+      await service.run(at(5)); // texted 5 min ago, gap is 10
+      expect(provider.checkConsent).toHaveBeenCalledTimes(1);
+      expect(store.rows[0].consentStage).toBe(1);
+    });
+
+    it('starts the trip when the stage check finds the consent approved', async () => {
+      const { service, store, provider, setLoad } = setup({
+        load: { status: 'truck_assigned', startedAt: new Date(T0) },
+        consent: pending,
+      });
+      await service.run(at(0));
+      provider.checkConsent.mockResolvedValue(allowed);
+      setLoad(makeLoad({ status: 'reached_loading' }));
+      const result = await service.run(at(30)); // before the hourly re-check is due
+      expect(result.started).toBe(1);
+      expect(store.rows[0].state).toBe('active');
+    });
+
+    it('does not extend the expiry: past the TTL one last call, then the row gives up', async () => {
+      const { service, store, provider, setLoad } = setup({
+        load: { status: 'truck_assigned', startedAt: new Date(T0) },
+        consent: pending,
+      });
+      await service.run(at(0));
+      const calls = provider.checkConsent.mock.calls.length;
+      setLoad(makeLoad({ status: 'in_transit_unloading' }));
+      await service.run(at(241)); // TTL in these tests is 240 min
+      expect(store.rows[0]).toMatchObject({ state: 'failed', endReason: 'consent_timeout' });
+      expect(provider.checkConsent.mock.calls.length).toBe(calls + 1); // the last check only
+    });
+
+    it('does nothing for a consent already given', async () => {
+      const { service, provider } = setup({
+        load: { status: 'in_transit_loading', startedAt: new Date(T0) },
+        consent: allowed,
+      });
+      await service.run(at(0));
+      await service.run(at(30));
+      expect(provider.checkConsent).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('just ends the row when consent is denied, and never asks again', async () => {
     const { service, store, provider } = setup({
       consent: { status: 'denied', operator: 'airtel', suggestion: null },

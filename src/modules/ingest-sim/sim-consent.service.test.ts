@@ -78,12 +78,26 @@ describe('SimConsentService', () => {
     }
   });
 
-  it('gives up after the TTL without another call', async () => {
-    const { service, store, checkConsent } = setup([consent('pending')]);
+  it('makes one last call after the TTL, and gives up if it is still pending', async () => {
+    const { service, store, checkConsent } = setup([consent('pending'), consent('pending')]);
     await service.request(load, T0);
     expect(await service.checkDue(at(4 * HOUR))).toMatchObject({ fallback: 1 });
-    expect(store.rows[0].state).toBe('failed');
-    expect(checkConsent).toHaveBeenCalledTimes(1);
+    expect(store.rows[0]).toMatchObject({ state: 'failed', endReason: 'consent_timeout' });
+    expect(checkConsent).toHaveBeenCalledTimes(2); // the request and the last check
+  });
+
+  it('the last call after the TTL still accepts a late approval', async () => {
+    const { service, store } = setup([consent('pending'), consent('allowed')]);
+    await service.request(load, T0);
+    expect(await service.checkDue(at(4 * HOUR))).toMatchObject({ ready: 1 });
+    expect(store.rows[0].state).toBe('consented');
+  });
+
+  it('gives up past the TTL even when the last call fails', async () => {
+    const { service, store } = setup([consent('pending'), new IntugineError('boom', 500)]);
+    await service.request(load, T0);
+    expect(await service.checkDue(at(4 * HOUR))).toMatchObject({ fallback: 1 });
+    expect(store.rows[0]).toMatchObject({ state: 'failed', endReason: 'consent_timeout' });
   });
 
   it('keeps trying after an error, then gives up', async () => {
@@ -100,7 +114,7 @@ describe('SimConsentService', () => {
   describe('consent per driver number, reused across loads', () => {
     const other: SimLoad = { ...load, tripId: 'trip-2', vehicleId: 'veh-2' };
 
-    it('records the SMS time while pending, and the given time with ~9 months of validity', async () => {
+    it('records the SMS time while pending, and the given time with 6 months of validity', async () => {
       const { service, consents } = setup([consent('pending'), consent('allowed')]);
       await service.request(load, T0);
       expect(consents.records.get('9876543210')).toMatchObject({
@@ -111,9 +125,9 @@ describe('SimConsentService', () => {
       await service.checkDue(at(2 * HOUR));
       const record = consents.records.get('9876543210')!;
       expect(record.givenAt).toEqual(at(2 * HOUR));
-      expect(record.validUntil!.getTime()).toBeGreaterThan(
-        at(2 * HOUR).getTime() + 250 * 86_400_000,
-      );
+      const days = (record.validUntil!.getTime() - at(2 * HOUR).getTime()) / 86_400_000;
+      expect(days).toBeGreaterThanOrEqual(180);
+      expect(days).toBeLessThanOrEqual(184); // six calendar months, not nine
     });
 
     it('a second load of the same driver needs no call and no SMS: ready at once, marked reused', async () => {
@@ -184,13 +198,17 @@ describe('SimConsentService', () => {
     });
 
     it('a trip whose consent timed out gets a fresh row and a new SMS', async () => {
-      const { service, store, checkConsent } = setup([consent('pending'), consent('pending')]);
+      const { service, store, checkConsent } = setup([
+        consent('pending'),
+        consent('pending'),
+        consent('pending'),
+      ]);
       await service.request(load, T0);
-      await service.checkDue(at(5 * HOUR)); // past the 4 h TTL
+      await service.checkDue(at(5 * HOUR)); // past the 4 h TTL: the last call, then gives up
       expect(store.rows[0].state).toBe('failed');
-      expect(await service.resend(load, at(5 * HOUR + 1000))).toBe('waiting');
+      expect(await service.resend(load, at(5 * HOUR + HOUR / 2))).toBe('waiting');
       expect(store.rows).toHaveLength(2);
-      expect(checkConsent).toHaveBeenCalledTimes(2);
+      expect(checkConsent).toHaveBeenCalledTimes(3);
     });
 
     it('is refused for an operator Intugine cannot track', async () => {

@@ -48,6 +48,26 @@ export function isTrackingSource(
   return !wanted || wanted === pointSource;
 }
 
+/**
+ * How far a load has got in the stages where a pending SIM consent is re-checked: 1 heading to
+ * the plant (in_transit_loading), 2 at the plant (reached_loading, loaded), 3 on the road to the
+ * drop (in_transit_unloading onwards). 0 before that. A skipped status counts as passed.
+ */
+export function consentStageOf(status: LoadStatus): number {
+  switch (status) {
+    case 'in_transit_loading':
+      return 1;
+    case 'reached_loading':
+    case 'loaded':
+      return 2;
+    case 'in_transit_unloading':
+    case 'reached_unloading':
+      return 3;
+    default:
+      return 0;
+  }
+}
+
 /** The truck is on the road between plant and delivery point — the rules that need movement. */
 export const IN_TRANSIT_STATUS: LoadStatus = 'in_transit_unloading';
 

@@ -108,7 +108,7 @@ export const env = {
   // …and for SIM (coarse, 10-20 min apart) this many distinct pings must be that far.
   tripStartSimMinPings: numberWithDefault('TRIP_START_SIM_MIN_PINGS', 2),
   // A driver's SIM consent stays valid this long (months), for every load they are on.
-  simConsentValidityMonths: numberWithDefault('SIM_CONSENT_VALIDITY_MONTHS', 9),
+  simConsentValidityMonths: numberWithDefault('SIM_CONSENT_VALIDITY_MONTHS', 6),
   // The consent SMS can be sent again by hand only after this long since the last send.
   simConsentResendGapMin: numberWithDefault('SIM_CONSENT_RESEND_GAP_MIN', 10),
   // A delivered load stays on SIM until its POD is accepted, but no longer than this (0 = no

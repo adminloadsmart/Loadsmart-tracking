@@ -18,6 +18,7 @@ export class MemoryStore implements SimTripStore {
       id: `row-${this.rows.length + 1}`,
       operator: null,
       consentReused: reusedConsent ?? false,
+      consentStage: 0,
       endReason: null,
       createdAt: new Date(),
       consentStatus: reusedConsent ? 'allowed' : 'pending',
@@ -45,6 +46,10 @@ export class MemoryStore implements SimTripStore {
     row.attempts = u.error ? row.attempts + 1 : 0;
     row.lastError = u.error ?? null;
     if (u.endReason) row.endReason = u.endReason;
+  }
+  async setConsentStage(id: string, stage: number) {
+    const row = this.rows.find((r) => r.id === id)!;
+    row.consentStage = Math.max(row.consentStage, stage);
   }
   async awaitingConsentDue(now: Date, intervalMs: number) {
     return this.rows.filter(

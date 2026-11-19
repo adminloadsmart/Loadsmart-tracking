@@ -4,7 +4,7 @@ import { metricsRegistry } from '../../shared/metrics';
 import type { TenantScope } from '../../shared/auth/staff-token';
 import type { MainLoad, MainPlace, MainTripPoints } from '../main-data';
 import type { LoadStatus } from '../trips/trip-state';
-import { ACTIVE_STATUSES, INDEXED_STATUSES } from '../trips/trip-state';
+import { ACTIVE_STATUSES, INDEXED_STATUSES, consentStageOf } from '../trips/trip-state';
 import type { SimProvider, StartTripInput } from './intugine.client';
 import { normalizePhone } from './intugine.contract';
 import type { SimConsentService } from './sim-consent.service';
@@ -143,6 +143,12 @@ export class SimLifecycleService {
         now,
       );
       if (outcome !== 'no_phone') result.consentRequested += 1;
+      row = await this.store.findLiveByTrip(load.id);
+    }
+    // A still-pending consent is checked again when the load reaches in_transit_loading,
+    // reached_loading and in_transit_unloading (once each; the hourly re-check carries on too).
+    if (row?.state === 'awaiting_consent') {
+      await this.consent.checkAtStage(row, consentStageOf(load.status), now);
       row = await this.store.findLiveByTrip(load.id);
     }
     // Tracked statuses start at truck assignment, so the trip starts as soon as consent is allowed.
