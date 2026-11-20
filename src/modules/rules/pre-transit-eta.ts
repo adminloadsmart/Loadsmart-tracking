@@ -4,10 +4,11 @@ import type { MainDataRepository, MainLoad } from '../main-data';
 import { haversineMeters, type LatLng } from '../processing/geo';
 import { vehicleLatestKey } from '../processing/vehicle-state.store';
 import { RouteGeometry } from '../routes/route-geometry';
+import type { RouteTime } from '../routes/route-time';
 import type { RouteStore } from '../routes/route.store';
 import type { ApproachRouteRow, RoutesRepository } from '../routes/routes.repository';
 import type { LoadStatus } from '../trips';
-import { promisedTime } from './delay';
+import { priorPace, promisedTime } from './delay';
 import { tripEtaKey } from './delay.monitor';
 import type { RuleEngine } from './rule-engine';
 import { num } from './rule-helpers';
@@ -42,50 +43,66 @@ export interface PreTransitTickSummary {
 export interface PreTransitInput {
   nowMs: number;
   stage: LoadStatus;
-  /** Plant → drop route length (the trip's primary route). */
+  /** Plant → drop route (the trip's primary route): length and Google's time along it. */
   routeLengthM: number;
+  routeTime: RouteTime;
   atPlantAtMs: number | null;
   /** The truck's latest position (any source); only used while heading to the plant. */
   position: LatLng | null;
-  /** The drawn approach leg (first tracked point → loading point), if any. */
-  approach: RouteGeometry | null;
+  /** The drawn approach leg (first tracked point → loading point) and Google's time for it. */
+  approach: { geometry: RouteGeometry; durationS: number | null } | null;
   loadingPoint: LatLng | null;
   params: Record<string, number | boolean | string>;
 }
 
 export interface PreTransitEstimate {
   approachKm: number;
+  approachMin: number;
   dwellMin: number;
   /** Approach km still to drive + the plant → drop route. */
   remainingKm: number;
+  /** Effective speed over the driving part (approach + route), for display. */
   speedKmh: number;
+  /** The prior pace on the plant → drop route (no observation before loading). */
+  paceFactor: number;
   etaMs: number;
 }
 
 /**
- * Delivery ETA before the truck leaves the plant, pure:
- *   ETA = now + approach km left ÷ rate + plant dwell left + route km ÷ rate
- *  - approach km left: the position snapped onto the approach leg (within maxSnapDistanceM), else
- *    straight line to the loading point × 1.3; only for truck_assigned / in_transit_loading;
+ * Delivery ETA before the truck leaves the plant, pure — the same model as in transit:
+ *   ETA = now + approach time + plant dwell left + Google time for the route × prior pace
+ *  - approach: on the drawn approach leg (within maxSnapDistanceM) Google's time for what is left of
+ *    it × approachFactor; otherwise straight line to the loading point × 1.3 at approachKmh. Only
+ *    for truck_assigned / in_transit_loading. A short drive to the plant carries no rest time;
  *  - dwell left: loadingDwellMin before the plant, minus time since atPlantAt at the plant, 0 once loaded;
- *  - rate: preTransitKmPerDay (planning rate, rests included).
+ *  - route: Google's expected time × priorPace, i.e. the whole route at plannedKmPerDay — so the
+ *    ETA carries on without a jump once the truck is in transit.
  * Null when the approach can't be measured (no position, or nowhere to measure it to).
  */
 export function estimatePreTransit(input: PreTransitInput): PreTransitEstimate | null {
   const { nowMs, stage, params: p } = input;
-  const speedKmh = num(p, 'preTransitKmPerDay') / 24;
-  if (!(speedKmh > 0)) return null;
 
   let approachM = 0;
+  let approachS = 0;
   if (HEADING_TO_PLANT.includes(stage)) {
     if (!input.position) return null;
-    const snapped = input.approach?.project(input.position);
-    if (input.approach && snapped && snapped.distanceM <= num(p, 'maxSnapDistanceM')) {
-      approachM = Math.max(0, input.approach.lengthM - snapped.alongM);
+    const leg = input.approach;
+    const snapped = leg?.geometry.project(input.position);
+    if (leg && snapped && snapped.distanceM <= num(p, 'maxSnapDistanceM')) {
+      approachM = Math.max(0, leg.geometry.lengthM - snapped.alongM);
+      const legS =
+        leg.durationS && leg.durationS > 0
+          ? leg.durationS
+          : (leg.geometry.lengthM / 1000 / num(p, 'approachKmh')) * 3600;
+      approachS =
+        leg.geometry.lengthM > 0
+          ? legS * (approachM / leg.geometry.lengthM) * num(p, 'approachFactor')
+          : 0;
     } else {
-      const target = input.loadingPoint ?? input.approach?.end ?? null;
+      const target = input.loadingPoint ?? leg?.geometry.end ?? null;
       if (!target) return null;
       approachM = haversineMeters(input.position, target) * ROAD_FACTOR;
+      approachS = (approachM / 1000 / num(p, 'approachKmh')) * 3600;
     }
   }
 
@@ -97,15 +114,19 @@ export function estimatePreTransit(input: PreTransitInput): PreTransitEstimate |
         ? Math.max(0, fullDwellMin - (nowMs - input.atPlantAtMs) / 60_000)
         : fullDwellMin;
 
-  const approachKm = approachM / 1000;
-  const remainingKm = approachKm + input.routeLengthM / 1000;
-  const etaMs = nowMs + (remainingKm / speedKmh) * 3_600_000 + dwellMin * 60_000;
+  const pace = priorPace(input.routeLengthM, input.routeTime, p);
+  const routeS = input.routeTime.totalS * pace;
+  const driveS = approachS + routeS;
+  const etaMs = nowMs + driveS * 1000 + dwellMin * 60_000;
+  const remainingKm = approachM / 1000 + input.routeLengthM / 1000;
   const round1 = (value: number) => Math.round(value * 10) / 10;
   return {
-    approachKm: round1(approachKm),
+    approachKm: round1(approachM / 1000),
+    approachMin: Math.round(approachS / 60),
     dwellMin: Math.round(dwellMin),
     remainingKm: round1(remainingKm),
-    speedKmh: round1(speedKmh),
+    speedKmh: round1(driveS > 0 ? remainingKm / (driveS / 3600) : 0),
+    paceFactor: Math.round(pace * 100) / 100,
     etaMs,
   };
 }
@@ -206,7 +227,7 @@ export class PreTransitEtaMonitor {
     load: MainLoad,
     input: {
       nowMs: number;
-      primary: { geometry: { lengthM: number }; promisedAt: number | null };
+      primary: { geometry: { lengthM: number }; time: RouteTime; promisedAt: number | null };
       position: (LatLng & { recordedAtMs: number }) | null;
       approach: ApproachRouteRow | undefined;
       loadingPoint: LatLng | null;
@@ -231,6 +252,7 @@ export class PreTransitEtaMonitor {
       nowMs,
       stage: load.status,
       routeLengthM: primary.geometry.lengthM,
+      routeTime: primary.time,
       atPlantAtMs: Number.isFinite(atPlantAt) ? atPlantAt : null,
       position,
       approach: approachGeometry(input.approach),
@@ -253,6 +275,7 @@ export class PreTransitEtaMonitor {
       projectedDelayMin: String(Math.round((estimate.etaMs - promisedMs) / 60_000)),
       remainingKm: String(estimate.remainingKm),
       speedKmh: String(estimate.speedKmh),
+      paceFactor: String(estimate.paceFactor),
       basis: 'pre_transit',
       stage: load.status,
       stale: '0',
@@ -291,10 +314,15 @@ export class PreTransitEtaMonitor {
   }
 }
 
-function approachGeometry(row: ApproachRouteRow | undefined): RouteGeometry | null {
+function approachGeometry(
+  row: ApproachRouteRow | undefined,
+): { geometry: RouteGeometry; durationS: number | null } | null {
   if (!row?.polyline) return null;
   try {
-    return RouteGeometry.fromPolyline(row.polyline);
+    return {
+      geometry: RouteGeometry.fromPolyline(row.polyline),
+      durationS: row.duration_s === null ? null : Number(row.duration_s),
+    };
   } catch {
     return null; // fewer than 2 points: nothing to snap to
   }

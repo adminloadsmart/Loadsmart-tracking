@@ -112,6 +112,7 @@ export class RoutePlanner {
       polyline: route.polyline,
       distanceM: route.distanceM,
       durationS: route.durationS,
+      timeProfile: route.timeProfile ?? null,
       provider: this.provider.name,
       promisedAt: trip.promised_delivery_at,
       createdBy: null,

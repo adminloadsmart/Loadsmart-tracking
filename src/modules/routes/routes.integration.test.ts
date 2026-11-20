@@ -42,6 +42,12 @@ const fixtureProvider: RouteProvider = {
     polyline: encodePolyline(ROAD),
     distanceM: 111_195,
     durationS: 7200,
+    // Google's steps: a slow first 20 km (town), then highway.
+    timeProfile: [
+      [0, 0],
+      [20_000, 2400],
+      [111_195, 7200],
+    ],
   }),
 };
 const geocoded: string[] = [];
@@ -199,6 +205,15 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
       [trip.tripId],
     );
     expect(status.status).toBe('ok');
+    const [stored] = await ds.query(
+      `SELECT time_profile FROM tracking.trip_routes WHERE trip_id = $1`,
+      [trip.tripId],
+    );
+    expect(stored.time_profile).toEqual([
+      [0, 0],
+      [20_000, 2400],
+      [111_195, 7200],
+    ]);
 
     // Fixes every 5 min over the last 3 h: 0 → 30 km along the road.
     await feed(
@@ -215,7 +230,7 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
       .set('Authorization', `Bearer ${token()}`);
     expect(tripView.body.data).toMatchObject({
       routeStatus: 'ok',
-      eta: { stale: false, basis: 'planned' },
+      eta: { stale: false, basis: 'blended' },
     });
     expect(tripView.body.data.eta.remainingKm).toBeCloseTo(81, 0);
     expect(tripView.body.data.eta.projectedDelayMin).toBeGreaterThan(60);
@@ -296,10 +311,11 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
       stage: 'truck_assigned',
       stale: false,
     });
-    // ~22.2 km × 1.3 approach + 111.2 km route at 350 km/day, + 240 min at the plant.
-    const kmLeft = 22.24 * 1.3 + 111.2;
-    expect(listed.eta.remainingKm).toBeCloseTo(kmLeft, 0);
-    const expectedEta = now + (kmLeft / (350 / 24)) * 3_600_000 + 240 * 60_000;
+    // ~22.2 km × 1.3 approach at 30 km/h (no approach leg drawn) + 240 min at the plant +
+    // the 111.2 km route at the prior pace (= 350 km/day overall).
+    const approachKm = 22.24 * 1.3;
+    expect(listed.eta.remainingKm).toBeCloseTo(approachKm + 111.2, 0);
+    const expectedEta = now + (approachKm / 30 + 111.2 / (350 / 24)) * 3_600_000 + 240 * 60_000;
     expect(Math.abs(Date.parse(listed.eta.etaAt) - expectedEta)).toBeLessThan(5 * 60_000);
     expect(
       await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts WHERE rule_id = 'DELAY-GPS'`),

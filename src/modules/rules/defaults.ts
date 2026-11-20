@@ -108,8 +108,12 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
     params: {
       evaluateEveryMin: 15, // delay alerts / LS_N_0030 cadence
       etaEveryMin: 1, // the trip's ETA is refreshed this often (no alerting)
-      speedWindowH: 3, // speed = route km covered over the last 3 h (halts included)…
-      minCoveredKm: 50, // …once 50 km is covered; before that the planned speed
+      // ETA = Google's expected time for the route still ahead × the truck's pace factor:
+      plannedKmPerDay: 350, // prior pace: the whole route at this rate (rests included)
+      speedWindowH: 12, // observed pace = actual hours ÷ Google hours over the last 12 h…
+      priorWeightH: 6, // …blended with the prior: 6 h of observation = 50/50
+      minPace: 1, // pace factor bounds (1 = as fast as Google's car time, no stops)
+      maxPace: 8,
       fallbackKmPerDay: 350, // promised = start + route km / 350 km per day when not given
       warningDelayMin: 60,
       criticalDelayMin: 240,
@@ -122,7 +126,8 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
       lateCauseMinMin: 60, // a cause (halts / deviation) must account for this much to be named
       // Delivery ETA before the truck leaves the plant (truck_assigned … loaded), no alerts:
       loadingDwellMin: 240, // time allowed at the loading point
-      preTransitKmPerDay: 350, // planning rate for the approach and plant → drop legs
+      approachFactor: 1.3, // drive to the plant: Google's approach time × this (short leg, no rest)
+      approachKmh: 30, // …or this speed when there is no approach route to measure on
     },
   },
   'INACT-GPS': {

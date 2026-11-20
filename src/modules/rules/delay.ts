@@ -1,10 +1,12 @@
 import { num } from './rule-helpers';
+import type { RouteTime } from '../routes/route-time';
 import type { ProgressState } from './rules/progress-gps.rule';
 
 export interface DelayInput {
   nowMs: number;
   routeLengthM: number;
-  startMs: number;
+  /** Expected (car, no stops) time along the route, per segment. */
+  routeTime: RouteTime;
   promisedMs: number;
   progress: ProgressState | null;
   params: Record<string, number | boolean | string>;
@@ -12,49 +14,74 @@ export interface DelayInput {
 
 export interface DelayEstimate {
   remainingKm: number;
+  /** Effective speed over what is left (remaining km ÷ remaining hours), for display. */
   speedKmh: number;
-  basis: 'observed' | 'planned';
+  /** How much longer than Google's car time this truck takes (rests and halts included). */
+  paceFactor: number;
+  /** planned: prior only · blended: some observation · observed: observation weighs ≥ 50 %. */
+  basis: 'observed' | 'blended' | 'planned';
   etaMs: number;
   delayMin: number;
 }
 
-const MIN_SPEED_KMH = 1; // a truck halted for 3 h must not make the ETA infinite
+type Params = Record<string, number | boolean | string>;
+const clampPace = (pace: number, p: Params) =>
+  Math.min(num(p, 'maxPace'), Math.max(num(p, 'minPace'), pace));
 
 /**
- * DELAY-GPS projection (rule sheet), pure:
- *  - remaining km = route km from the furthest progress reached to the drop;
- *  - speed = route km covered over the last 3 h ÷ elapsed hours, halts included (a long halt
- *    already worsens the ETA — no separate halt term), once 50 km is covered; before that the
- *    planned speed = route km ÷ planned transit time;
- *  - ETA = now + remaining ÷ speed; delay = ETA − promised.
+ * Prior pace for a route: chosen so the whole route takes routeKm ÷ plannedKmPerDay — the
+ * planning rate — while Google's profile still decides WHERE along the route that time goes.
+ * Never derived from the promise (a 6 h promise on 1,486 km would mean 248 km/h).
+ */
+export function priorPace(routeLengthM: number, routeTime: RouteTime, p: Params): number {
+  const plannedS = (routeLengthM / 1000 / num(p, 'plannedKmPerDay')) * 86_400;
+  return clampPace(routeTime.totalS > 0 ? plannedS / routeTime.totalS : 1, p);
+}
+
+/**
+ * DELAY-GPS projection, pure — the way a navigation app does it, adapted to trucks:
+ *  - time still ahead = Google's expected time from the furthest progress to the drop, summed over
+ *    the segments ahead (a highway km is faster than a city or ghat km);
+ *  - × pace factor: the prior (see priorPace) blended with the pace observed over the last 12 h
+ *    (actual hours ÷ Google hours for the stretch covered, halts included), weighted by hours
+ *    observed: pace = (prior·K + observed·h) / (K + h), clamped;
+ *  - ETA = now + time ahead × pace; delay = ETA − promised.
  */
 export function evaluateDelay(input: DelayInput): DelayEstimate {
-  const { nowMs, routeLengthM, startMs, promisedMs, progress, params } = input;
+  const { nowMs, routeLengthM, routeTime, promisedMs, progress, params: p } = input;
   const furthest = progress?.furthestAlongM ?? 0;
   const remainingKm = Math.max(0, routeLengthM - furthest) / 1000;
+  const prior = priorPace(routeLengthM, routeTime, p);
 
-  const plannedHours = (promisedMs - startMs) / 3_600_000;
-  const plannedSpeed =
-    plannedHours > 0 ? routeLengthM / 1000 / plannedHours : num(params, 'fallbackKmPerDay') / 24;
-
-  let speed = plannedSpeed;
+  let pace = prior;
   let basis: DelayEstimate['basis'] = 'planned';
-  const covered = progress ? (furthest - progress.baselineAlongM) / 1000 : 0;
-  if (progress && covered >= num(params, 'minCoveredKm') && progress.samples.length > 0) {
-    const windowStart = nowMs - num(params, 'speedWindowH') * 3_600_000;
+  if (progress && progress.samples.length > 0) {
+    const windowStart = nowMs - num(p, 'speedWindowH') * 3_600_000;
     const from = progress.samples.find((sample) => sample.t >= windowStart) ?? progress.samples[0];
     const hours = (nowMs - from.t) / 3_600_000;
     if (hours >= 0.25) {
-      speed = (furthest - from.alongM) / 1000 / hours;
-      basis = 'observed';
+      const expectedS = routeTime.at(furthest) - routeTime.at(from.alongM);
+      // Barely moved over the window (halted): as slow as allowed, weighted by how long.
+      const observed =
+        furthest - from.alongM >= 1000 && expectedS > 0
+          ? clampPace((hours * 3600) / expectedS, p)
+          : num(p, 'maxPace');
+      const k = num(p, 'priorWeightH');
+      pace = clampPace((prior * k + observed * hours) / (k + hours), p);
+      basis = hours / (k + hours) >= 0.5 ? 'observed' : 'blended';
     }
   }
-  speed = Math.max(speed, MIN_SPEED_KMH);
 
-  const etaMs = nowMs + (remainingKm / speed) * 3_600_000;
+  const remainingS = routeTime.remainingFrom(furthest) * pace;
+  const etaMs = nowMs + remainingS * 1000;
+  const speedKmh =
+    remainingS > 0
+      ? remainingKm / (remainingS / 3600)
+      : routeLengthM / 1000 / ((routeTime.totalS * pace) / 3600);
   return {
     remainingKm: Math.round(remainingKm * 10) / 10,
-    speedKmh: Math.round(speed * 10) / 10,
+    speedKmh: Math.round(speedKmh * 10) / 10,
+    paceFactor: Math.round(pace * 100) / 100,
     basis,
     etaMs,
     delayMin: Math.round((etaMs - promisedMs) / 60_000),
