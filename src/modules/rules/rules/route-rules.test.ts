@@ -25,6 +25,9 @@ const row = (
   created_at: new Date(T0),
 });
 const ROUTES = new TripRoutes([row(1)]);
+/** The test route's geometry with a given [metres, seconds] time profile. */
+const TripRoutesWith = (profile: Array<[number, number]>) =>
+  new TripRoutes([{ ...row(1), duration_s: 7200, time_profile: profile }]).primary.time;
 /** ~1 m of longitude at this latitude, in degrees. */
 const E = 1 / (111_195 * Math.cos((28.9 * Math.PI) / 180));
 /** A fix `alongM` along the route and `offM` east of it. */
@@ -169,55 +172,116 @@ describe('DELAY-GPS progress + projection', () => {
     expect(state.lastFixMs).toBe(fix(900).t);
   });
 
-  it('projects with the planned speed before 50 km, then the observed speed over 3 h', () => {
+  /** The test route's expected time: no provider duration, so uniform at the nominal 50 km/h. */
+  const TIME = ROUTES.primary.time;
+  const progressAt = (
+    furthestAlongM: number,
+    samples: Array<{ t: number; alongM: number }>,
+    lastFixMs: number,
+  ) => ({
+    tripId: TRIP,
+    routeVersion: 1,
+    furthestAlongM,
+    baselineAlongM: 0,
+    baselineMs: T0,
+    samples,
+    lastFixMs,
+  });
+
+  it('before any observation: the prior pace, the whole route at plannedKmPerDay', () => {
     const params = P.params;
-    const start = T0;
-    const promised = promisedTime(null, null, start, 111_195, params); // 111 km at 350 km/day ≈ 7.6 h
-    expect((promised - start) / 3_600_000).toBeCloseTo(7.6, 1);
-
-    // 20 km covered: planned speed (14.6 km/h) → on time.
-    const early = evaluateDelay({
-      nowMs: start + 3_600_000,
+    const estimate = evaluateDelay({
+      nowMs: T0,
       routeLengthM: 111_195,
-      startMs: start,
-      promisedMs: promised,
-      progress: {
-        tripId: TRIP,
-        routeVersion: 1,
-        furthestAlongM: 20_000,
-        baselineAlongM: 0,
-        baselineMs: start,
-        samples: [{ t: start, alongM: 0 }],
-        lastFixMs: start + 3_600_000,
-      },
+      routeTime: TIME,
+      promisedMs: T0 + 8 * 3_600_000,
+      progress: null,
       params,
     });
-    expect(early.basis).toBe('planned');
+    expect(estimate.basis).toBe('planned');
+    expect(estimate.speedKmh).toBeCloseTo(350 / 24, 1);
+    expect((estimate.etaMs - T0) / 3_600_000).toBeCloseTo(111.195 / (350 / 24), 1);
+  });
 
-    // 60 km in the last 3 h at 20 km/h (slow), 51 km to go → late.
+  it('never takes the speed from the promise (a 6 h promise on 1,486 km is not 248 km/h)', () => {
+    const long = new TripRoutes([
+      row(
+        1,
+        Array.from({ length: 1301 }, (_, i) => ({ lat: 21 + i * 0.01, lng: 81.5 })),
+      ),
+    ]).primary;
+    const estimate = evaluateDelay({
+      nowMs: T0,
+      routeLengthM: long.geometry.lengthM,
+      routeTime: long.time,
+      promisedMs: T0 + 6 * 3_600_000,
+      progress: null,
+      params: P.params,
+    });
+    expect(estimate.speedKmh).toBeCloseTo(350 / 24, 1);
+    expect(estimate.delayMin).toBeGreaterThan(3 * 24 * 60);
+  });
+
+  it('blends the observed pace in by hours observed: 3 h slow → between prior and observed', () => {
+    // 20 km/h over the last 3 h (Google's car time: 50 km/h) → observed pace 2.5; prior ≈ 3.43.
     const slow = evaluateDelay({
-      nowMs: start + 3 * 3_600_000,
+      nowMs: T0 + 3 * 3_600_000,
       routeLengthM: 111_195,
-      startMs: start,
-      promisedMs: start + 4 * 3_600_000,
-      progress: {
-        tripId: TRIP,
-        routeVersion: 1,
-        furthestAlongM: 60_000,
-        baselineAlongM: 0,
-        baselineMs: start,
-        samples: [
-          { t: start, alongM: 0 },
-          { t: start + 3_600_000, alongM: 20_000 },
+      routeTime: TIME,
+      promisedMs: T0 + 4 * 3_600_000,
+      progress: progressAt(
+        60_000,
+        [
+          { t: T0, alongM: 0 },
+          { t: T0 + 3_600_000, alongM: 20_000 },
         ],
-        lastFixMs: start + 3 * 3_600_000,
-      },
-      params,
+        T0 + 3 * 3_600_000,
+      ),
+      params: P.params,
     });
-    expect(slow.basis).toBe('observed');
-    expect(slow.speedKmh).toBeCloseTo(20, 0);
+    expect(slow.basis).toBe('blended');
+    expect(slow.paceFactor).toBeGreaterThan(2.5);
+    expect(slow.paceFactor).toBeLessThan(3.43);
     expect(slow.remainingKm).toBeCloseTo(51.2, 0);
     expect(slow.delayMin).toBeGreaterThan(90);
+
+    // The same pace for 12 h weighs more than the prior → "observed", close to 2.5.
+    const steady = evaluateDelay({
+      nowMs: T0 + 12 * 3_600_000,
+      routeLengthM: 111_195,
+      routeTime: TIME,
+      promisedMs: T0 + 4 * 3_600_000,
+      progress: progressAt(100_000, [{ t: T0, alongM: 0 }], T0 + 12 * 3_600_000),
+      params: { ...P.params, plannedKmPerDay: 350 },
+    });
+    // 100 km in 12 h = 8.3 km/h → pace 6; prior 3.43 → blend (3.43·6 + 6·12) / 18 ≈ 5.1.
+    expect(steady.basis).toBe('observed');
+    expect(steady.paceFactor).toBeCloseTo(5.14, 1);
+  });
+
+  it('a slow city stretch ahead takes longer than the same km of highway', () => {
+    const geometry = ROUTES.primary.geometry;
+    const cityLast = TripRoutesWith([
+      [0, 0],
+      [90_000, 3600],
+      [geometry.lengthM, 7200],
+    ]);
+    const cityFirst = TripRoutesWith([
+      [0, 0],
+      [21_195, 3600],
+      [geometry.lengthM, 7200],
+    ]);
+    const at = (time: typeof TIME) =>
+      evaluateDelay({
+        nowMs: T0,
+        routeLengthM: geometry.lengthM,
+        routeTime: time,
+        promisedMs: T0,
+        progress: progressAt(60_000, [], T0),
+        params: P.params,
+      }).etaMs;
+    // 51 km left either way; with the city still ahead it's slower than with only highway left.
+    expect(at(cityLast)).toBeGreaterThan(at(cityFirst));
   });
 
   it('measures the observed speed without bias from how progress is sampled', () => {
@@ -225,13 +289,14 @@ describe('DELAY-GPS progress + projection', () => {
     const fixes = every(0, 3 * 3600, 60, (s) => ({ speedKmh: 36, ...at(s * 10) }));
     const { state } = run(progressGpsRule, fixes, P);
     const nowMs = fixes.at(-1)!.t;
+    // Prior weight ≈ 0 isolates the observed pace: 36 km/h vs Google's 50 km/h.
     const estimate = evaluateDelay({
       nowMs,
       routeLengthM: 111_195,
-      startMs: T0,
+      routeTime: TIME,
       promisedMs: T0 + 6 * 3_600_000,
       progress: state,
-      params: P.params,
+      params: { ...P.params, priorWeightH: 0.0001 },
     });
     expect(estimate.basis).toBe('observed');
     expect(estimate.speedKmh).toBeCloseTo(36, 0);
@@ -243,26 +308,20 @@ describe('DELAY-GPS progress + projection', () => {
     expect(alreadyLateSeverity(240, P.params)).toBe('critical');
   });
 
-  it('a long halt drags the speed estimate (no separate halt term) and never divides by zero', () => {
+  it('a long halt drags the pace (no separate halt term) but stays bounded', () => {
     const halted = evaluateDelay({
       nowMs: T0 + 6 * 3_600_000,
       routeLengthM: 111_195,
-      startMs: T0,
+      routeTime: TIME,
       promisedMs: T0 + 8 * 3_600_000,
-      progress: {
-        tripId: TRIP,
-        routeVersion: 1,
-        furthestAlongM: 60_000,
-        baselineAlongM: 0,
-        baselineMs: T0,
-        samples: [{ t: T0 + 3 * 3_600_000, alongM: 60_000 }],
-        lastFixMs: T0 + 6 * 3_600_000,
-      },
+      progress: progressAt(60_000, [{ t: T0 + 3 * 3_600_000, alongM: 60_000 }], T0 + 6 * 3_600_000),
       params: P.params,
     });
-    expect(halted.speedKmh).toBe(1);
+    // Halted for the whole 3 h observed → observed pace = maxPace (8); blended (3.43·6 + 8·3) / 9.
+    expect(halted.paceFactor).toBeCloseTo(4.95, 1);
+    expect(halted.paceFactor).toBeLessThanOrEqual(8);
     expect(Number.isFinite(halted.etaMs)).toBe(true);
-    expect(halted.delayMin).toBeGreaterThan(240);
+    expect(halted.delayMin).toBeGreaterThan(120);
   });
 });
 

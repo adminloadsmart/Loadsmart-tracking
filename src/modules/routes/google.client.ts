@@ -1,9 +1,12 @@
 import type { LatLng } from '../processing/geo';
+import { profileFromSteps, type TimeProfile } from './route-time';
 
 export interface ComputedRoute {
   polyline: string;
   distanceM: number;
   durationS: number | null;
+  /** Google's per-step time along the route (cumulative), for segment-aware ETAs. */
+  timeProfile?: TimeProfile | null;
 }
 
 /** Plans road routes (Google Routes API in production; a fixture in tests). */
@@ -46,7 +49,10 @@ export class GoogleRoutesProvider implements RouteProvider {
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': this.apiKey,
-        'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
+        // Step distance/time feed the segment-aware ETA (route-time.ts); still traffic-unaware.
+        'X-Goog-FieldMask':
+          'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,' +
+          'routes.legs.steps.distanceMeters,routes.legs.steps.staticDuration',
       },
       body: JSON.stringify({
         origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
@@ -70,6 +76,7 @@ export class GoogleRoutesProvider implements RouteProvider {
         distanceMeters?: number;
         duration?: string;
         polyline?: { encodedPolyline?: string };
+        legs?: Array<{ steps?: Array<{ distanceMeters?: number; staticDuration?: string }> }>;
       }>;
     };
     const route = body.routes?.[0];
@@ -78,6 +85,7 @@ export class GoogleRoutesProvider implements RouteProvider {
       polyline: route.polyline.encodedPolyline,
       distanceM: route.distanceMeters,
       durationS: route.duration ? Number.parseFloat(route.duration) : null,
+      timeProfile: profileFromSteps((route.legs ?? []).flatMap((leg) => leg.steps ?? [])),
     };
   }
 }

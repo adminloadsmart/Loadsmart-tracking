@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { MainDataRepository } from '../main-data';
+import type { TimeProfile } from './route-time';
 import { IN_TRANSIT_STATUS } from '../trips';
 
 export interface TripNeedingRoute {
@@ -25,6 +26,8 @@ export interface TripRouteRow {
   polyline: string;
   distance_m: number;
   duration_s: number | null;
+  /** Cumulative [metres, seconds] from the provider's steps; null for ops polylines / old rows. */
+  time_profile?: TimeProfile | null;
   promised_at: Date | null;
   created_at: Date;
 }
@@ -246,17 +249,20 @@ export class RoutesRepository {
     polyline: string;
     distanceM: number;
     durationS: number | null;
+    timeProfile?: TimeProfile | null;
     provider: string;
     promisedAt: Date | null;
     createdBy: string | null;
   }): Promise<TripRouteRow> {
     const rows: TripRouteRow[] = await this.dataSource.query(
       `INSERT INTO tracking.trip_routes
-         (id, trip_id, version, kind, polyline, distance_m, duration_s, provider, promised_at, created_by)
+         (id, trip_id, version, kind, polyline, distance_m, duration_s, provider, promised_at, created_by,
+          time_profile)
        VALUES ($1, $2,
                COALESCE((SELECT max(version) FROM tracking.trip_routes WHERE trip_id = $2), 0) + 1,
-               $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id, trip_id, version, kind, polyline, distance_m, duration_s, promised_at, created_at`,
+               $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+       RETURNING id, trip_id, version, kind, polyline, distance_m, duration_s, time_profile,
+                 promised_at, created_at`,
       [
         randomUUID(),
         input.tripId,
@@ -267,6 +273,7 @@ export class RoutesRepository {
         input.provider,
         input.promisedAt,
         input.createdBy,
+        input.timeProfile ? JSON.stringify(input.timeProfile) : null,
       ],
     );
     return rows[0];
@@ -275,7 +282,8 @@ export class RoutesRepository {
   routesFor(tripIds: string[]): Promise<TripRouteRow[]> {
     if (tripIds.length === 0) return Promise.resolve([]);
     return this.dataSource.query(
-      `SELECT id, trip_id, version, kind, polyline, distance_m, duration_s, promised_at, created_at
+      `SELECT id, trip_id, version, kind, polyline, distance_m, duration_s, time_profile,
+              promised_at, created_at
        FROM tracking.trip_routes WHERE trip_id = ANY($1::uuid[]) ORDER BY trip_id, version`,
       [tripIds],
     );

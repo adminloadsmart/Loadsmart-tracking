@@ -82,7 +82,7 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: {
         description:
-          '{ trips: [trip summary + position | null + eta | null] }. eta = delivery ETA { etaAt, promisedAt, projectedDelayMin, remainingKm, speedKmh, basis (observed | planned | pre_transit), stage, stale, evaluatedAt }, from truck assignment on (refreshed every minute); null until the trip has a planned route and, before the plant, a position.',
+          '{ trips: [trip summary + position | null + eta | null] }. eta = delivery ETA { etaAt, promisedAt, projectedDelayMin, remainingKm, speedKmh, paceFactor, basis (planned | blended | observed | pre_transit), stage, stale, evaluatedAt }, from truck assignment on (refreshed every minute): Google expected time for the route ahead × the truck pace factor; null until the trip has a planned route and, before the plant, a position.',
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,

@@ -55,11 +55,13 @@ export class RouteApprovalService {
     let polyline = current.polyline;
     let distanceM = current.distance_m;
     let durationS: number | null = current.duration_s;
+    let timeProfile = current.time_profile ?? null;
     let provider = 'ops';
     if (input.polyline) {
       polyline = input.polyline;
       distanceM = RouteGeometry.fromPolyline(input.polyline).lengthM;
       durationS = null;
+      timeProfile = null;
     } else if (input.replan) {
       if (!this.provider)
         throw new ValidationError('Route planning is not configured (GOOGLE_MAPS_API_KEY)');
@@ -74,6 +76,7 @@ export class RouteApprovalService {
       );
       if (!planned) throw new ValidationError('No route found from the current position');
       ({ polyline, distanceM, durationS } = planned);
+      timeProfile = planned.timeProfile ?? null;
       provider = this.provider.name;
     } else if (!input.promisedDeliveryAt) {
       throw new ValidationError('Provide a polyline, replan: true, or a promisedDeliveryAt');
@@ -85,6 +88,7 @@ export class RouteApprovalService {
       polyline,
       distanceM,
       durationS,
+      timeProfile,
       provider,
       promisedAt: input.promisedDeliveryAt ?? current.promised_at,
       createdBy: user.userId,

@@ -1,12 +1,15 @@
 import type { LatLng } from '../processing/geo';
 import { haversineMeters } from '../processing/geo';
 import { RouteGeometry } from './route-geometry';
+import { RouteTime } from './route-time';
 import type { TripRouteRow } from './routes.repository';
 
 export interface RouteVersion {
   version: number;
   kind: 'planned' | 'approved_alternate';
   geometry: RouteGeometry;
+  /** Expected (car, no stops) time along the route — Google's per-step profile or uniform. */
+  time: RouteTime;
   promisedAt: number | null;
   createdAt: number;
 }
@@ -23,13 +26,21 @@ export class TripRoutes {
     if (rows.length === 0) throw new Error('TripRoutes needs at least one route');
     this.versions = [...rows]
       .sort((a, b) => a.version - b.version)
-      .map((row) => ({
-        version: row.version,
-        kind: row.kind,
-        geometry: RouteGeometry.fromPolyline(row.polyline),
-        promisedAt: row.promised_at ? new Date(row.promised_at).getTime() : null,
-        createdAt: new Date(row.created_at).getTime(),
-      }));
+      .map((row) => {
+        const geometry = RouteGeometry.fromPolyline(row.polyline);
+        return {
+          version: row.version,
+          kind: row.kind,
+          geometry,
+          time: RouteTime.of(
+            geometry.lengthM,
+            row.duration_s === null ? null : Number(row.duration_s),
+            row.time_profile ?? null,
+          ),
+          promisedAt: row.promised_at ? new Date(row.promised_at).getTime() : null,
+          createdAt: new Date(row.created_at).getTime(),
+        };
+      });
   }
 
   get primary(): RouteVersion {

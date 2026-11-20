@@ -2,6 +2,7 @@ import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import type { MainDataRepository } from '../main-data';
 import type { RouteStore } from '../routes/route.store';
+import type { RouteVersion } from '../routes/trip-routes';
 import type { InTransitTrip, RoutesRepository } from '../routes/routes.repository';
 import { RULE_DEFAULTS } from './defaults';
 import { alreadyLateSeverity, evaluateDelay, lateNoticeDue, promisedTime } from './delay';
@@ -119,7 +120,7 @@ export class DelayMonitor {
 
   private async evaluateTrip(
     trip: InTransitTrip,
-    primary: { version: number; geometry: { lengthM: number }; promisedAt: number | null },
+    primary: Pick<RouteVersion, 'version' | 'geometry' | 'time' | 'promisedAt'>,
     nowMs: number,
   ): Promise<AlertChange[]> {
     const setting = (await this.engine.settings(trip.tenant_id, nowMs)).get(RULE);
@@ -153,7 +154,7 @@ export class DelayMonitor {
     const estimate = evaluateDelay({
       nowMs,
       routeLengthM: primary.geometry.lengthM,
-      startMs,
+      routeTime: primary.time,
       promisedMs,
       progress,
       params: p,
@@ -170,6 +171,7 @@ export class DelayMonitor {
         vehicleId: trip.vehicle_id,
         routeLengthM: String(Math.round(primary.geometry.lengthM)),
         speedKmh: String(estimate.speedKmh),
+        paceFactor: String(estimate.paceFactor),
         basis: estimate.basis,
         stale: '0',
         evaluatedAt: String(nowMs),
