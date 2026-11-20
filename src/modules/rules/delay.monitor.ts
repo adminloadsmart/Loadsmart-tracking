@@ -88,15 +88,22 @@ export class DelayMonitor {
       nowMs,
     );
     const changes: AlertChange[] = [];
+    let evaluated = 0;
+    let failed = 0;
 
     for (const trip of trips) {
       const tripRoutes = routes.get(trip.id);
       if (!tripRoutes) continue;
       try {
         changes.push(...(await this.evaluateTrip(trip, tripRoutes.primary, nowMs)));
+        evaluated += 1;
       } catch (err) {
+        failed += 1;
         this.logger.error({ err, tripId: trip.id }, 'Delay evaluation failed');
       }
+    }
+    if (trips.length > 0) {
+      this.logger.info({ inTransit: trips.length, evaluated, failed }, 'Delay ETA tick');
     }
 
     // Delivered / no longer in transit: clear their open delay alerts.

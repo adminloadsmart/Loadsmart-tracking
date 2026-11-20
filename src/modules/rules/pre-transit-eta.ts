@@ -26,6 +26,19 @@ export const PRE_TRANSIT_STATUSES: readonly LoadStatus[] = [
 /** Still on the way to the plant: the approach leg counts and a position is needed. */
 const HEADING_TO_PLANT: readonly LoadStatus[] = ['truck_assigned', 'in_transit_loading'];
 
+/** One tick's outcome, logged so a null ETA can be explained from the scheduler logs. */
+export interface PreTransitTickSummary {
+  /** Loads before the plant exit with a vehicle. */
+  candidates: number;
+  /** …of which have a planned plant → drop route (the rest can't get an ETA yet). */
+  routed: number;
+  written: number;
+  stale: number;
+  /** DELAY-GPS disabled, no position yet, or nowhere to measure the approach to. */
+  skipped: number;
+  failed: number;
+}
+
 export interface PreTransitInput {
   nowMs: number;
   stage: LoadStatus;
@@ -113,17 +126,30 @@ export class PreTransitEtaMonitor {
     private readonly logger: Logger,
   ) {}
 
-  async tick(nowMs = Date.now()): Promise<void> {
+  async tick(nowMs = Date.now()): Promise<PreTransitTickSummary> {
+    const summary: PreTransitTickSummary = {
+      candidates: 0,
+      routed: 0,
+      written: 0,
+      stale: 0,
+      skipped: 0,
+      failed: 0,
+    };
     const loads = (await this.mainData.loadsByStatus(null, PRE_TRANSIT_STATUSES, 50_000)).filter(
       (l) => l.vehicleId,
     );
-    if (loads.length === 0) return;
+    summary.candidates = loads.length;
+    if (loads.length === 0) return summary;
     const tripRoutes = await this.routeStore.get(
       loads.map((l) => l.id),
       nowMs,
     );
     const routed = loads.filter((l) => tripRoutes.has(l.id));
-    if (routed.length === 0) return;
+    summary.routed = routed.length;
+    if (routed.length === 0) {
+      this.logger.info(summary, 'Pre-transit ETA tick: no trip has a planned route yet');
+      return summary;
+    }
 
     const [lastEval, latest, approaches, places] = await Promise.all([
       this.lastEvaluated(routed.map((l) => l.id)),
@@ -138,12 +164,16 @@ export class PreTransitEtaMonitor {
     for (const load of routed) {
       try {
         const setting = (await this.engine.settings(load.tenantId, nowMs)).get(RULE);
-        if (!setting?.enabled) continue;
+        if (!setting?.enabled) {
+          summary.skipped += 1;
+          this.logger.debug({ tripId: load.id }, 'Pre-transit ETA skipped: DELAY-GPS disabled');
+          continue;
+        }
         const p = setting.params;
         if (nowMs - (lastEval.get(load.id) ?? 0) < num(p, 'etaEveryMin') * 60_000) continue;
 
         const place = load.loadingPointId ? places.get(load.loadingPointId) : undefined;
-        await this.evaluate(load, {
+        const outcome = await this.evaluate(load, {
           nowMs,
           primary: tripRoutes.get(load.id)!.primary,
           position: latest.get(load.vehicleId!) ?? null,
@@ -154,10 +184,22 @@ export class PreTransitEtaMonitor {
               : null,
           params: p,
         });
+        if (outcome === 'written') summary.written += 1;
+        else if (outcome === 'stale') summary.stale += 1;
+        else {
+          summary.skipped += 1;
+          this.logger.debug(
+            { tripId: load.id, status: load.status, reason: outcome },
+            'Pre-transit ETA skipped',
+          );
+        }
       } catch (err) {
+        summary.failed += 1;
         this.logger.error({ err, tripId: load.id }, 'Pre-transit ETA failed');
       }
     }
+    this.logger.info(summary, 'Pre-transit ETA tick');
+    return summary;
   }
 
   private async evaluate(
@@ -170,7 +212,7 @@ export class PreTransitEtaMonitor {
       loadingPoint: LatLng | null;
       params: Record<string, number | boolean | string>;
     },
-  ): Promise<void> {
+  ): Promise<'written' | 'stale' | 'no_position' | 'no_target'> {
     const { nowMs, primary, position, params: p } = input;
     const key = tripEtaKey(load.id);
     const headingToPlant = HEADING_TO_PLANT.includes(load.status);
@@ -181,7 +223,7 @@ export class PreTransitEtaMonitor {
       nowMs - position.recordedAtMs > num(p, 'staleAfterMin') * 60_000
     ) {
       await this.redis.hset(key, { stale: '1', stage: load.status, evaluatedAt: String(nowMs) });
-      return;
+      return 'stale';
     }
 
     const atPlantAt = load.milestones.atPlantAt ? Date.parse(load.milestones.atPlantAt) : null;
@@ -195,7 +237,8 @@ export class PreTransitEtaMonitor {
       loadingPoint: input.loadingPoint,
       params: p,
     });
-    if (!estimate) return; // e.g. no position yet: nothing to measure the approach from
+    // No position yet, or nowhere to measure the approach to (no loading point, no approach leg).
+    if (!estimate) return position ? 'no_target' : 'no_position';
 
     const promisedMs = promisedTime(
       primary.promisedAt,
@@ -215,6 +258,7 @@ export class PreTransitEtaMonitor {
       stale: '0',
       evaluatedAt: String(nowMs),
     });
+    return 'written';
   }
 
   private async lastEvaluated(tripIds: string[]): Promise<Map<string, number>> {

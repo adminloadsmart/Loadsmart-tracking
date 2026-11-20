@@ -3,7 +3,7 @@ import type Redis from 'ioredis';
 import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   drainPointStreams,
   infraAvailable,
@@ -304,6 +304,33 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     expect(
       await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts WHERE rule_id = 'DELAY-GPS'`),
     ).toEqual([{ n: 0 }]);
+  });
+
+  it('a failing delay step does not stop the pre-transit ETA', async () => {
+    const trip = await setup(600, 60, 'in_transit_loading');
+    await routes.planner.planPending();
+    await redis.hset(`trk:veh:${trip.vehicleId}:latest`, {
+      tenantId: TENANT,
+      lat: '28.55',
+      lng: '77.2',
+      recordedAt: new Date().toISOString(),
+      source: 'driver_app',
+      motion: 'moving',
+      tripId: trip.tripId,
+    });
+    const broken = vi
+      .spyOn(routes.repository, 'inTransitTripsWithRoute')
+      .mockRejectedValue(new Error('boom'));
+    try {
+      await rules.tick(Date.now());
+    } finally {
+      broken.mockRestore();
+    }
+    expect(await redis.hgetall(`trk:trip:${trip.tripId}:eta`)).toMatchObject({
+      basis: 'pre_transit',
+      stage: 'in_transit_loading',
+      stale: '0',
+    });
   });
 
   it('pre-transit: no position yet → eta stays null', async () => {

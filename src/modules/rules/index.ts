@@ -93,10 +93,18 @@ export function createRulesModule(deps: {
     hook,
     /** Scheduler-leader tick for time-driven rules (inactivity, delay + ETA, signal loss). */
     async tick(nowMs = Date.now()) {
-      await publishAlerts(await monitor.tick(nowMs));
-      if (delay) await publishAlerts(await delay.tick(nowMs));
-      if (preTransitEta) await preTransitEta.tick(nowMs);
-      await signalLoss.tick(nowMs);
+      // Each step on its own: one failing monitor must not stop the others (e.g. the ETAs).
+      const step = async (name: string, work: () => Promise<unknown>) => {
+        try {
+          await work();
+        } catch (err) {
+          deps.logger.error({ err, step: name }, 'Rules tick step failed');
+        }
+      };
+      await step('inactivity', async () => publishAlerts(await monitor.tick(nowMs)));
+      if (delay) await step('delay', async () => publishAlerts(await delay.tick(nowMs)));
+      if (preTransitEta) await step('pre-transit-eta', () => preTransitEta.tick(nowMs));
+      await step('signal-loss', () => signalLoss.tick(nowMs));
     },
   };
 }
