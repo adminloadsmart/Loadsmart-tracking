@@ -177,6 +177,17 @@ export class RoutesRepository {
     return result;
   }
 
+  /** Drawn approach legs (first tracked point → loading point) of many trips, by trip id. */
+  async approachRoutes(tripIds: string[]): Promise<Map<string, ApproachRouteRow>> {
+    if (tripIds.length === 0) return new Map();
+    const rows: ApproachRouteRow[] = await this.dataSource.query(
+      `SELECT trip_id, polyline, distance_m, duration_s FROM ${APPROACH_TABLE}
+       WHERE trip_id = ANY($1::uuid[]) AND polyline IS NOT NULL`,
+      [tripIds],
+    );
+    return new Map(rows.map((row) => [row.trip_id, row]));
+  }
+
   async saveApproachRoute(input: {
     tripId: string;
     origin: { lat: number; lng: number };

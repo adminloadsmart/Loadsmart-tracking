@@ -124,10 +124,11 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     );
 
   /** A load in the main tables (plant with coordinates, drop with an address only). */
-  async function setup(promisedInMin: number, startedMinAgo: number) {
+  async function setup(promisedInMin: number, startedMinAgo: number, status?: string) {
     const seeded = await seedLoad(ds, {
       tenantId: TENANT,
       code: 'LOAD-RT',
+      ...(status ? { status } : {}),
       registrationNumber: 'UK07AB0001',
       startedAt: new Date(Date.now() - startedMinAgo * 60_000),
       origin: { lat: 28.6, lng: 77.2 },
@@ -163,12 +164,13 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
   async function feed(
     trip: { tripId: string; vehicleId: string },
     fixes: Array<{ minAgo: number; alongM: number; offM?: number; speed?: number }>,
+    source: NormalizedPoint['source'] = 'driver_app',
   ) {
     const batch: NormalizedPoint[] = fixes.map((f) => ({
       tenantId: TENANT,
       vehicleId: trip.vehicleId,
       tripId: trip.tripId,
-      source: 'driver_app',
+      source,
       sourceRef: 'd1',
       recordedAt: new Date(Date.now() - f.minAgo * 60_000).toISOString(),
       receivedAt: new Date().toISOString(),
@@ -224,6 +226,94 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     );
     expect(alert).toMatchObject({ status: 'open' });
     expect(['warning', 'critical']).toContain(alert.severity);
+  });
+
+  it('refreshes the ETA every minute but still raises DELAY only after 2 evaluations 15 min apart', async () => {
+    const trip = await setup(60, 180);
+    await routes.planner.planPending();
+    await promise(trip.tripId, trip.promisedInMin);
+    await feed(
+      trip,
+      Array.from({ length: 37 }, (_, i) => ({ minAgo: 180 - i * 5, alongM: i * 833 })),
+    );
+    const t0 = Date.now();
+    await rules.tick(t0);
+    const first = await redis.hget(`trk:trip:${trip.tripId}:eta`, 'evaluatedAt');
+    expect(Number(first)).toBe(t0);
+
+    await rules.tick(t0 + 2 * 60_000); // ETA refreshed, but no second alert evaluation yet
+    expect(Number(await redis.hget(`trk:trip:${trip.tripId}:eta`, 'evaluatedAt'))).toBe(
+      t0 + 2 * 60_000,
+    );
+    expect(
+      await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts WHERE rule_id = 'DELAY-GPS'`),
+    ).toEqual([{ n: 0 }]);
+
+    await rules.tick(t0 + 16 * 60_000);
+    expect(
+      await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts WHERE rule_id = 'DELAY-GPS'`),
+    ).toEqual([{ n: 1 }]);
+  });
+
+  it('SIM fixes move the in-transit progress and remaining km', async () => {
+    const trip = await setup(600, 60);
+    await routes.planner.planPending();
+    await feed(
+      trip,
+      Array.from({ length: 7 }, (_, i) => ({ minAgo: 30 - i * 5, alongM: 20_000 + i * 2_000 })),
+      'sim',
+    );
+    await rules.tick(Date.now());
+    const view = await request(app)
+      .get(`/v1/trips/${trip.tripId}`)
+      .set('Authorization', `Bearer ${token()}`);
+    expect(view.body.data.eta).toMatchObject({ stale: false, stage: null });
+    expect(view.body.data.eta.remainingKm).toBeCloseTo(111.2 - 32, 0);
+  });
+
+  it('pre-transit: a truck_assigned trip gets a delivery ETA (approach + dwell + route), no alerts', async () => {
+    const trip = await setup(-600, 60, 'truck_assigned'); // promise long past: must not alert
+    await routes.planner.planPending();
+    // The truck is ~22 km short of the plant (south of it, on no drawn approach leg).
+    await redis.hset(`trk:veh:${trip.vehicleId}:latest`, {
+      tenantId: TENANT,
+      lat: '28.4',
+      lng: '77.2',
+      recordedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+      source: 'sim',
+      motion: 'moving',
+      tripId: trip.tripId,
+    });
+    const now = Date.now();
+    await rules.tick(now);
+
+    const list = await request(app)
+      .get('/v1/trips?state=active')
+      .set('Authorization', `Bearer ${token()}`);
+    const [listed] = list.body.data.trips;
+    expect(listed.eta).toMatchObject({
+      basis: 'pre_transit',
+      stage: 'truck_assigned',
+      stale: false,
+    });
+    // ~22.2 km × 1.3 approach + 111.2 km route at 350 km/day, + 240 min at the plant.
+    const kmLeft = 22.24 * 1.3 + 111.2;
+    expect(listed.eta.remainingKm).toBeCloseTo(kmLeft, 0);
+    const expectedEta = now + (kmLeft / (350 / 24)) * 3_600_000 + 240 * 60_000;
+    expect(Math.abs(Date.parse(listed.eta.etaAt) - expectedEta)).toBeLessThan(5 * 60_000);
+    expect(
+      await ds.query(`SELECT count(*)::int AS n FROM tracking.alerts WHERE rule_id = 'DELAY-GPS'`),
+    ).toEqual([{ n: 0 }]);
+  });
+
+  it('pre-transit: no position yet → eta stays null', async () => {
+    const trip = await setup(600, 60, 'truck_assigned');
+    await routes.planner.planPending();
+    await rules.tick(Date.now());
+    const view = await request(app)
+      .get(`/v1/trips/${trip.tripId}`)
+      .set('Authorization', `Bearer ${token()}`);
+    expect(view.body.data.eta).toBeNull();
   });
 
   it('"already late" alerts at once: Warning when under 240 min late', async () => {
