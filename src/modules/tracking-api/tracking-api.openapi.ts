@@ -133,7 +133,7 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: {
         description:
-          '{ tripId, routeStatus, route { kind, version, distanceKm, durationMin } | null, encoding, polyline, approach { distanceKm, durationMin, encoding, polyline } | null } — route is null until planned; routeStatus says why. approach is the display-only leg from the first tracked point to the loading point (null until planned, or when the truck started at the plant)',
+          '{ tripId, routeStatus, route { kind, version, distanceKm, durationMin } | null, encoding, polyline, approach { distanceKm, durationMin, encoding, polyline, startAddress } | null } — route is null until planned; routeStatus says why. approach is the display-only leg from the first tracked point to the loading point (null until planned, or when the truck started at the plant)',
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,

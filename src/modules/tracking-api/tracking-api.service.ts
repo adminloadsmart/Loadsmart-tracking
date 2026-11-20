@@ -2,6 +2,7 @@ import type { TenantScope } from '../../shared/auth/staff-token';
 import { NotFoundError, ValidationError } from '../../shared/errors';
 import type { AddressResolver } from '../geocoding';
 import type { PointSource } from '../points';
+import { decodePolyline } from '../routes';
 import type { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
 import {
   PlannedRouteRow,
@@ -326,6 +327,9 @@ export class TrackingApiService {
       this.repository.approachRoute(tripId),
     ]);
     const route = routes.get(tripId);
+    // Where the truck started: the approach leg's first point, with its address when known.
+    const start = approach ? (decodePolyline(approach.polyline)[0] ?? null) : null;
+    const [startAddress] = await (this.addresses?.resolve([start]) ?? Promise.resolve([null]));
     return {
       tripId,
       routeStatus: trip.route_status,
@@ -338,6 +342,7 @@ export class TrackingApiService {
               approach.duration_s === null ? null : Math.round(Number(approach.duration_s) / 60),
             encoding: 'google-polyline-5',
             polyline: approach.polyline,
+            startAddress: startAddress ?? null,
           }
         : null,
       ...(route
