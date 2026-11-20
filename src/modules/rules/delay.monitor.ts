@@ -19,7 +19,10 @@ const OPEN_SET = 'trk:delay:open';
 const THRESHOLD_TTL_MS = 5 * 60_000;
 
 interface DelayState {
+  /** Last alert evaluation (every evaluateEveryMin). */
   lastEvalMs: number;
+  /** Last ETA refresh (every etaEveryMin). */
+  lastEtaMs: number;
   consecWarn: number;
   consecCrit: number;
   consecClear: number;
@@ -36,6 +39,7 @@ interface DelayState {
 
 const emptyState = (): DelayState => ({
   lastEvalMs: 0,
+  lastEtaMs: 0,
   consecWarn: 0,
   consecCrit: 0,
   consecClear: 0,
@@ -49,8 +53,9 @@ const emptyState = (): DelayState => ({
 });
 
 /**
- * DELAY-GPS, time-driven half (scheduler leader): every 15 min per in-transit trip, project the
- * ETA from the progress the processor tracks (progress-gps.rule) and apply the sheet's alerting:
+ * DELAY-GPS, time-driven half (scheduler leader): every minute (etaEveryMin) per in-transit trip,
+ * project the ETA from the progress the processor tracks (progress-gps.rule); every 15 min
+ * (evaluateEveryMin) also apply the sheet's alerting:
  *  - Warning at ≥ 60 min projected delay on 2 consecutive evaluations; Critical at ≥ 240;
  *  - "already late" (past promised, not delivered) alerts at once — even when the ETA is stale;
  *  - clears below 30 min on 2 consecutive evaluations, or on delivery;
@@ -83,15 +88,22 @@ export class DelayMonitor {
       nowMs,
     );
     const changes: AlertChange[] = [];
+    let evaluated = 0;
+    let failed = 0;
 
     for (const trip of trips) {
       const tripRoutes = routes.get(trip.id);
       if (!tripRoutes) continue;
       try {
         changes.push(...(await this.evaluateTrip(trip, tripRoutes.primary, nowMs)));
+        evaluated += 1;
       } catch (err) {
+        failed += 1;
         this.logger.error({ err, tripId: trip.id }, 'Delay evaluation failed');
       }
+    }
+    if (trips.length > 0) {
+      this.logger.info({ inTransit: trips.length, evaluated, failed }, 'Delay ETA tick');
     }
 
     // Delivered / no longer in transit: clear their open delay alerts.
@@ -118,8 +130,12 @@ export class DelayMonitor {
       ...emptyState(),
       ...parseState(await this.redis.hgetall(delayStateKey(trip.id))),
     };
-    if (nowMs - state.lastEvalMs < num(p, 'evaluateEveryMin') * 60_000) return [];
-    state.lastEvalMs = nowMs;
+    // The ETA refreshes every etaEveryMin; the alerting below keeps its own (slower) cadence, so
+    // "2 consecutive evaluations" still means ~30 min, not 2 min.
+    const alertsDue = nowMs - state.lastEvalMs >= num(p, 'evaluateEveryMin') * 60_000;
+    const etaDue = nowMs - state.lastEtaMs >= num(p, 'etaEveryMin') * 60_000;
+    if (!alertsDue && !etaDue) return [];
+    state.lastEtaMs = nowMs;
 
     const progress = await this.progress(trip, primary.version);
     const startMs = trip.tracking_started_at?.getTime() ?? nowMs;
@@ -158,7 +174,15 @@ export class DelayMonitor {
         stale: '0',
         evaluatedAt: String(nowMs),
       });
+      // Written by the pre-transit ETA while the truck was still before the plant exit.
+      await this.redis.hdel(tripEtaKey(trip.id), 'stage');
     }
+
+    if (!alertsDue) {
+      await this.redis.hset(delayStateKey(trip.id), serializeState(state));
+      return [];
+    }
+    state.lastEvalMs = nowMs;
 
     const effects = new Effects();
     const delayMin = alreadyLate
@@ -347,6 +371,7 @@ export class DelayMonitor {
     Object.assign(state, {
       ...emptyState(),
       lastEvalMs: state.lastEvalMs,
+      lastEtaMs: state.lastEtaMs,
       lateConsec: state.lateConsec,
       lateNotifiedMin: state.lateNotifiedMin,
       lateCount: state.lateCount,
@@ -385,6 +410,7 @@ export class DelayMonitor {
       ruleStateKey(trip.vehicle_id),
       `${RULE}|driver_app`,
       `${RULE}|roadcast`,
+      `${RULE}|sim`,
     );
     const candidates = fields
       .filter((v): v is string => !!v)
@@ -398,6 +424,7 @@ function parseState(raw: Record<string, string>): Partial<DelayState> {
   if (!raw.lastEvalMs) return {};
   return {
     lastEvalMs: Number(raw.lastEvalMs),
+    lastEtaMs: Number(raw.lastEtaMs || 0),
     consecWarn: Number(raw.consecWarn),
     consecCrit: Number(raw.consecCrit),
     consecClear: Number(raw.consecClear),
@@ -414,6 +441,7 @@ function parseState(raw: Record<string, string>): Partial<DelayState> {
 function serializeState(s: DelayState): Record<string, string> {
   return {
     lastEvalMs: String(s.lastEvalMs),
+    lastEtaMs: String(s.lastEtaMs),
     consecWarn: String(s.consecWarn),
     consecCrit: String(s.consecCrit),
     consecClear: String(s.consecClear),

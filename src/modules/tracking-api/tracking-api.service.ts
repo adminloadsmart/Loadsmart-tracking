@@ -92,7 +92,10 @@ type EtaView = {
   projectedDelayMin: number;
   remainingKm: number;
   speedKmh: number;
+  /** observed | planned (on the road to the drop) | pre_transit (before leaving the plant). */
   basis: string;
+  /** Load status the pre-transit ETA was computed for; null once on the road to the drop. */
+  stage: string | null;
   stale: boolean;
   evaluatedAt: string;
 };
@@ -107,6 +110,7 @@ function etaView(eta: Record<string, string>): EtaView | null {
     remainingKm: Number(eta.remainingKm),
     speedKmh: Number(eta.speedKmh),
     basis: eta.basis,
+    stage: eta.stage || null,
     stale: eta.stale === '1',
     evaluatedAt: new Date(Number(eta.evaluatedAt)).toISOString(),
   };

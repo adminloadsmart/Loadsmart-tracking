@@ -15,6 +15,7 @@ import { overspeedGpsRule } from './rules/overspeed-gps.rule';
 import { deviationGpsRule } from './rules/deviation-gps.rule';
 import { progressGpsRule } from './rules/progress-gps.rule';
 import { DelayMonitor } from './delay.monitor';
+import { PreTransitEtaMonitor } from './pre-transit-eta';
 import { SignalLossMonitor } from './signal-loss.monitor';
 import type { FixRule } from './rule.types';
 
@@ -75,15 +76,35 @@ export function createRulesModule(deps: {
         mainData,
       )
     : null;
+  // Delivery ETA from truck assignment until the truck leaves the plant (no alerts).
+  const preTransitEta = deps.routes
+    ? new PreTransitEtaMonitor(
+        deps.redis,
+        mainData,
+        deps.routes.repository,
+        deps.routes.store,
+        engine,
+        deps.logger,
+      )
+    : null;
   return {
     repository,
     engine,
     hook,
-    /** Scheduler-leader tick for time-driven rules (inactivity, delay, signal loss). */
+    /** Scheduler-leader tick for time-driven rules (inactivity, delay + ETA, signal loss). */
     async tick(nowMs = Date.now()) {
-      await publishAlerts(await monitor.tick(nowMs));
-      if (delay) await publishAlerts(await delay.tick(nowMs));
-      await signalLoss.tick(nowMs);
+      // Each step on its own: one failing monitor must not stop the others (e.g. the ETAs).
+      const step = async (name: string, work: () => Promise<unknown>) => {
+        try {
+          await work();
+        } catch (err) {
+          deps.logger.error({ err, step: name }, 'Rules tick step failed');
+        }
+      };
+      await step('inactivity', async () => publishAlerts(await monitor.tick(nowMs)));
+      if (delay) await step('delay', async () => publishAlerts(await delay.tick(nowMs)));
+      if (preTransitEta) await step('pre-transit-eta', () => preTransitEta.tick(nowMs));
+      await step('signal-loss', () => signalLoss.tick(nowMs));
     },
   };
 }

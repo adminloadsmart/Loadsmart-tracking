@@ -80,7 +80,10 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     ),
     request: { query: listTripsSchema.shape.query },
     responses: {
-      200: { description: '{ trips: [trip summary + position | null + eta | null] }' },
+      200: {
+        description:
+          '{ trips: [trip summary + position | null + eta | null] }. eta = delivery ETA { etaAt, promisedAt, projectedDelayMin, remainingKm, speedKmh, basis (observed | planned | pre_transit), stage, stale, evaluatedAt }, from truck assignment on (refreshed every minute); null until the trip has a planned route and, before the plant, a position.',
+      },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,
     },

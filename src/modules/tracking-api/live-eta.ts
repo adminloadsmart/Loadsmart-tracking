@@ -1,7 +1,7 @@
 import type Redis from 'ioredis';
 import type { ProgressState } from '../rules/rules/progress-gps.rule';
 
-const progressFields = ['DELAY-GPS|driver_app', 'DELAY-GPS|roadcast'];
+const progressFields = ['DELAY-GPS|driver_app', 'DELAY-GPS|roadcast', 'DELAY-GPS|sim'];
 const round1 = (value: number) => Math.round(value * 10) / 10;
 
 /**

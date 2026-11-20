@@ -106,7 +106,8 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
     enabled: true,
     audience: ['shipper', 'trip_ops'],
     params: {
-      evaluateEveryMin: 15,
+      evaluateEveryMin: 15, // delay alerts / LS_N_0030 cadence
+      etaEveryMin: 1, // the trip's ETA is refreshed this often (no alerting)
       speedWindowH: 3, // speed = route km covered over the last 3 h (halts included)…
       minCoveredKm: 50, // …once 50 km is covered; before that the planned speed
       fallbackKmPerDay: 350, // promised = start + route km / 350 km per day when not given
@@ -119,6 +120,9 @@ export const RULE_DEFAULTS: Partial<Record<RuleId, RuleDefaults>> = {
       // LS_N_0030 notice (main backend "delivery will be late"):
       lateNoticeDefaultMin: 1440, // the company's limit when its org admin never set one (1 day)
       lateCauseMinMin: 60, // a cause (halts / deviation) must account for this much to be named
+      // Delivery ETA before the truck leaves the plant (truck_assigned … loaded), no alerts:
+      loadingDwellMin: 240, // time allowed at the loading point
+      preTransitKmPerDay: 350, // planning rate for the approach and plant → drop legs
     },
   },
   'INACT-GPS': {
