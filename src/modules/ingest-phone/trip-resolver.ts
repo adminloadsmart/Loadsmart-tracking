@@ -12,6 +12,15 @@ export interface ResolvedTrip {
   geofenceTripId?: string;
 }
 
+/** Why a driver's point matched no trip — the `result` label of the dropped-points metric. */
+export type DropReason = 'no_active_trip' | 'source_mismatch' | 'outside_window';
+
+export interface DetailedResolution {
+  trip: ResolvedTrip | null;
+  /** Set only when `trip` is null. */
+  dropReason: DropReason | null;
+}
+
 // Mirrors TRIP_START_GRACE in trip.repository.ts.
 const START_GRACE_MS = 10 * 60_000;
 // Points recorded this recently are "live": if the driver has no active trip right now, they
@@ -37,8 +46,21 @@ export class TripResolver {
     recordedAts: string[],
     nowMs = Date.now(),
   ): Promise<Array<ResolvedTrip | null>> {
+    const detailed = await this.resolveDetailed(driverId, tenantIds, recordedAts, nowMs);
+    return detailed.map((entry) => entry.trip);
+  }
+
+  /** Same as `resolve`, plus why each unmatched point was dropped (for the metrics). */
+  async resolveDetailed(
+    driverId: string,
+    tenantIds: string[],
+    recordedAts: string[],
+    nowMs = Date.now(),
+  ): Promise<DetailedResolution[]> {
     const active = await this.index.getTripRefForDriver(driverId);
     const result: Array<ResolvedTrip | null> = recordedAts.map(() => null);
+    // A point that finds no trip is, by default, "no active trip"; the checks below refine it.
+    const reasons: Array<DropReason | null> = recordedAts.map(() => 'no_active_trip');
     const fallback: number[] = [];
 
     // A delivered load followed to its exit from the drop only claims live points: an offline
@@ -64,8 +86,14 @@ export class TripResolver {
               geofenceTripId: active.tripId,
             }
           : { tripId: active.tripId, tenantId: active.tenantId, vehicleId: active.vehicleId };
-      } else if (nowMs - recordedAtMs > LIVE_WINDOW_MS) {
-        fallback.push(i);
+      } else {
+        if (active && !isTrackingSource(active.trackingSource, 'driver_app')) {
+          // The load is tracked by another source (e.g. SIM), so the app's points are not its own.
+          reasons[i] = 'source_mismatch';
+        } else if (active) {
+          reasons[i] = 'outside_window';
+        }
+        if (nowMs - recordedAtMs > LIVE_WINDOW_MS) fallback.push(i);
       }
     });
 
@@ -88,9 +116,11 @@ export class TripResolver {
                 geofenceTripId: trip.tripId,
               }
             : { tripId: trip.tripId, tenantId: trip.tenantId, vehicleId: trip.vehicleId };
+        } else if (trip?.vehicleId) {
+          reasons[i] = 'source_mismatch';
         }
       }
     }
-    return result;
+    return result.map((trip, i) => ({ trip, dropReason: trip ? null : reasons[i] }));
   }
 }

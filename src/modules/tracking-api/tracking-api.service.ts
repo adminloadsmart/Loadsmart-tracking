@@ -168,8 +168,9 @@ export class TrackingApiService {
   async fleetLive(scope: TenantScope) {
     const vehicles = await this.repository.listVehicles(scope, MAX_FLEET_VEHICLES);
     const ids = vehicles.map((vehicle) => vehicle.id);
+    // My Fleet shows where the vehicle's own GPS device is — never a phone/SIM fix from its load.
     const [latest, activeTrips] = await Promise.all([
-      this.positions.readLatest(ids),
+      this.positions.readLatestGps(ids),
       this.repository.activeTripsByVehicle(ids),
     ]);
     const now = Date.now();
@@ -189,7 +190,7 @@ export class TrackingApiService {
   async vehicleLocation(scope: TenantScope, vehicleId: string) {
     const vehicle = await this.requireVehicle(scope, vehicleId);
     const [latest, activeTrips] = await Promise.all([
-      this.positions.readLatest([vehicleId]),
+      this.positions.readLatestGps([vehicleId]),
       this.repository.activeTripsByVehicle([vehicleId]),
     ]);
     const position = latest.get(vehicleId);

@@ -26,7 +26,7 @@ const ackSeconds = new Histogram({
 });
 const pointsReceived = new Counter({
   name: 'tracking_points_received_total',
-  help: 'Points received at ingest, by source and result',
+  help: 'Points received at ingest, by source and result (accepted, or why it was dropped)',
   labelNames: ['source', 'result'] as const,
   registers: [metricsRegistry],
 });
@@ -142,13 +142,22 @@ async function ingest(
 ): Promise<Ack> {
   try {
     const recordedAts = points.map((point) => new Date(point.recordedAt).toISOString());
-    const trips = await deps.resolver.resolve(driver.driverId, driver.tenantIds, recordedAts);
+    const resolutions = await deps.resolver.resolveDetailed(
+      driver.driverId,
+      driver.tenantIds,
+      recordedAts,
+    );
+    const dropped = new Map<string, number>();
     const receivedAt = new Date().toISOString();
 
     const normalized: NormalizedPoint[] = [];
     points.forEach((point, i) => {
-      const trip = trips[i];
-      if (!trip) return;
+      const { trip, dropReason } = resolutions[i];
+      if (!trip) {
+        const reason = dropReason ?? 'no_active_trip';
+        dropped.set(reason, (dropped.get(reason) ?? 0) + 1);
+        return;
+      }
       normalized.push(
         toNormalizedPoint(
           point,
@@ -169,7 +178,15 @@ async function ingest(
     if (normalized.length > 0) {
       pointsReceived.inc({ source: 'driver_app', result: 'accepted' }, normalized.length);
     }
-    if (noTrip > 0) pointsReceived.inc({ source: 'driver_app', result: 'no_trip' }, noTrip);
+    for (const [reason, count] of dropped) {
+      pointsReceived.inc({ source: 'driver_app', result: reason }, count);
+    }
+    if (dropped.has('source_mismatch')) {
+      log.warn(
+        { driverId: driver.driverId, count: dropped.get('source_mismatch') },
+        "Driver-app points dropped: the driver's load is not tracked by the driver app",
+      );
+    }
     return { ok: true, accepted: normalized.length, noTrip };
   } catch (err) {
     log.error({ err, count: points.length }, 'Failed to ingest driver points');

@@ -105,12 +105,14 @@ export class PointProcessingService {
     }
 
     const latest = latestPositions(result.points);
+    const latestGps = latestPositions(result.points, 'roadcast');
     // Rules: effects go to Postgres (idempotent) BEFORE the Redis state moves on, and rule state
     // commits in the same MULTI as vehicle state — a crash anywhere recomputes the same effects.
     const hook = this.batchHook ? await this.batchHook.run(result.points, now) : null;
     await this.stateStore.persist({
       states: result.states,
       latest,
+      latestGps,
       distance: result.distance,
       mockLocationTrips: result.mockLocationTrips,
       extra: hook?.writeState,
@@ -147,10 +149,14 @@ export function routeTable({ point, rejected }: ProcessedPoint): PointTable {
 }
 
 /** Newest accepted, non-late point per vehicle in this batch. */
-function latestPositions(points: ProcessedPoint[]): Map<string, LatestPosition> {
+function latestPositions(
+  points: ProcessedPoint[],
+  onlySource?: NormalizedPoint['source'],
+): Map<string, LatestPosition> {
   const latest = new Map<string, LatestPosition>();
   for (const { point, rejected } of points) {
     if (rejected || point.flags?.late) continue;
+    if (onlySource && point.source !== onlySource) continue;
     const current = latest.get(point.vehicleId);
     if (current && Date.parse(current.recordedAt) >= Date.parse(point.recordedAt)) continue;
     latest.set(point.vehicleId, {

@@ -7,6 +7,9 @@ export const vehicleSourceStateKey = (vehicleId: string, source: PointSource) =>
   `trk:veh:${vehicleId}:src:${source}`;
 /** Latest accepted position of the vehicle from any source — what the live map reads (Phase 3). */
 export const vehicleLatestKey = (vehicleId: string) => `trk:veh:${vehicleId}:latest`;
+/** Latest accepted position from the vehicle's GPS device (roadcast) only — what My Fleet reads, so
+ *  a phone or SIM point from the vehicle's load never replaces the device's position. */
+export const vehicleGpsKey = (vehicleId: string) => `trk:veh:${vehicleId}:gps`;
 export const tripMetricsKey = (tripId: string) => `trk:trip:${tripId}:metrics`;
 export const tripFraudKey = (tripId: string) => `trk:trip:${tripId}:fraud`;
 
@@ -23,9 +26,25 @@ export interface LatestPosition {
   tripId: string | null;
 }
 
+function latestFields(position: LatestPosition) {
+  return {
+    tenantId: position.tenantId,
+    lat: position.lat,
+    lng: position.lng,
+    recordedAt: position.recordedAt,
+    source: position.source,
+    speedKmh: position.speedKmh ?? '',
+    heading: position.heading ?? '',
+    motion: position.motion,
+    tripId: position.tripId ?? '',
+  };
+}
+
 export interface PersistInput {
   states: Map<string, VehicleState>;
   latest: Map<string, LatestPosition>;
+  /** Newest GPS-device (roadcast) position per vehicle in this batch. */
+  latestGps?: Map<string, LatestPosition>;
   distance: Map<string, number>;
   mockLocationTrips: Set<string>;
   /** More writes to commit atomically with the vehicle state (e.g. rule state). */
@@ -70,10 +89,13 @@ export class VehicleStateStore {
   }
 
   /** Latest positions for many vehicles in one round trip; vehicles never seen are omitted. */
-  async readLatest(vehicleIds: string[]): Promise<Map<string, LatestPosition>> {
+  async readLatest(
+    vehicleIds: string[],
+    keyFor: (vehicleId: string) => string = vehicleLatestKey,
+  ): Promise<Map<string, LatestPosition>> {
     if (vehicleIds.length === 0) return new Map();
     const pipeline = this.redis.pipeline();
-    for (const id of vehicleIds) pipeline.hgetall(vehicleLatestKey(id));
+    for (const id of vehicleIds) pipeline.hgetall(keyFor(id));
     const results = (await pipeline.exec()) ?? [];
     const latest = new Map<string, LatestPosition>();
     vehicleIds.forEach((vehicleId, i) => {
@@ -97,6 +119,17 @@ export class VehicleStateStore {
     return latest;
   }
 
+  /** GPS-device positions only. Until a vehicle's first GPS point after this key was introduced,
+   *  its any-source latest counts when that one came from the device. */
+  async readLatestGps(vehicleIds: string[]): Promise<Map<string, LatestPosition>> {
+    const gps = await this.readLatest(vehicleIds, vehicleGpsKey);
+    const missing = vehicleIds.filter((id) => !gps.has(id));
+    for (const [id, position] of await this.readLatest(missing)) {
+      if (position.source === 'roadcast') gps.set(id, position);
+    }
+    return gps;
+  }
+
   /** Accumulated distance per source (metres) and fraud flags for a trip. */
   async readTripMetrics(
     tripId: string,
@@ -115,6 +148,7 @@ export class VehicleStateStore {
   async persist({
     states,
     latest,
+    latestGps,
     distance,
     mockLocationTrips,
     extra,
@@ -122,6 +156,7 @@ export class VehicleStateStore {
     if (
       states.size === 0 &&
       latest.size === 0 &&
+      !latestGps?.size &&
       distance.size === 0 &&
       mockLocationTrips.size === 0 &&
       !extra
@@ -142,18 +177,11 @@ export class VehicleStateStore {
         tripId: state.tripId ?? '',
       });
     }
+    for (const [vehicleId, position] of latestGps ?? []) {
+      multi.hset(vehicleGpsKey(vehicleId), latestFields(position));
+    }
     for (const [vehicleId, position] of latest) {
-      multi.hset(vehicleLatestKey(vehicleId), {
-        tenantId: position.tenantId,
-        lat: position.lat,
-        lng: position.lng,
-        recordedAt: position.recordedAt,
-        source: position.source,
-        speedKmh: position.speedKmh ?? '',
-        heading: position.heading ?? '',
-        motion: position.motion,
-        tripId: position.tripId ?? '',
-      });
+      multi.hset(vehicleLatestKey(vehicleId), latestFields(position));
     }
     for (const [key, meters] of distance) {
       const [tripId, source] = key.split('|');

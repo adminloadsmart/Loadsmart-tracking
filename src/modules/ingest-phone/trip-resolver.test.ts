@@ -90,6 +90,23 @@ describe('TripResolver', () => {
     expect((await resolve('sim'))[0]).toBeNull();
   });
 
+  it('says why a point matched no trip', async () => {
+    const detailed = (trip: TripRef | null) =>
+      new TripResolver(
+        { getTripRefForDriver: async () => trip } as unknown as ActiveTripIndex,
+        {} as TripRepository,
+      ).resolveDetailed('d1', [TENANT], [recordedAt], now);
+    expect((await detailed(null))[0]).toEqual({ trip: null, dropReason: 'no_active_trip' });
+    expect((await detailed({ ...ref('in_transit_unloading'), trackingSource: 'sim' }))[0]).toEqual({
+      trip: null,
+      dropReason: 'source_mismatch',
+    });
+    expect(
+      (await detailed({ ...ref('in_transit_unloading'), startedAtMs: now + 3_600_000 }))[0],
+    ).toEqual({ trip: null, dropReason: 'outside_window' });
+    expect((await detailed(ref('in_transit_unloading')))[0]).toMatchObject({ dropReason: null });
+  });
+
   describe('offline batch (older points, no active trip in Redis)', () => {
     const old = new Date(now - 60 * 60_000).toISOString();
     const fallbackFor = (approach: boolean) =>
