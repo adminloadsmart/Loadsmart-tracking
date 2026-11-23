@@ -15,6 +15,20 @@ const KEY_DECIMALS = 3;
 const FOUND_TTL_S = 30 * 24 * 3600;
 const MISSING_TTL_S = 3600;
 
+// A Google plus code ("XR3H+5WQ", or a short "5WQ+X2") and the comma after it.
+const PLUS_CODE_RE =
+  /(^|[\s,])[23456789CFGHJMPQRVWX]{2,8}\+[23456789CFGHJMPQRVWX]{0,3}(?=[\s,]|$)\s*,?/gi;
+
+/** "XR3H+5WQ, Bhattian, Ludhiana, Punjab 141008, India" → "Bhattian, Ludhiana, Punjab 141008, India". */
+export function stripPlusCode(address: string): string | null {
+  const cleaned = address
+    .replace(PLUS_CODE_RE, '$1')
+    .replace(/^[\s,]+/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  return cleaned || null;
+}
+
 /** Google Geocoding API, reverse lookup (same key as route planning). */
 export class GoogleReverseGeocoder implements ReverseGeocoder {
   readonly name = 'google-geocoding';
@@ -31,11 +45,15 @@ export class GoogleReverseGeocoder implements ReverseGeocoder {
     if (!response.ok) throw new Error(`Geocoding API ${response.status}`);
     const body = (await response.json()) as {
       status: string;
-      results?: Array<{ formatted_address?: string }>;
+      results?: Array<{ formatted_address?: string; types?: string[] }>;
     };
     if (body.status === 'ZERO_RESULTS') return null;
     if (body.status !== 'OK') throw new Error(`Geocoding API status ${body.status}`);
-    return body.results?.[0]?.formatted_address ?? null;
+    // Google's first result is often just the plus code ("XR3H+5WQ, Ludhiana, …"): prefer a street
+    // address, then strip any plus code still left in it.
+    const results = body.results ?? [];
+    const best = results.find((r) => !r.types?.includes('plus_code')) ?? results[0];
+    return best?.formatted_address ? stripPlusCode(best.formatted_address) : null;
   }
 }
 
@@ -78,7 +96,11 @@ export class AddressResolver {
     } catch (err) {
       this.logger?.warn({ err }, 'Address resolution failed');
     }
-    return keys.map((k) => (k ? (found.get(k) ?? null) : null));
+    // Cleaned here too, so addresses cached before plus codes were stripped come out clean.
+    return keys.map((k) => {
+      const address = k ? found.get(k) : null;
+      return address ? stripPlusCode(address) : null;
+    });
   }
 
   private async lookup(key: string, point: LatLng): Promise<string | null> {

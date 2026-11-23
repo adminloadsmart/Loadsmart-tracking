@@ -12,6 +12,7 @@ const ref = (loadStatus: string): TripRef => ({
   startedAtMs: null,
   loadStatus,
   trackingSource: null,
+  postingType: null,
 });
 const resolverFor = (trip: TripRef) =>
   new TripResolver(
@@ -88,6 +89,23 @@ describe('TripResolver', () => {
     // A GPS-tracked load ignores the phone.
     expect((await resolve('gps'))[0]).toBeNull();
     expect((await resolve('sim'))[0]).toBeNull();
+  });
+
+  it.each(['market_fleet', 'indent'])(
+    "takes a %s driver's points though the shipper's tenant isn't theirs",
+    async (postingType) => {
+      const placed = { ...ref('in_transit_unloading'), postingType, trackingSource: 'driver_app' };
+      const [trip] = await resolverFor(placed).resolve('d1', [], [recordedAt], now);
+      expect(trip).toEqual({ tripId: 'trip-1', tenantId: TENANT, vehicleId: 'veh-1' });
+    },
+  );
+
+  it('still needs the tenant for an own-fleet (or not yet known) load', async () => {
+    for (const postingType of ['own_fleet', null]) {
+      const own = { ...ref('in_transit_unloading'), postingType };
+      const [trip] = await resolverFor(own).resolve('d1', ['other-tenant'], [recordedAt], now);
+      expect(trip).toBeNull();
+    }
   });
 
   it('says why a point matched no trip', async () => {

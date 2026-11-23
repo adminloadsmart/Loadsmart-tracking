@@ -90,5 +90,6 @@ function refs(load: MainLoad) {
     loadStatus: load.status,
     trackingSource: load.trackingSource,
     deviceImei: load.deviceImei,
+    postingType: load.postingType,
   };
 }

@@ -40,6 +40,15 @@ const ENDED_STATUSES: readonly LoadStatus[] = [
  * Roadcast device, driver_app → the phone, sim → SIM). Unset, or FASTag (no points of its own),
  * puts no restriction on the source.
  */
+/**
+ * A market or indent load: its driver works for the transporter, not the shipper, so their app
+ * token never carries the load's tenant. The load naming them as its driver (loads.driver_id) is
+ * what lets their points in. Unknown (null) counts as own fleet.
+ */
+export function isPlacedTruckLoad(postingType: string | null | undefined): boolean {
+  return !!postingType && postingType !== 'own_fleet';
+}
+
 export function isTrackingSource(
   trackingSource: string | null | undefined,
   pointSource: 'driver_app' | 'roadcast' | 'sim',

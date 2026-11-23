@@ -50,6 +50,9 @@ export function createDriverSocketAuth(deps: {
   isBlocked: (jti: string | null) => Promise<boolean>;
   /** The driver's active tenant relations, resolved live like the main backend's createDriverAuth. */
   activeTenantIds: (driverId: string) => Promise<string[]>;
+  /** Whether a load names the driver right now (the active-trip index): a market / indent driver
+   *  has no relation with the shipper but must still send that load's points. */
+  hasActiveTrip: (driverId: string) => Promise<boolean>;
 }) {
   return async (socket: Socket, next: (err?: Error) => void): Promise<void> => {
     const token = extractHandshakeToken(socket.handshake);
@@ -59,10 +62,11 @@ export function createDriverSocketAuth(deps: {
       return;
     }
     // A tenant-pinned token carries its tenant; an identity token resolves the live relations. A
-    // driver with none is rejected, same as the main backend's requireTenant.
+    // driver with none is rejected, same as the main backend's requireTenant — unless a market /
+    // indent load names them (TripResolver then only places points on that load).
     if (identity.tenantIds.length === 0) {
       identity.tenantIds = await deps.activeTenantIds(identity.driverId);
-      if (identity.tenantIds.length === 0) {
+      if (identity.tenantIds.length === 0 && !(await deps.hasActiveTrip(identity.driverId))) {
         next(new Error('unauthorized'));
         return;
       }

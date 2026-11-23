@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type Redis from 'ioredis';
-import { AddressResolver, type ReverseGeocoder } from './address-resolver';
+import { AddressResolver, stripPlusCode, type ReverseGeocoder } from './address-resolver';
 
 function fakeRedis() {
   const store = new Map<string, string>();
@@ -20,11 +20,7 @@ describe('AddressResolver', () => {
     const reverse = vi.fn(async () => 'Jind, Haryana');
     const geocoder: ReverseGeocoder = { name: 'fake', reverse };
     const resolver = new AddressResolver(fakeRedis(), geocoder);
-    const points = [
-      { lat: 29.31501, lng: 76.31501 },
-      { lat: 29.31504, lng: 76.31498 },
-      null,
-    ];
+    const points = [{ lat: 29.31501, lng: 76.31501 }, { lat: 29.31504, lng: 76.31498 }, null];
     expect(await resolver.resolve(points)).toEqual(['Jind, Haryana', 'Jind, Haryana', null]);
     expect(await resolver.resolve(points)).toEqual(['Jind, Haryana', 'Jind, Haryana', null]);
     expect(reverse).toHaveBeenCalledTimes(1);
@@ -39,5 +35,24 @@ describe('AddressResolver', () => {
     };
     const resolver = new AddressResolver(fakeRedis(), geocoder);
     expect(await resolver.resolve([{ lat: 1, lng: 2 }])).toEqual([null]);
+  });
+});
+
+describe('stripPlusCode', () => {
+  it('drops a full or short plus code and keeps the rest', () => {
+    expect(
+      stripPlusCode(
+        'XR3H+5WQ, New Bhagat Singh Nagar, Guru Harrai Nagar, Bhattian, Ludhiana, Punjab 141008, India',
+      ),
+    ).toBe('New Bhagat Singh Nagar, Guru Harrai Nagar, Bhattian, Ludhiana, Punjab 141008, India');
+    expect(stripPlusCode('5WQ+X2 Ludhiana, Punjab')).toBe('Ludhiana, Punjab');
+    expect(stripPlusCode('Plot 12, NH-44, Panipat')).toBe('Plot 12, NH-44, Panipat');
+    expect(stripPlusCode('XR3H+5WQ')).toBeNull();
+  });
+
+  it('cleans addresses already in the cache', async () => {
+    const reverse = vi.fn(async () => 'XR3H+5WQ, Bhattian, Ludhiana');
+    const resolver = new AddressResolver(fakeRedis(), { name: 'fake', reverse });
+    expect(await resolver.resolve([{ lat: 30.9, lng: 75.8 }])).toEqual(['Bhattian, Ludhiana']);
   });
 });

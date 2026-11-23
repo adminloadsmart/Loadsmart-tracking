@@ -71,6 +71,8 @@ export interface ActiveTripRefs {
   trackingSource?: string | null;
   /** The vehicle's GPS device IMEI, if it has one (on-trip device registry). */
   deviceImei?: string | null;
+  /** loads.posting_type — market / indent drivers aren't in the shipper's tenant (see TripRef). */
+  postingType?: string | null;
 }
 
 export interface TripRef {
@@ -82,6 +84,9 @@ export interface TripRef {
   loadStatus: string | null;
   /** loads.tracking_source (gps | driver_app | sim | fastag), null when main hasn't set it. */
   trackingSource: string | null;
+  /** loads.posting_type (own_fleet | market_fleet | indent); null on a ref written before it was
+   *  stored — treated as own fleet until the next index write. */
+  postingType: string | null;
 }
 
 function refHash(trip: ActiveTripRefs): Record<string, string> {
@@ -93,6 +98,7 @@ function refHash(trip: ActiveTripRefs): Record<string, string> {
     loadStatus: trip.loadStatus ?? '',
     trackingSource: trip.trackingSource ?? '',
     deviceImei: trip.deviceImei ?? '',
+    postingType: trip.postingType ?? '',
   };
 }
 
@@ -334,6 +340,7 @@ function toTripRef(tripId: string, ref: Record<string, string>): TripRef | null 
     startedAtMs: ref.startedAtMs ? Number(ref.startedAtMs) : null,
     loadStatus: ref.loadStatus || null,
     trackingSource: ref.trackingSource || null,
+    postingType: ref.postingType || null,
   };
 }
 

@@ -54,7 +54,7 @@ export const DEFAULT_DWELL_OPTIONS: DwellOptions = {
   detentionMs: 24 * 60 * 60_000,
   stopSpeedKmh: 5,
   stopRadiusM: 150,
-  defaultRadiusM: 300,
+  defaultRadiusM: 2000,
 };
 
 /** A dwell milestone of a visit: the truck has now been stopped long enough to have arrived, or

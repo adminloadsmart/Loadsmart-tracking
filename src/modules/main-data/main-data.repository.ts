@@ -374,7 +374,8 @@ export class MainDataRepository {
   }
 
   /**
-   * For each timestamp, the driver's load (in this tenant) whose window covers it — from the
+   * For each timestamp, the driver's load (in these tenants, or any market / indent load naming
+   * them) whose window covers it — from the
    * truck being assigned (the drive to the plant) to delivery. Places an offline batch flushed
    * after its trip ended. One round trip per batch.
    */
@@ -390,7 +391,9 @@ export class MainDataRepository {
        FROM unnest($3::text[]) AS pt(recorded_at)
        JOIN LATERAL (
          ${await this.select()}
-         WHERE l.driver_id = $1 AND l.tenant_id = ANY($2::uuid[])
+         WHERE l.driver_id = $1
+           -- A market / indent driver is outside the shipper's tenant; the load naming them is enough.
+           AND (l.tenant_id = ANY($2::uuid[]) OR l.posting_type::text <> 'own_fleet')
            AND COALESCE(l.truck_assigned_at, l.in_transit_loading_at, l.at_plant_at,
                         l.loading_confirmed_at) - make_interval(mins => $4)
                  <= pt.recorded_at::timestamptz

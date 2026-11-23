@@ -27,6 +27,7 @@ export {
   IN_TRANSIT_STATUS,
   isApproachStatus,
   isTrackingSource,
+  isPlacedTruckLoad,
   AFTER_DELIVERY_STATUSES,
   DELIVERED_FOLLOW_MS,
   GEOFENCE_ONLY_STATUSES,

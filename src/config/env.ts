@@ -100,7 +100,7 @@ export const env = {
   // Inside a loading or unloading geofence this long = detention.
   geofenceDetentionHours: numberWithDefault('GEOFENCE_DETENTION_HOURS', 24),
   // Radius of a circle geofence that has none of its own.
-  geofenceDefaultRadiusM: numberWithDefault('GEOFENCE_DEFAULT_RADIUS_M', 300),
+  geofenceDefaultRadiusM: numberWithDefault('GEOFENCE_DEFAULT_RADIUS_M', 2000),
   // Below this speed a truck counts as stopped.
   geofenceStopSpeedKmh: numberWithDefault('GEOFENCE_STOP_SPEED_KMH', 5),
   // trip.started: the truck has moved this far from where it was assigned (m)…

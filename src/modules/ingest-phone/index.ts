@@ -40,7 +40,16 @@ export function createIngestPhoneModule(deps: IngestPhoneDeps) {
 
   return {
     attach(namespace: Namespace): void {
-      namespace.use(createDriverSocketAuth({ jwtSecret: deps.jwtSecret, isBlocked, activeTenantIds }));
+      const hasActiveTrip = async (driverId: string) =>
+        (await deps.activeTrips.getTripForDriver(driverId)) !== null;
+      namespace.use(
+        createDriverSocketAuth({
+          jwtSecret: deps.jwtSecret,
+          isBlocked,
+          activeTenantIds,
+          hasActiveTrip,
+        }),
+      );
       registerDriverNamespace(namespace, {
         publisher: deps.publisher,
         resolver,

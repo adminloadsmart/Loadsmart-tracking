@@ -1,4 +1,10 @@
-import { isAfterDelivery, isGeofenceOnly, isTrackingSource, type ActiveTripIndex } from '../trips';
+import {
+  isAfterDelivery,
+  isGeofenceOnly,
+  isPlacedTruckLoad,
+  isTrackingSource,
+  type ActiveTripIndex,
+} from '../trips';
 import { TripRepository } from './trip.repository';
 
 export interface ResolvedTrip {
@@ -73,7 +79,9 @@ export class TripResolver {
       if (
         active &&
         active.vehicleId &&
-        tenantIds.includes(active.tenantId) &&
+        // The key is this driver's own, so a market / indent trip (driver outside the shipper's
+        // tenant) is theirs by the load naming them; an own-fleet one also needs the tenant.
+        (tenantIds.includes(active.tenantId) || isPlacedTruckLoad(active.postingType)) &&
         isTrackingSource(active.trackingSource, 'driver_app') &&
         (active.startedAtMs === null || recordedAtMs >= active.startedAtMs - START_GRACE_MS) &&
         (!followedAfterDelivery || isLive)

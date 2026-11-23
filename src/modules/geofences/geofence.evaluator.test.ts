@@ -297,7 +297,7 @@ describe('dwell: arrival after the stop wait, detention after 24 h', () => {
 
   it('applies the default radius to a circle with none of its own', () => {
     const noRadius: MainGeofence = { ...plant, radiusM: null };
-    const result = evaluateVehicle(VEHICLE, [fix(0, 1000), fix(60, 200)], [noRadius], {});
+    const result = evaluateVehicle(VEHICLE, [fix(0, 3000), fix(60, 200)], [noRadius], {});
     expect(result.transitions.map((t) => t.event)).toEqual(['enter']);
   });
 
