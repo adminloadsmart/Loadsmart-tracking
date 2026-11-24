@@ -2,6 +2,8 @@ import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
 import { API_VERSION_PREFIX } from '../../shared/constants/api';
 import { authenticated, authErrors, errorContent, TAGS } from '../../shared/openapi/core';
 import {
+  createTripSchema,
+  endTripSchema,
   listTripsSchema,
   timelineSchema,
   tripParamsSchema,
@@ -105,6 +107,52 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,
+    },
+  });
+
+  registry.registerPath({
+    method: 'post',
+    path: `${BASE}/trips`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.create',
+    ...authenticated(
+      "Creates a trip tracked without a load (the tracking screen's Create trip drawer), stored in " +
+        "tracking.trips with the tenant's next TRP-#### code. It starts active and is returned by " +
+        'GET /trips and /trips/{tripId} like a load trip, with `trackingOnly: true`, `direction`, ' +
+        '`transporterName`/`transporterPhone`, `loadingReportingAt` and `appointment`. A picked ' +
+        'loading point / customer address (`id`) gives the map its coordinates; a typed address ' +
+        '(`kind: address`) has none. Not live-tracked yet: no position, route or ETA. Organization ' +
+        'accounts only.',
+    ),
+    request: { body: { content: { 'application/json': { schema: createTripSchema.shape.body } } } },
+    responses: {
+      201: { description: 'The created trip, in the GET /trips/{tripId} shape' },
+      400: {
+        description: 'Validation failed, or a platform-admin (all-tenant) caller',
+        ...errorContent,
+      },
+      ...authErrors,
+    },
+  });
+
+  registry.registerPath({
+    method: 'post',
+    path: `${BASE}/trips/{tripId}/end`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.end',
+    ...authenticated(
+      'Ends (`status: ended`, the default) or cancels a trip created with POST /trips; it then ' +
+        'lists under state=ended. Load trips end with their load and are refused here.',
+    ),
+    request: {
+      params: endTripSchema.shape.params,
+      body: { content: { 'application/json': { schema: endTripSchema.shape.body } } },
+    },
+    responses: {
+      200: { description: 'The trip, now ended or cancelled' },
+      400: { description: 'Validation failed, already ended, or a load trip', ...errorContent },
+      ...authErrors,
+      404: { description: 'Trip not found or outside scope', ...errorContent },
     },
   });
 

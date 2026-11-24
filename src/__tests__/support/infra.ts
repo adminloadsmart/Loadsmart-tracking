@@ -2,6 +2,7 @@ import Redis from 'ioredis';
 import pino from 'pino';
 import { Client } from 'pg';
 import { DataSource, MigrationInterface } from 'typeorm';
+import { TrackingTripEntity } from '../../modules/tracking-api/trip.entity';
 import { MAIN_SCHEMA_SQL, MAIN_TABLES } from './constants/main-schema';
 
 /**
@@ -70,6 +71,7 @@ export async function migratedDatabase(name: string, { plain = false } = {}): Pr
   const dataSource = new DataSource({
     type: 'postgres',
     url: `${PG_BASE}/${name}`,
+    entities: [TrackingTripEntity],
     migrations: loadMigrations(),
     migrationsTransactionMode: 'each',
     migrationsTableName: 'tracking_migrations',
@@ -103,7 +105,7 @@ export async function truncateTrackingTables(ds: DataSource): Promise<void> {
   await ds.query(
     `TRUNCATE tracking.location_points, tracking.location_points_short, tracking.episodes,
               tracking.alerts, tracking.rule_settings, tracking.alert_outbox, tracking.trip_routes,
-              tracking.trip_route_status, tracking.place_geocodes, tracking.trip_notices, tracking.geofence_dwell_events, tracking.trip_start_events, tracking.sim_trips, tracking.sim_consents, tracking.trip_approach_routes,
+              tracking.trip_route_status, tracking.place_geocodes, tracking.trip_notices, tracking.geofence_dwell_events, tracking.trip_start_events, tracking.sim_trips, tracking.sim_consents, tracking.trip_approach_routes, tracking.trips,
               ${MAIN_TABLES}`,
   );
 }

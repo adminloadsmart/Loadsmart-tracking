@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { validate } from '../../shared/middleware/validate.middleware';
 import { TrackingApiController } from './tracking-api.controller';
 import {
+  createTripSchema,
+  endTripSchema,
   listTripsSchema,
   timelineSchema,
   tripParamsSchema,
@@ -24,10 +26,13 @@ export function createTrackingApiRoutes(controller: TrackingApiController): Rout
   router.get('/vehicles/:vehicleId/stats', validate(vehicleParamsSchema), controller.vehicleStats);
 
   router.get('/trips', validate(listTripsSchema), controller.listTrips);
+  // The Create trip drawer — a trip tracked without a load (tracking.trips).
+  router.post('/trips', validate(createTripSchema), controller.createTrip);
   // Static path before /:tripId so "summary" is never parsed as an id.
   router.get('/trips/summary', controller.tripsSummary);
   router.get('/trips/:tripId', validate(tripParamsSchema), controller.trip);
   router.get('/trips/:tripId/route', validate(tripParamsSchema), controller.tripRoute);
+  router.post('/trips/:tripId/end', validate(endTripSchema), controller.endTrip);
   router.get('/trips/:tripId/fastag', validate(tripParamsSchema), controller.tripFastag);
   router.get('/trips/:tripId/track', validate(tripTrackSchema), controller.tripTrack);
 
