@@ -19,10 +19,17 @@ const MISSING_TTL_S = 3600;
 const PLUS_CODE_RE =
   /(^|[\s,])[23456789CFGHJMPQRVWX]{2,8}\+[23456789CFGHJMPQRVWX]{0,3}(?=[\s,]|$)\s*,?/gi;
 
-/** "XR3H+5WQ, Bhattian, Ludhiana, Punjab 141008, India" → "Bhattian, Ludhiana, Punjab 141008, India". */
+/** Google's placeholder for a road with no name ("Unnamed Road, Madhya Pradesh 452016"). */
+const UNNAMED_ROAD_RE = /(^|,)\s*unnamed road\s*(?=,|$),?/gi;
+
+/**
+ * Drops the parts that say nothing: the plus code and "Unnamed Road".
+ * "XR3H+5WQ, Bhattian, Ludhiana, Punjab 141008, India" → "Bhattian, Ludhiana, Punjab 141008, India".
+ */
 export function stripPlusCode(address: string): string | null {
   const cleaned = address
     .replace(PLUS_CODE_RE, '$1')
+    .replace(UNNAMED_ROAD_RE, '$1')
     .replace(/^[\s,]+/, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
@@ -52,7 +59,12 @@ export class GoogleReverseGeocoder implements ReverseGeocoder {
     // Google's first result is often just the plus code ("XR3H+5WQ, Ludhiana, …"): prefer a street
     // address, then strip any plus code still left in it.
     const results = body.results ?? [];
-    const best = results.find((r) => !r.types?.includes('plus_code')) ?? results[0];
+    // Prefer a result that names a place: not a bare plus code, not an "Unnamed Road".
+    const named = results.filter((r) => !r.types?.includes('plus_code'));
+    const best =
+      named.find((r) => !/^\s*unnamed road\b/i.test(r.formatted_address ?? '')) ??
+      named[0] ??
+      results[0];
     return best?.formatted_address ? stripPlusCode(best.formatted_address) : null;
   }
 }

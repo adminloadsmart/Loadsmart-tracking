@@ -46,6 +46,25 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
 
   registry.registerPath({
     method: 'get',
+    path: `${BASE}/vehicles/{vehicleId}/stats`,
+    tags: [TAGS.VEHICLES],
+    operationId: 'vehicles.stats',
+    ...authenticated(
+      "The vehicle's day stats from its own GPS device (India days): today's distance, running / stopped / idle minutes and max / average speed, km per day for the last 7 days, and the newest fix's device readings.",
+    ),
+    request: { params: vehicleParamsSchema.shape.params },
+    responses: {
+      200: {
+        description:
+          '{ vehicleId, timezone, today { from, to, distanceKm, runningMin, stoppedMin, idleMin | null, maxSpeedKmh | null, avgSpeedKmh | null }, days [{ date, distanceKm }], device { lastFixAt, batteryPct, ignition, deviceStatus } | null }',
+      },
+      ...authErrors,
+      404: { description: 'Vehicle not found or outside scope', ...errorContent },
+    },
+  });
+
+  registry.registerPath({
+    method: 'get',
     path: `${BASE}/vehicles/{vehicleId}/timeline`,
     tags: [TAGS.VEHICLES],
     operationId: 'vehicles.timeline',
@@ -99,7 +118,7 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: {
         description:
-          'tripId, loadCode, loadStatus, postingType, route, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null',
+          'tripId, loadCode, loadTitle (null when the load has no title), loadStatus, postingType, route, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null, ewayBillNumber | null, ewayBillExpiresAt | null',
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,

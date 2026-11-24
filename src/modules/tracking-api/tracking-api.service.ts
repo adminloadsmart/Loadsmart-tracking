@@ -4,6 +4,7 @@ import type { AddressResolver } from '../geocoding';
 import type { PointSource } from '../points';
 import { decodePolyline } from '../routes';
 import type { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
+import { statsWindowStart, vehicleStats } from './vehicle-stats';
 import {
   PlannedRouteRow,
   TrackingApiRepository,
@@ -139,6 +140,7 @@ function matchesQuery(trip: TripRow, query: string): boolean {
   if (!needle) return true;
   return [
     trip.load_code,
+    trip.load_title,
     trip.customer_name,
     trip.vehicle_number,
     trip.driver_name,
@@ -182,15 +184,19 @@ export class TrackingApiService {
       this.repository.activeTripsByVehicle(ids),
     ]);
     const now = Date.now();
-    return {
-      vehicles: vehicles.map((vehicle) => {
+    // Addresses come from the Redis-cached resolver (one Google call per ~110 m cell).
+    const positions = await this.withAddresses(
+      vehicles.map((vehicle) => {
         const position = latest.get(vehicle.id);
-        return {
-          ...vehicleView(vehicle),
-          activeTripId: activeTrips.get(vehicle.id) ?? null,
-          position: position ? toPositionView(position, now) : null,
-        };
+        return position ? toPositionView(position, now) : null;
       }),
+    );
+    return {
+      vehicles: vehicles.map((vehicle, i) => ({
+        ...vehicleView(vehicle),
+        activeTripId: activeTrips.get(vehicle.id) ?? null,
+        position: positions[i],
+      })),
       truncated: vehicles.length === MAX_FLEET_VEHICLES,
     };
   }
@@ -208,6 +214,17 @@ export class TrackingApiService {
       activeTripId: activeTrips.get(vehicleId) ?? null,
       position: withAddress,
     };
+  }
+
+  /** Today's running / stopped / idle time and the last 7 days' km, from the GPS device. */
+  async vehicleStats(scope: TenantScope, vehicleId: string) {
+    await this.requireVehicle(scope, vehicleId);
+    const now = Date.now();
+    const points = await this.repository.vehicleGpsPoints(
+      vehicleId,
+      new Date(statsWindowStart(now)),
+    );
+    return { vehicleId, timezone: 'Asia/Kolkata', ...vehicleStats(points, now) };
   }
 
   async vehicleTimeline(
@@ -314,7 +331,6 @@ export class TrackingApiService {
       fraudFlags: metrics.fraudFlags,
       position: tripPosition,
       routeStatus: trip.route_status,
-      promisedDeliveryAt: trip.promised_delivery_at?.toISOString() ?? null,
       route: routeView(route),
       // Route km already driven = route length − what the ETA says is left (null until both exist).
       coveredKm: routeKm !== null && eta ? round1(Math.max(0, routeKm - eta.remainingKm)) : null,
@@ -415,6 +431,7 @@ function tripView(trip: TripRow) {
   return {
     tripId: trip.id,
     loadCode: trip.load_code,
+    loadTitle: trip.load_title,
     loadStatus: trip.load_status,
     postingType: trip.posting_type,
     route: trip.route,
@@ -431,5 +448,8 @@ function tripView(trip: TripRow) {
     origin: trip.origin,
     destination: trip.destination,
     milestones: trip.milestones,
+    promisedDeliveryAt: trip.promised_delivery_at?.toISOString() ?? null,
+    ewayBillNumber: trip.eway_bill_number,
+    ewayBillExpiresAt: trip.eway_bill_expires_at?.toISOString() ?? null,
   };
 }

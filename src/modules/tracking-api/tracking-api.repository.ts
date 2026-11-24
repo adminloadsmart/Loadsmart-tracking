@@ -6,6 +6,7 @@ import type { PointSource } from '../points';
 import { FastagCrossingRepository, type CrossingRow } from '../ingest-ulip';
 import { MainDataRepository, MainLoad, MainVehicle } from '../main-data';
 import { ACTIVE_STATUSES, LoadStatus, trackingStateFor } from '../trips';
+import type { StatsPoint } from './vehicle-stats';
 
 export interface VehicleRow {
   id: string;
@@ -46,6 +47,7 @@ export interface TripRow {
   id: string;
   tenant_id: string;
   load_code: string;
+  load_title: string | null;
   load_status: string;
   posting_type: string;
   route: string | null;
@@ -62,6 +64,8 @@ export interface TripRow {
   milestones: Record<string, string | null>;
   route_status: string | null;
   promised_delivery_at: Date | null;
+  eway_bill_number: string | null;
+  eway_bill_expires_at: Date | null;
   origin: PlaceRow | null;
   destination: PlaceRow | null;
 }
@@ -207,6 +211,7 @@ export class TrackingApiRepository {
       id: load.id,
       tenant_id: load.tenantId,
       load_code: load.code,
+      load_title: load.title ?? null,
       load_status: load.status,
       posting_type: load.postingType,
       route: load.route,
@@ -223,6 +228,8 @@ export class TrackingApiRepository {
       milestones: load.milestones,
       route_status: routeStatus.get(load.id) ?? null,
       promised_delivery_at: load.promisedDeliveryAt,
+      eway_bill_number: load.ewayBillNumber ?? null,
+      eway_bill_expires_at: load.ewayBillExpiresAt ?? null,
       origin: place(load.loadingPointId),
       destination: place(load.deliveryPointId),
     }));
@@ -319,6 +326,46 @@ export class TrackingApiRepository {
     }
     const rows: LineRow[] = await this.dataSource.query(sql, [vehicleId, from, to]);
     return buildPolyline(rows, toleranceDeg);
+  }
+
+  /**
+   * The vehicle's own GPS-device fixes since `from`, oldest first, on a trip or not (for the
+   * My fleet day stats). Raw points: idle-vehicle points are kept for 7 days, enough for a week.
+   */
+  async vehicleGpsPoints(vehicleId: string, from: Date): Promise<StatsPoint[]> {
+    const rows: Array<{
+      recorded_at: Date;
+      lat: number;
+      lng: number;
+      speed_kmh: number | null;
+      ignition: string | null;
+      battery_pct: string | null;
+      device_status: string | null;
+    }> = await this.dataSource.query(
+      `SELECT recorded_at, lat, lng, speed_kmh, flags->>'ignition' AS ignition,
+              flags->>'batteryPct' AS battery_pct, flags->>'deviceStatus' AS device_status
+       FROM (
+         SELECT recorded_at, lat, lng, speed_kmh, flags FROM tracking.location_points
+           WHERE vehicle_id = $1 AND source = 'roadcast' AND recorded_at >= $2
+         UNION ALL
+         SELECT recorded_at, lat, lng, speed_kmh, flags FROM tracking.location_points_short
+           WHERE vehicle_id = $1 AND source = 'roadcast' AND recorded_at >= $2
+             AND NOT (coalesce(flags, '{}'::jsonb) ? 'rejected')
+       ) pts
+       ORDER BY recorded_at`,
+      [vehicleId, from],
+    );
+    const num = (v: string | null) =>
+      v === null || v === '' || Number.isNaN(Number(v)) ? null : Number(v);
+    return rows.map((r) => ({
+      at: new Date(r.recorded_at).getTime(),
+      lat: Number(r.lat),
+      lng: Number(r.lng),
+      speedKmh: r.speed_kmh === null ? null : Number(r.speed_kmh),
+      ignition: r.ignition === 'true' ? true : r.ignition === 'false' ? false : null,
+      batteryPct: num(r.battery_pct),
+      deviceStatus: r.device_status,
+    }));
   }
 
   private featuresPromise: Promise<DbFeatures> | null = null;

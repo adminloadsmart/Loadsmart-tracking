@@ -21,6 +21,10 @@ export class TrackingApiController {
     respond(res, await this.service.vehicleLocation(scopeOf(req), String(req.params.vehicleId)));
   };
 
+  vehicleStats = async (req: Request, res: Response) => {
+    respond(res, await this.service.vehicleStats(scopeOf(req), String(req.params.vehicleId)));
+  };
+
   vehicleTimeline = async (req: Request, res: Response) => {
     const { from, to, resolution } = req.validatedQuery as TimelineQuery;
     respond(

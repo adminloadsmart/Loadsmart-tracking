@@ -32,6 +32,8 @@ export interface MainLoad {
   id: string;
   tenantId: string;
   code: string;
+  /** Optional title given when the load was posted; the code stands in when it is missing. */
+  title?: string | null;
   status: LoadStatus;
   /** How the shipper posted the load (loads.posting_type in the main backend). */
   postingType: LoadPostingType;
@@ -53,6 +55,9 @@ export interface MainLoad {
   plannedTonnes: number | null;
   /** Requisition's expected delivery date, end of day India time. */
   promisedDeliveryAt: Date | null;
+  /** The load's e-way bill and when it expires (loads.eway_bill_*), shown on the control tower. */
+  ewayBillNumber?: string | null;
+  ewayBillExpiresAt?: Date | null;
   /** Tracking runs from loading confirmation… */
   startedAt: Date | null;
   /** …to delivery (or close). */
@@ -141,6 +146,7 @@ interface LoadRow {
   id: string;
   tenant_id: string;
   code: string;
+  title: string | null;
   status: LoadStatus;
   posting_type: LoadPostingType;
   route: LoadRoute | null;
@@ -157,6 +163,8 @@ interface LoadRow {
   customer_name: string | null;
   planned_tonnes: string | number | null;
   promised_delivery_at: Date | null;
+  eway_bill_number: string | null;
+  eway_bill_expires_at: Date | null;
   truck_assigned_at: Date | null;
   loading_confirmed_at: Date | null;
   at_plant_at: Date | null;
@@ -176,9 +184,11 @@ interface LoadColumns {
 }
 
 const loadSelect = (columns: LoadColumns) => `
-  SELECT l.id, l.tenant_id, l.code, l.status::text AS status, l.posting_type::text AS posting_type,
+  SELECT l.id, l.tenant_id, l.code, NULLIF(btrim(l.title), '') AS title, l.status::text AS status, l.posting_type::text AS posting_type,
          l.route::text AS route,
-         l.vehicle_id, l.vehicle_number, l.driver_id, l.driver_name, l.driver_number,
+         l.vehicle_id, l.vehicle_number, l.driver_id,
+         COALESCE(NULLIF(btrim(l.driver_name), ''), d.full_name, dp.full_name) AS driver_name,
+         l.driver_number,
          NULLIF(btrim(tm.gps_device_imei), '') AS device_imei,
          ${columns.trackingSource ? 'l.tracking_source::text' : 'NULL::text'} AS tracking_source,
          COALESCE(r.loading_point_id, p.pickup_loading_point_id) AS loading_point_id,
@@ -190,6 +200,7 @@ const loadSelect = (columns: LoadColumns) => `
            ((r.expected_delivery_date::timestamp + time '23:59') AT TIME ZONE 'Asia/Kolkata'),
            p.deliver_by_at
          ) AS promised_delivery_at,
+         NULLIF(btrim(l.eway_bill_number), '') AS eway_bill_number, l.eway_bill_expires_at,
          l.truck_assigned_at, l.loading_confirmed_at, l.at_plant_at, l.in_transit_at,
          l.reached_delivery_point_at,
          l.delivered_at, l.pod_status::text AS pod_status, ${columns.departedDrop ? 'l.departed_drop_at' : 'NULL::timestamptz'} AS departed_drop_at,
@@ -198,6 +209,15 @@ const loadSelect = (columns: LoadColumns) => `
   LEFT JOIN loads.requisitions r ON r.id = l.requisition_id
   LEFT JOIN loads.load_postings p ON p.id = l.posting_id
   LEFT JOIN customers.customers c ON c.id = COALESCE(r.customer_id, p.customer_id)
+  -- The load's own driver name can be blank (e.g. a market truck entered by phone only): fall back
+  -- to the driver profile, by id, else by the phone number on the load.
+  LEFT JOIN masters.drivers d ON d.id = l.driver_id AND d.deleted_at IS NULL
+  LEFT JOIN LATERAL (
+    SELECT dr.full_name FROM masters.drivers dr
+    WHERE l.driver_id IS NULL AND dr.deleted_at IS NULL
+      AND dr.phone_number = right(regexp_replace(l.driver_number, '\\D', '', 'g'), 10)
+    ORDER BY dr.created_at LIMIT 1
+  ) dp ON true
   LEFT JOIN masters.vehicle_telemetry_meta tm
     ON tm.vehicle_id = l.vehicle_id AND tm.deleted_at IS NULL AND l.posting_type = 'own_fleet'`;
 
@@ -220,6 +240,7 @@ function toLoad(row: LoadRow): MainLoad {
     id: row.id,
     tenantId: row.tenant_id,
     code: row.code,
+    title: row.title,
     status: row.status,
     postingType: row.posting_type,
     route: row.route,
@@ -236,6 +257,8 @@ function toLoad(row: LoadRow): MainLoad {
     customerName: row.customer_name,
     plannedTonnes: row.planned_tonnes === null ? null : Number(row.planned_tonnes),
     promisedDeliveryAt: row.promised_delivery_at,
+    ewayBillNumber: row.eway_bill_number,
+    ewayBillExpiresAt: row.eway_bill_expires_at,
     startedAt: row.truck_assigned_at ?? row.at_plant_at ?? row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,
     deliveredAt: row.delivered_at,

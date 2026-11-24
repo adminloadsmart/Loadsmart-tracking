@@ -21,6 +21,7 @@ export function createTrackingApiRoutes(controller: TrackingApiController): Rout
     controller.vehicleLocation,
   );
   router.get('/vehicles/:vehicleId/timeline', validate(timelineSchema), controller.vehicleTimeline);
+  router.get('/vehicles/:vehicleId/stats', validate(vehicleParamsSchema), controller.vehicleStats);
 
   router.get('/trips', validate(listTripsSchema), controller.listTrips);
   // Static path before /:tripId so "summary" is never parsed as an id.
