@@ -193,7 +193,11 @@ export class TrackingApiRepository {
     if (vehicleIds.length === 0) return new Map();
     const wanted = new Set(vehicleIds);
     const result = new Map<string, string>();
-    for (const load of await this.mainData.activeLoads()) {
+    const [loads, created] = await Promise.all([
+      this.mainData.activeLoads(),
+      this.mainData.activeCreatedTrips(),
+    ]);
+    for (const load of [...loads, ...created]) {
       if (load.vehicleId && wanted.has(load.vehicleId) && !result.has(load.vehicleId)) {
         result.set(load.vehicleId, load.id);
       }
@@ -236,6 +240,11 @@ export class TrackingApiRepository {
         ? await this.toTripRows(await this.mainData.loadsByStatus(scope, statuses, remaining))
         : [];
     return [...createdRows, ...loadRows];
+  }
+
+  /** How a created trip's truck will be tracked (vehicle id, driver account, source). */
+  truckTracking(tenantId: string, vehicleNumber: string, driverPhone: string | null) {
+    return this.mainData.truckTracking(tenantId, vehicleNumber, driverPhone);
   }
 
   /** Saves a created trip with the tenant's next TRP-#### code (retried if a concurrent create
@@ -325,9 +334,9 @@ export class TrackingApiRepository {
       load_status: t.status,
       posting_type: 'tracking_only',
       route: null,
-      vehicle_id: null,
+      vehicle_id: t.vehicleId,
       vehicle_number: t.vehicleNumber,
-      driver_id: null,
+      driver_id: t.driverId,
       driver_name: t.driverName,
       driver_phone: t.driverPhone,
       customer_name: t.customerName,

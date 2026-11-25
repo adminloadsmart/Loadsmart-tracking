@@ -65,6 +65,16 @@ export class TrackingTripEntity {
   @Column({ name: 'eway_bill_valid_till', type: 'timestamptz', nullable: true })
   ewayBillValidTill!: Date | null;
 
+  // How the trip is tracked, decided when it is created (migration 1759780000000). NULL on trips
+  // created before then: those stay display-only.
+  /** Fleet vehicle with this plate, else the market id derived from the plate (marketVehicleId). */
+  @Column({ name: 'vehicle_id', type: 'uuid', nullable: true }) vehicleId!: string | null;
+  @Column({ name: 'own_fleet', type: 'boolean', default: false }) ownFleet!: boolean;
+  /** The one driver account with this mobile number, if exactly one has it. */
+  @Column({ name: 'driver_id', type: 'uuid', nullable: true }) driverId!: string | null;
+  @Column({ name: 'tracking_source', type: 'text', nullable: true })
+  trackingSource!: 'gps' | 'driver_app' | 'sim' | 'fastag' | null;
+
   @Column({ name: 'created_by', type: 'uuid' }) createdBy!: string;
   @Column({ name: 'ended_at', type: 'timestamptz', nullable: true }) endedAt!: Date | null;
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' }) createdAt!: Date;

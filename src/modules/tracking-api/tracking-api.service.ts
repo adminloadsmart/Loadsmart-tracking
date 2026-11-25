@@ -425,7 +425,16 @@ export class TrackingApiService {
       throw new ValidationError('Create the trip from an organization account');
     }
     const delivery = body.delivery;
+    // Decided once, as a load decides on truck assignment: which vehicle id its points carry, the
+    // driver's account, and gps > driver_app > sim > fastag. A `sim` trip gets the driver's SIM
+    // consent request from the SIM lifecycle on its next tick.
+    const tracking = await this.repository.truckTracking(
+      scope.tenantId,
+      body.vehicleNumber,
+      body.driverPhone,
+    );
     const trip = await this.repository.createTrip({
+      ...tracking,
       tenantId: scope.tenantId,
       direction: body.direction,
       customerId: body.customerId ?? null,

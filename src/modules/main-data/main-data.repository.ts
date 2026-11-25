@@ -1,10 +1,14 @@
-import { DataSource } from 'typeorm';
+import { DataSource, In, IsNull, Not } from 'typeorm';
 import type { TenantScope } from '../../shared/auth/staff-token';
+import { decodePolyline } from '../routes/route-geometry';
+import { TrackingTripEntity } from '../tracking-api/trip.entity';
 import {
   ACTIVE_STATUSES,
   AFTER_DELIVERY_STATUSES,
+  createdTripLoadStatus,
   DELIVERED_FOLLOW_MS,
   INDEXED_STATUSES,
+  initialTrackingSource,
   LoadStatus,
   marketVehicleId,
   normalizePlate,
@@ -72,6 +76,17 @@ export interface MainLoad {
   departedDropAt: Date | null;
   milestones: Record<string, string | null>;
   updatedAt: Date;
+  /** A trip created from the tracking screen (tracking.trips), not a load: it has no stages, POD
+   *  or main-backend workflow, only a vehicle, a driver number and its two places. */
+  createdTrip?: boolean;
+}
+
+/** How a truck entered on Create trip is tracked (see MainDataRepository.truckTracking). */
+export interface TruckTracking {
+  vehicleId: string;
+  ownFleet: boolean;
+  driverId: string | null;
+  trackingSource: LoadTrackingSource | null;
 }
 
 export interface MainVehicle {
@@ -130,6 +145,8 @@ export interface MainTripPoints {
   dropCustomerDeliveryPointId: string | null;
   /** A posted load with no customer drops at one of the shipper's own loading points. */
   dropLoadingPointId: string | null;
+  /** Only an inbound trip created from the tracking screen starts at a customer address. */
+  pickupCustomerDeliveryPointId?: string | null;
 }
 
 export interface MainPlace {
@@ -278,6 +295,55 @@ function toLoad(row: LoadRow): MainLoad {
   };
 }
 
+/** A 10-digit Indian mobile number (a leading 91 / 0 dropped), else null — what Intugine takes. */
+function nationalMobile(value: string | null | undefined): string | null {
+  const digits = (value ?? '').replace(/\D/g, '');
+  const national = digits.length > 10 ? digits.replace(/^(91|0)/, '') : digits;
+  return /^[6-9]\d{9}$/.test(national) ? national : null;
+}
+
+/** A trip created from the tracking screen, in the load shape the trip watcher, the SIM
+ *  lifecycle and the rules read. `deviceImei` is the fleet vehicle's GPS device, when it has one. */
+function createdTripToLoad(trip: TrackingTripEntity, deviceImei: string | null): MainLoad {
+  const ref = (kind: TrackingTripEntity['originKind'], wanted: TrackingTripEntity['originKind'], id: string | null) =>
+    kind === wanted ? id : null;
+  return {
+    id: trip.id,
+    tenantId: trip.tenantId,
+    code: trip.code,
+    title: null,
+    status: createdTripLoadStatus(trip.status),
+    // A truck that isn't in the fleet is tracked like a market truck (its plate's vehicle id).
+    postingType: trip.ownFleet ? 'own_fleet' : 'market_fleet',
+    route: null,
+    vehicleId: trip.vehicleId,
+    vehicleNumber: normalizePlate(trip.vehicleNumber),
+    deviceImei,
+    driverId: trip.driverId,
+    driverName: trip.driverName,
+    driverNumber: trip.driverPhone,
+    loadingPointId: ref(trip.originKind, 'loading_point', trip.originRefId),
+    deliveryPointId: ref(trip.destinationKind, 'customer_address', trip.destinationRefId),
+    customerId: trip.customerId,
+    customerName: trip.customerName,
+    plannedTonnes: null,
+    promisedDeliveryAt:
+      trip.deliveryMode === 'appointment' ? trip.appointmentTo : trip.deliveryReportingAt,
+    ewayBillNumber: trip.ewayBillNumber,
+    ewayBillExpiresAt: trip.ewayBillValidTill,
+    // Tracked from the moment it is created until it is ended or cancelled.
+    startedAt: trip.createdAt,
+    endedAt: trip.endedAt,
+    trackingSource: trip.trackingSource,
+    deliveredAt: null,
+    podStatus: null,
+    departedDropAt: null,
+    milestones: {},
+    updatedAt: trip.updatedAt,
+    createdTrip: true,
+  };
+}
+
 /** `AND <column> = $n` for a tenant-scoped caller, nothing for platform admins. */
 function scoped(scope: TenantScope | null, column: string, params: unknown[]): string {
   if (!scope || 'allTenants' in scope) return '';
@@ -394,6 +460,19 @@ export class MainDataRepository {
       params,
     );
     return rows[0] ? toLoad(rows[0]) : null;
+  }
+
+  /** A trip by id: a load, else a trip created from the tracking screen (in the load shape). */
+  async trip(scope: TenantScope | null, id: string): Promise<MainLoad | null> {
+    const load = await this.load(scope, id);
+    if (load) return load;
+    const created = await this.createdTrips().findOne({
+      where: {
+        id,
+        ...(scope && !('allTenants' in scope) ? { tenantId: scope.tenantId } : {}),
+      },
+    });
+    return created ? (await this.createdTripsToLoads([created]))[0] : null;
   }
 
   /**
@@ -618,7 +697,7 @@ export class MainDataRepository {
        WHERE l.id = ANY($1::uuid[])`,
       [loadIds],
     );
-    return new Map(
+    const points = new Map<string, MainTripPoints>(
       rows.map((r) => [
         r.id,
         {
@@ -629,6 +708,22 @@ export class MainDataRepository {
         },
       ]),
     );
+    // The rest may be trips created from the tracking screen: their picked master places.
+    const missing = loadIds.filter((id) => !points.has(id));
+    if (missing.length > 0) {
+      for (const t of await this.createdTrips().find({ where: { id: In(missing) } })) {
+        points.set(t.id, {
+          vehicleNumber: normalizePlate(t.vehicleNumber),
+          pickupLoadingPointId: t.originKind === 'loading_point' ? t.originRefId : null,
+          pickupCustomerDeliveryPointId:
+            t.originKind === 'customer_address' ? t.originRefId : null,
+          dropCustomerDeliveryPointId:
+            t.destinationKind === 'customer_address' ? t.destinationRefId : null,
+          dropLoadingPointId: t.destinationKind === 'loading_point' ? t.destinationRefId : null,
+        });
+      }
+    }
+    return points;
   }
 
   // ---- places ------------------------------------------------------------------------------
@@ -686,5 +781,169 @@ export class MainDataRepository {
       }
     }
     return places;
+  }
+
+  // ---- trips created from the tracking screen ---------------------------------------------
+  // tracking.trips is this service's own table; these read it next to main's loads so the trip
+  // watcher and the SIM lifecycle treat a created trip like a load. Only trips with a vehicle id
+  // (created after migration 1759780000000) are trackable.
+
+  private createdTrips() {
+    return this.dataSource.getRepository(TrackingTripEntity);
+  }
+
+  private async createdTripsToLoads(trips: TrackingTripEntity[]): Promise<MainLoad[]> {
+    const fleetIds = [
+      ...new Set(trips.filter((t) => t.ownFleet && t.vehicleId).map((t) => t.vehicleId!)),
+    ];
+    const devices = fleetIds.length
+      ? await this.dataSource
+          .createQueryBuilder()
+          .select(['m.vehicle_id AS vehicle_id', 'm.gps_device_imei AS imei'])
+          .from('masters.vehicle_telemetry_meta', 'm')
+          .where('m.vehicle_id IN (:...ids)', { ids: fleetIds })
+          .andWhere('m.deleted_at IS NULL')
+          .andWhere("NULLIF(btrim(m.gps_device_imei), '') IS NOT NULL")
+          .getRawMany<{ vehicle_id: string; imei: string }>()
+      : [];
+    const imeiOf = new Map(devices.map((d) => [d.vehicle_id, d.imei.trim()]));
+    return trips.map((t) =>
+      createdTripToLoad(t, t.vehicleId ? (imeiOf.get(t.vehicleId) ?? null) : null),
+    );
+  }
+
+  /** Trackable created trips changed since `since`, oldest first, paged on (updated_at, id) like
+   *  loadsChangedSince — the trip watcher's feed for them (an ended trip leaves the index). */
+  async createdTripsChangedSince(
+    since: Date,
+    limit: number,
+    after?: { updatedAt: Date; id: string },
+  ): Promise<MainLoad[]> {
+    const pageKey = `date_trunc('milliseconds', t.updated_at)`;
+    const query = this.createdTrips()
+      .createQueryBuilder('t')
+      .where('t.vehicle_id IS NOT NULL')
+      .orderBy(pageKey)
+      .addOrderBy('t.id')
+      .take(limit);
+    if (after) {
+      query.andWhere(`(${pageKey}, t.id) > (:afterAt::timestamptz, :afterId::uuid)`, {
+        afterAt: after.updatedAt,
+        afterId: after.id,
+      });
+    } else {
+      query.andWhere('t.updated_at > :since', { since });
+    }
+    return this.createdTripsToLoads(await query.getMany());
+  }
+
+  /** Active trackable created trips — what the active-trip index and the SIM lifecycle hold. */
+  async activeCreatedTrips(limit = 50_000): Promise<MainLoad[]> {
+    const trips = await this.createdTrips().find({
+      where: { status: 'active', vehicleId: Not(IsNull()) },
+      order: { createdAt: 'DESC' },
+      take: limit,
+    });
+    return this.createdTripsToLoads(trips);
+  }
+
+  /** A created trip's places as typed, with the first and last point of its newest planned road
+   *  route — the coordinates of a place typed as an address (RoutePlanner geocoded it). */
+  async createdTripEnds(tripId: string): Promise<{
+    start: [number, number] | null;
+    end: [number, number] | null;
+    startName: string;
+    endName: string;
+    endAddress: string;
+  } | null> {
+    const trip = await this.createdTrips().findOne({ where: { id: tripId } });
+    if (!trip) return null;
+    const route = await this.dataSource
+      .createQueryBuilder()
+      .select('r.polyline', 'polyline')
+      .from('tracking.trip_routes', 'r')
+      .where('r.trip_id = :tripId', { tripId })
+      .orderBy('r.version', 'DESC')
+      .limit(1)
+      .getRawOne<{ polyline: string | null }>();
+    const line = route?.polyline ? decodePolyline(route.polyline) : [];
+    const first = line[0];
+    const last = line.at(-1);
+    return {
+      start: first ? [first.lat, first.lng] : null,
+      end: last ? [last.lat, last.lng] : null,
+      startName: trip.originName,
+      endName: trip.destinationName,
+      endAddress: trip.destinationAddress,
+    };
+  }
+
+  /**
+   * How a truck entered on Create trip will be tracked, decided once when the trip is created (a
+   * load decides on truck assignment, in the main backend's createTrackingSourceResolver):
+   *  - the vehicle: the tenant's fleet vehicle with this plate, else the plate's market id;
+   *  - the driver: the one account with this mobile number (none when several share it);
+   *  - the source: gps > driver_app > sim > fastag (initialTrackingSource).
+   */
+  async truckTracking(
+    tenantId: string,
+    vehicleNumber: string,
+    driverPhone: string | null,
+  ): Promise<TruckTracking> {
+    const plate = normalizePlate(vehicleNumber);
+    const fleet = await this.dataSource
+      .createQueryBuilder()
+      .select(['v.id AS id', 'm.has_gps AS has_gps', 'm.gps_enabled AS gps_enabled'])
+      .from('masters.vehicles', 'v')
+      .leftJoin(
+        'masters.vehicle_telemetry_meta',
+        'm',
+        'm.vehicle_id = v.id AND m.deleted_at IS NULL',
+      )
+      .where('v.tenant_id = :tenantId', { tenantId })
+      .andWhere('v.deleted_at IS NULL')
+      .andWhere("upper(regexp_replace(v.registration_number, '[\\s-]', '', 'g')) = :plate", {
+        plate,
+      })
+      .orderBy('v.updated_at', 'DESC')
+      .limit(1)
+      .getRawOne<{ id: string; has_gps: boolean | null; gps_enabled: boolean | null }>();
+
+    const national = nationalMobile(driverPhone);
+    let driverId: string | null = null;
+    let hasDriverApp = false;
+    if (national) {
+      const drivers = await this.dataSource
+        .createQueryBuilder()
+        .select('d.id', 'id')
+        .from('masters.drivers', 'd')
+        .where('d.phone_number IN (:...forms)', { forms: [national, `91${national}`] })
+        .andWhere('d.deleted_at IS NULL')
+        .limit(2)
+        .getRawMany<{ id: string }>();
+      driverId = drivers.length === 1 ? drivers[0].id : null;
+      // "Has logged into the app at least once" — any session row, revoked or expired too.
+      hasDriverApp = driverId
+        ? !!(await this.dataSource
+            .createQueryBuilder()
+            .select('1', 'one')
+            .from('masters.driver_sessions', 's')
+            .where('s.driver_id = :driverId', { driverId })
+            .limit(1)
+            .getRawOne())
+        : false;
+    }
+    const hasGps = Boolean(fleet?.has_gps && fleet.gps_enabled);
+    return {
+      vehicleId: fleet?.id ?? marketVehicleId(tenantId, plate),
+      ownFleet: !!fleet,
+      driverId,
+      trackingSource: initialTrackingSource({
+        hasGps,
+        hasDriverApp,
+        hasDriverNumber: !!national,
+        hasVehicleNumber: !!plate,
+      }),
+    };
   }
 }

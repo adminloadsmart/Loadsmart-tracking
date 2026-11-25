@@ -5,6 +5,8 @@ import { ActiveTripIndex } from './active-trip-index';
 import { isAfterDelivery, isIndexed } from './trip-state';
 
 const CURSOR_KEY = 'trk:trips:cursor';
+/** Trips created from the tracking screen (tracking.trips) are paged on their own updated_at. */
+const CREATED_CURSOR_KEY = 'trk:trips:created-cursor';
 const PAGE_SIZE = 1000;
 // Re-read loads changed slightly before the cursor: a transaction can commit after rows with a
 // later updated_at were already seen. Re-applying a load is idempotent.
@@ -16,6 +18,7 @@ const OVERLAP_MS = 30_000;
  * database. A load is a trip; it's tracked from loading confirmation until delivery/close, and
  * indexed from assignment so the drive to the plant can be matched to it, and after delivery until
  * the truck leaves the delivery point (isIndexed).
+ * Trips created from the tracking screen (tracking.trips) are indexed the same way while active.
  * Polls loads changed since the cursor (scheduler leader, every few seconds); a full rebuild runs
  * on every leadership takeover and periodically as a safety net for writes that don't touch
  * updated_at.
@@ -29,34 +32,53 @@ export class TripWatcher {
     private readonly pageSize = PAGE_SIZE,
   ) {}
 
-  /** Applies every load changed since the cursor, page by page, then advances the cursor. */
+  /** Applies every load, and every trip created from the tracking screen, changed since its
+   *  cursor, page by page, then advances that cursor. */
   async poll(): Promise<number> {
-    const cursor = Number((await this.redis.get(CURSOR_KEY)) ?? 0);
+    const loads = await this.pollFeed(CURSOR_KEY, (since, after) =>
+      this.mainData.loadsChangedSince(since, this.pageSize, after),
+    );
+    const created = await this.pollFeed(CREATED_CURSOR_KEY, (since, after) =>
+      this.mainData.createdTripsChangedSince(since, this.pageSize, after),
+    );
+    return loads + created;
+  }
+
+  private async pollFeed(
+    cursorKey: string,
+    page: (since: Date, after: MainLoad | undefined) => Promise<MainLoad[]>,
+  ): Promise<number> {
+    const cursor = Number((await this.redis.get(cursorKey)) ?? 0);
     const since = new Date(Math.max(0, cursor - OVERLAP_MS));
     let after: MainLoad | undefined;
     let applied = 0;
     for (;;) {
-      const loads = await this.mainData.loadsChangedSince(since, this.pageSize, after);
+      const loads = await page(since, after);
       for (const load of loads) await this.apply(load);
       applied += loads.length;
       after = loads.at(-1) ?? after;
       if (loads.length < this.pageSize) break;
     }
     const newest = after?.updatedAt.getTime();
-    if (newest && newest > cursor) await this.redis.set(CURSOR_KEY, String(newest));
+    if (newest && newest > cursor) await this.redis.set(cursorKey, String(newest));
     return applied;
   }
 
-  /** Restores the index from the loads table (on takeover / periodically). */
+  /** Restores the index from the loads table and the active created trips (on takeover /
+   *  periodically). */
   async rebuild(): Promise<{ set: number; removed: number }> {
-    const indexed = await this.mainData.indexedLoads();
+    const [loads, created] = await Promise.all([
+      this.mainData.indexedLoads(),
+      this.mainData.activeCreatedTrips(),
+    ]);
+    const indexed = [...loads, ...created];
     // Delivered loads first: a vehicle / driver already on its next trip keeps that one.
     const ordered = [
       ...indexed.filter((load) => isAfterDelivery(load.status)),
       ...indexed.filter((load) => !isAfterDelivery(load.status)),
     ];
     const result = await this.index.rebuild(ordered.map(refs));
-    this.logger.info(result, 'Active-trip index rebuilt from loads');
+    this.logger.info(result, 'Active-trip index rebuilt from loads and created trips');
     return result;
   }
 

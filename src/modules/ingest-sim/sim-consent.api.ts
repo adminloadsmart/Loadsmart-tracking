@@ -37,7 +37,8 @@ export type TripSimConsent =
  */
 export class SimConsentApiService {
   constructor(
-    private readonly mainData: Pick<MainDataRepository, 'load'>,
+    /** `trip`: a load, else a trip created from the tracking screen. */
+    private readonly mainData: Pick<MainDataRepository, 'trip'>,
     private readonly trips: Pick<SimTripStore, 'findLatestByTrip'>,
     private readonly consent: SimConsentService,
     /** False when the Intugine credentials are not set on this process: viewing works, resending not. */
@@ -45,7 +46,7 @@ export class SimConsentApiService {
   ) {}
 
   async get(scope: TenantScope, tripId: string): Promise<TripSimConsent> {
-    const load = await this.mainData.load(scope, tripId);
+    const load = await this.mainData.trip(scope, tripId);
     if (!load) throw new NotFoundError(`Trip ${tripId} not found`);
     if (load.trackingSource !== 'sim') {
       return { tripId, applicable: false, trackingSource: load.trackingSource };
@@ -61,11 +62,11 @@ export class SimConsentApiService {
     if (!hasPermission(user, SIM_CONSENT_RESEND_PERMISSION)) {
       throw new AuthorizationError(`Requires permission ${SIM_CONSENT_RESEND_PERMISSION}`);
     }
-    const load = await this.mainData.load(scope, tripId);
+    const load = await this.mainData.trip(scope, tripId);
     if (!load) throw new NotFoundError(`Trip ${tripId} not found`);
-    if (load.trackingSource !== 'sim') throw new ConflictError('This load is not tracked by SIM');
+    if (load.trackingSource !== 'sim') throw new ConflictError('This trip is not tracked by SIM');
     if (!INDEXED_STATUSES.includes(load.status) || !load.vehicleId) {
-      throw new ConflictError('The consent link can only be sent while the load is being tracked');
+      throw new ConflictError('The consent link can only be sent while the trip is being tracked');
     }
     if (!this.canSend) {
       throw new UnavailableError('SIM tracking is not configured on this service');
