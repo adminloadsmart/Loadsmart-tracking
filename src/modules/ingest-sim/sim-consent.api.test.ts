@@ -43,7 +43,7 @@ function setup(answers: SimConsent[], load: Record<string, unknown> | null = {},
           ...load,
         };
   const api = new SimConsentApiService(
-    { load: async () => fullLoad as never },
+    { trip: async () => fullLoad as never },
     trips,
     service,
     canSend,

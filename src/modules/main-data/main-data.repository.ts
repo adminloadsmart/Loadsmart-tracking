@@ -893,13 +893,8 @@ export class MainDataRepository {
     const plate = normalizePlate(vehicleNumber);
     const fleet = await this.dataSource
       .createQueryBuilder()
-      .select(['v.id AS id', 'm.has_gps AS has_gps', 'm.gps_enabled AS gps_enabled'])
+      .select('v.id', 'id')
       .from('masters.vehicles', 'v')
-      .leftJoin(
-        'masters.vehicle_telemetry_meta',
-        'm',
-        'm.vehicle_id = v.id AND m.deleted_at IS NULL',
-      )
       .where('v.tenant_id = :tenantId', { tenantId })
       .andWhere('v.deleted_at IS NULL')
       .andWhere("upper(regexp_replace(v.registration_number, '[\\s-]', '', 'g')) = :plate", {
@@ -907,7 +902,17 @@ export class MainDataRepository {
       })
       .orderBy('v.updated_at', 'DESC')
       .limit(1)
-      .getRawOne<{ id: string; has_gps: boolean | null; gps_enabled: boolean | null }>();
+      .getRawOne<{ id: string }>();
+    const telemetry = fleet
+      ? await this.dataSource
+          .createQueryBuilder()
+          .select(['m.has_gps AS has_gps', 'm.gps_enabled AS gps_enabled'])
+          .from('masters.vehicle_telemetry_meta', 'm')
+          .where('m.vehicle_id = :vehicleId', { vehicleId: fleet.id })
+          .andWhere('m.deleted_at IS NULL')
+          .limit(1)
+          .getRawOne<{ has_gps: boolean | null; gps_enabled: boolean | null }>()
+      : undefined;
 
     const national = nationalMobile(driverPhone);
     let driverId: string | null = null;
@@ -933,7 +938,7 @@ export class MainDataRepository {
             .getRawOne())
         : false;
     }
-    const hasGps = Boolean(fleet?.has_gps && fleet.gps_enabled);
+    const hasGps = Boolean(telemetry?.has_gps && telemetry.gps_enabled);
     return {
       vehicleId: fleet?.id ?? marketVehicleId(tenantId, plate),
       ownFleet: !!fleet,
