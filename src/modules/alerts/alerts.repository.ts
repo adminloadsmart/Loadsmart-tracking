@@ -121,4 +121,43 @@ export class AlertsRepository {
       [by.vehicleId, by.from, by.to, ...tenantParams],
     );
   }
+
+  /**
+   * The FASTag toll crossings of a trip, shaped as (instant) episodes so the portal's timeline and
+   * map show them next to halts and alerts. They stay in their own table (they are checkpoints, not
+   * location points); this is only how the events endpoint reads them.
+   */
+  async tollEpisodes(scope: TenantScope, tripId: string): Promise<EpisodeRow[]> {
+    const tenantFilter = 'allTenants' in scope ? '' : 'AND tenant_id = $2';
+    const tenantParams = 'allTenants' in scope ? [] : [scope.tenantId];
+    const rows: Array<{
+      id: string;
+      vehicle_id: string;
+      load_id: string;
+      crossed_at: Date;
+      toll_plaza_name: string;
+      toll_lat: number | null;
+      toll_lng: number | null;
+      lane_direction: string | null;
+    }> = await this.dataSource.query(
+      `SELECT id, vehicle_id, load_id, crossed_at, toll_plaza_name, toll_lat, toll_lng, lane_direction
+       FROM tracking.fastag_crossings WHERE load_id = $1 ${tenantFilter}
+       ORDER BY crossed_at`,
+      [tripId, ...tenantParams],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      vehicle_id: r.vehicle_id,
+      trip_id: r.load_id,
+      rule_id: 'TOLL-FASTAG',
+      source: 'fastag',
+      status: 'closed',
+      started_at: r.crossed_at,
+      ended_at: r.crossed_at,
+      anchor_lat: r.toll_lat,
+      anchor_lng: r.toll_lng,
+      metrics: { plaza: r.toll_plaza_name, laneDirection: r.lane_direction },
+      tags: ['toll', 'fastag'],
+    }));
+  }
 }

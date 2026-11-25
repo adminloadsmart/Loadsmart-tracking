@@ -97,13 +97,22 @@ export class AlertsService {
   }
 
   async tripEvents(scope: TenantScope, tripId: string) {
-    return { events: await this.episodeViews(await this.repository.episodes(scope, { tripId })) };
+    const [episodes, tolls] = await Promise.all([
+      this.repository.episodes(scope, { tripId }),
+      this.repository.tollEpisodes(scope, tripId),
+    ]);
+    const all = [...episodes, ...tolls].sort(
+      (a, b) => a.started_at.getTime() - b.started_at.getTime(),
+    );
+    return { events: await this.episodeViews(all) };
   }
 
   async vehicleEvents(scope: TenantScope, vehicleId: string, from: Date, to: Date) {
     if (to <= from) throw new ValidationError('`to` must be after `from`');
     return {
-      events: await this.episodeViews(await this.repository.episodes(scope, { vehicleId, from, to })),
+      events: await this.episodeViews(
+        await this.repository.episodes(scope, { vehicleId, from, to }),
+      ),
     };
   }
 

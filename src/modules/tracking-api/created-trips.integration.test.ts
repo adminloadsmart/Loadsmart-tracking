@@ -181,10 +181,12 @@ describe.skipIf(!available)('created trips — POST /trips (real Postgres)', () 
        VALUES ($1, $2, true, true)`,
       [TENANT_A, fleetId],
     );
+    // masters.drivers isn't truncated between tests: a fresh number keeps the match unambiguous.
+    const appPhone = `9${String(Date.now()).slice(-9)}`;
     const appDriver = randomUUID();
     await ds.query(
-      `INSERT INTO masters.drivers (id, full_name, phone_number) VALUES ($1, 'App Driver', '9123456780')`,
-      [appDriver],
+      `INSERT INTO masters.drivers (id, full_name, phone_number) VALUES ($1, 'App Driver', $2)`,
+      [appDriver, appPhone],
     );
     await ds.query(`INSERT INTO masters.driver_sessions (driver_id) VALUES ($1)`, [appDriver]);
     const create = async (vehicleNumber: string, driverPhone: string) => {
@@ -210,7 +212,7 @@ describe.skipIf(!available)('created trips — POST /trips (real Postgres)', () 
     });
     expect(gps.view.vehicleId).toBe(fleetId);
 
-    const app_ = await create('KA01ZZ9999', '9123456780');
+    const app_ = await create('KA01ZZ9999', appPhone);
     expect(app_.row).toMatchObject({ driver_id: appDriver, tracking_source: 'driver_app' });
 
     const sim = await create('KA01ZZ9998', '9876543210');
