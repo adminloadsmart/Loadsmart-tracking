@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { POINT_SOURCES } from '../points';
 import { TRACK_RESOLUTIONS } from './tracking-api.service';
 import { TRIP_PLACE_KINDS } from './trip.entity';
+import { isValidVehicleNumber } from './vehicle-number';
 
 export const vehicleParamsSchema = z.object({ params: z.object({ vehicleId: z.uuid() }) });
 /** The trips list's status filter: running, waiting to start, delivered / ended, called off. */
@@ -64,7 +65,7 @@ const vehicleNumberSchema = z
   .string()
   .trim()
   .transform((value) => value.replace(/[\s-]+/g, '').toUpperCase())
-  .pipe(z.string().min(4).max(15));
+  .refine(isValidVehicleNumber, 'vehicleNumber must be an Indian registration like PB65RF6106');
 const driverPhoneSchema = z
   .string()
   .trim()
