@@ -265,9 +265,8 @@ export class SimLifecycleService {
     let src = at(pickupId);
     let dest = at(dropId ?? null);
     // A created trip's place typed as an address has no master: take its end of the planned route.
-    const typed = load.createdTrip && (!src || !dest)
-      ? await this.mainData.createdTripEnds(load.id)
-      : null;
+    const typed =
+      load.createdTrip && (!src || !dest) ? await this.mainData.createdTripEnds(load.id) : null;
     if (typed) {
       src ??= typed.start ? { coords: typed.start, place: null } : null;
       dest ??= typed.end ? { coords: typed.end, place: null } : null;

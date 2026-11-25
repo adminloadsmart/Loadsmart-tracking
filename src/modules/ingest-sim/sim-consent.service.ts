@@ -327,7 +327,8 @@ export class SimConsentService {
     expired = false,
   ): Promise<ConsentOutcome> {
     const message = err instanceof Error ? err.message : String(err);
-    const giveUp = expired || row.attempts + 1 >= (this.options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
+    const giveUp =
+      expired || row.attempts + 1 >= (this.options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
     const rateLimited = err instanceof IntugineError && err.rateLimited;
     consentChecks.inc({ result: rateLimited ? 'rate_limited' : 'error' });
     await this.store.updateConsent(row.id, {

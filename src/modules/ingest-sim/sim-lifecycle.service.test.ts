@@ -84,8 +84,7 @@ function setup(
   const mainData: SimMainData = {
     loadsByStatus: async (_scope, statuses) =>
       load && statuses.includes(load.status as never) ? [load as never] : [],
-    trip: async (_scope, id) =>
-      ((created && created.id === id ? created : load) as never) ?? null,
+    trip: async (_scope, id) => ((created && created.id === id ? created : load) as never) ?? null,
     activeCreatedTrips: async () =>
       created && created.status === 'in_transit_unloading' ? [created as never] : [],
     createdTripEnds: async () => opts.createdEnds ?? null,

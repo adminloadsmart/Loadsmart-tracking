@@ -12,6 +12,9 @@ import {
   truncateTrackingTables,
 } from '../../__tests__/support/infra';
 import { seedLoad } from '../../__tests__/support/main-schema';
+import { createTripsModule } from '../trips';
+import { tripRefKey, vehicleActiveTripKey } from '../trips/active-trip-index';
+import { marketVehicleId } from '../trips/trip-state';
 import { createApp } from '../../app';
 import { buildContainer } from '../../composition-root';
 
@@ -164,6 +167,92 @@ describe.skipIf(!available)('created trips — POST /trips (real Postgres)', () 
     expect(active.body.data.trips.map((t: { tripId: string }) => t.tripId)).not.toContain(tripId);
     const endedList = await auth(request(app).get('/v1/trips?state=ended'));
     expect(endedList.body.data.trips.map((t: { tripId: string }) => t.tripId)).toContain(tripId);
+  });
+
+  it('decides how the truck is tracked: fleet GPS, else the driver app, else SIM on the number', async () => {
+    const { loadingPointId } = await seedLoad(ds, { tenantId: TENANT_A });
+    const fleetId = randomUUID();
+    await ds.query(
+      `INSERT INTO masters.vehicles (id, tenant_id, registration_number) VALUES ($1, $2, 'GJ-01-GP-0001')`,
+      [fleetId, TENANT_A],
+    );
+    await ds.query(
+      `INSERT INTO masters.vehicle_telemetry_meta (tenant_id, vehicle_id, has_gps, gps_enabled)
+       VALUES ($1, $2, true, true)`,
+      [TENANT_A, fleetId],
+    );
+    const appDriver = randomUUID();
+    await ds.query(
+      `INSERT INTO masters.drivers (id, full_name, phone_number) VALUES ($1, 'App Driver', '9123456780')`,
+      [appDriver],
+    );
+    await ds.query(`INSERT INTO masters.driver_sessions (driver_id) VALUES ($1)`, [appDriver]);
+    const create = async (vehicleNumber: string, driverPhone: string) => {
+      const res = await auth(request(app).post('/v1/trips')).send({
+        ...body(loadingPointId),
+        vehicleNumber,
+        driverPhone,
+      });
+      expect(res.status).toBe(201);
+      const [row] = await ds.query(
+        `SELECT vehicle_id, own_fleet, driver_id, tracking_source FROM tracking.trips WHERE id = $1`,
+        [res.body.data.tripId],
+      );
+      return { view: res.body.data, row };
+    };
+
+    const gps = await create('gj 01 gp 0001', '9876543210');
+    expect(gps.row).toEqual({
+      vehicle_id: fleetId,
+      own_fleet: true,
+      driver_id: null,
+      tracking_source: 'gps',
+    });
+    expect(gps.view.vehicleId).toBe(fleetId);
+
+    const app_ = await create('KA01ZZ9999', '9123456780');
+    expect(app_.row).toMatchObject({ driver_id: appDriver, tracking_source: 'driver_app' });
+
+    const sim = await create('KA01ZZ9998', '9876543210');
+    expect(sim.row).toEqual({
+      vehicle_id: marketVehicleId(TENANT_A, 'KA01ZZ9998'),
+      own_fleet: false,
+      driver_id: null,
+      tracking_source: 'sim',
+    });
+  });
+
+  it('indexes an active created trip for live points, and drops it once ended', async () => {
+    const trips = createTripsModule(ds, redis, silentLogger);
+    const { loadingPointId } = await seedLoad(ds, { tenantId: TENANT_A });
+    const { tripId } = (await auth(request(app).post('/v1/trips')).send(body(loadingPointId))).body
+      .data;
+    const vehicleId = marketVehicleId(TENANT_A, 'MH12AB1234');
+
+    await trips.watcher.poll();
+    expect(await redis.get(vehicleActiveTripKey(vehicleId))).toBe(tripId);
+    expect(await redis.hgetall(tripRefKey(tripId))).toMatchObject({
+      tenantId: TENANT_A,
+      loadStatus: 'in_transit_unloading',
+      trackingSource: 'sim',
+      postingType: 'market_fleet',
+    });
+    // A rebuild keeps it (it would otherwise remove keys no load accounts for).
+    await trips.watcher.rebuild();
+    expect(await redis.get(vehicleActiveTripKey(vehicleId))).toBe(tripId);
+
+    await auth(request(app).post(`/v1/trips/${tripId}/end`)).send({ status: 'ended' });
+    await trips.watcher.poll();
+    expect(await redis.get(vehicleActiveTripKey(vehicleId))).toBeNull();
+  });
+
+  it('shows a created SIM trip’s consent by its trip id', async () => {
+    const { loadingPointId } = await seedLoad(ds, { tenantId: TENANT_A });
+    const { tripId } = (await auth(request(app).post('/v1/trips')).send(body(loadingPointId))).body
+      .data;
+    const consent = await auth(request(app).get(`/v1/trips/${tripId}/sim-consent`));
+    expect(consent.status).toBe(200);
+    expect(consent.body.data).toMatchObject({ tripId, applicable: true });
   });
 
   it('rejects a bad body and a platform admin without a tenant', async () => {

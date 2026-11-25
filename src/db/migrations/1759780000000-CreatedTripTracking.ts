@@ -26,9 +26,7 @@ export class CreatedTripTracking1759780000000 implements MigrationInterface {
         ADD COLUMN tracking_source text
           CHECK (tracking_source IN ('gps', 'driver_app', 'sim', 'fastag'))`);
     // The trip watcher pages created trips on (updated_at, id), like loads.
-    await queryRunner.query(
-      `CREATE INDEX trips_updated_idx ON tracking.trips (updated_at, id)`,
-    );
+    await queryRunner.query(`CREATE INDEX trips_updated_idx ON tracking.trips (updated_at, id)`);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

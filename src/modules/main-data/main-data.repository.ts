@@ -305,8 +305,11 @@ function nationalMobile(value: string | null | undefined): string | null {
 /** A trip created from the tracking screen, in the load shape the trip watcher, the SIM
  *  lifecycle and the rules read. `deviceImei` is the fleet vehicle's GPS device, when it has one. */
 function createdTripToLoad(trip: TrackingTripEntity, deviceImei: string | null): MainLoad {
-  const ref = (kind: TrackingTripEntity['originKind'], wanted: TrackingTripEntity['originKind'], id: string | null) =>
-    kind === wanted ? id : null;
+  const ref = (
+    kind: TrackingTripEntity['originKind'],
+    wanted: TrackingTripEntity['originKind'],
+    id: string | null,
+  ) => (kind === wanted ? id : null);
   return {
     id: trip.id,
     tenantId: trip.tenantId,
@@ -715,8 +718,7 @@ export class MainDataRepository {
         points.set(t.id, {
           vehicleNumber: normalizePlate(t.vehicleNumber),
           pickupLoadingPointId: t.originKind === 'loading_point' ? t.originRefId : null,
-          pickupCustomerDeliveryPointId:
-            t.originKind === 'customer_address' ? t.originRefId : null,
+          pickupCustomerDeliveryPointId: t.originKind === 'customer_address' ? t.originRefId : null,
           dropCustomerDeliveryPointId:
             t.destinationKind === 'customer_address' ? t.destinationRefId : null,
           dropLoadingPointId: t.destinationKind === 'loading_point' ? t.destinationRefId : null,
