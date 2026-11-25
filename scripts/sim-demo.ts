@@ -251,12 +251,13 @@ const provider: SimProvider = {
       event('INTUGINE', 'GET /status -> 429 Too Many Requests', red);
       throw new IntugineError('Too Many Requests', 429);
     }
-    // One cell fix every PING_EVERY_MIN since the trip started, newest first.
+    // One cell fix every PING_EVERY_MIN since the trip started. Like the real API (live test
+    // 2026-11-25): OLDEST first, and `limit` keeps the oldest rows.
     const rows: unknown[] = [];
     for (
-      let m = Math.floor(clockMin / PING_EVERY_MIN) * PING_EVERY_MIN;
-      m >= tripStartedAtMin;
-      m -= PING_EVERY_MIN
+      let m = Math.ceil(tripStartedAtMin / PING_EVERY_MIN) * PING_EVERY_MIN;
+      m <= clockMin;
+      m += PING_EVERY_MIN
     ) {
       const p = truckAt(m);
       rows.push({
@@ -273,13 +274,13 @@ const provider: SimProvider = {
     if (!junkSent && clockMin >= 150 && rows.length > 2) {
       junkSent = true;
       // An unlocated fix (0,0) and a half-formed row: both must be dropped, not stored.
-      rows.unshift({
+      rows.push({
         _id: 'bad-1',
         tripId: INTUGINE_TRIP,
         loc: [0, 0],
         createdAt: virtualNow().toISOString(),
       });
-      rows.unshift({ _id: 'bad-2', tripId: INTUGINE_TRIP, createdAt: 'not-a-date' });
+      rows.push({ _id: 'bad-2', tripId: INTUGINE_TRIP, createdAt: 'not-a-date' });
     }
     return rows.slice(0, limit);
   },
@@ -349,10 +350,16 @@ const memoryMainData: SimMainData = {
 };
 
 const cursors = new Map<string, number>();
+const limitSteps = new Map<string, number>();
 const cursorStore: SimCursorStore = {
   get: async (id) => cursors.get(id) ?? 0,
   set: async (id, ms) => void cursors.set(id, ms),
-  delete: async (id) => void cursors.delete(id),
+  getStep: async (id) => limitSteps.get(id) ?? 1,
+  setStep: async (id, step) => void limitSteps.set(id, step),
+  delete: async (id) => {
+    cursors.delete(id);
+    limitSteps.delete(id);
+  },
 };
 
 const published: NormalizedPoint[] = [];

@@ -42,10 +42,16 @@ const location = (minutes: number, over: Record<string, unknown> = {}) => ({
 function setup(opts: { trip?: TripRef | undefined; rows?: unknown[] } = {}) {
   const store = new MemoryStore();
   const cursors = new Map<string, number>();
+  const steps = new Map<string, number>();
   const cursorStore: SimCursorStore = {
     get: async (id) => cursors.get(id) ?? 0,
     set: async (id, ms) => void cursors.set(id, ms),
-    delete: async (id) => void cursors.delete(id),
+    getStep: async (id) => steps.get(id) ?? 1,
+    setStep: async (id, step) => void steps.set(id, step),
+    delete: async (id) => {
+      cursors.delete(id);
+      steps.delete(id);
+    },
   };
   const published: NormalizedPoint[] = [];
   const publisher = {
@@ -57,7 +63,7 @@ function setup(opts: { trip?: TripRef | undefined; rows?: unknown[] } = {}) {
   } as unknown as ActiveTripIndex;
   const provider = { fetchLocations: vi.fn(async () => opts.rows ?? []) };
   const job = new SimPollJob(provider, store, cursorStore, activeTrips, publisher, { limit: 50 });
-  return { job, store, cursors, published, provider };
+  return { job, store, cursors, steps, published, provider };
 }
 
 describe('SimPollJob', () => {
@@ -93,6 +99,92 @@ describe('SimPollJob', () => {
     const second = await job.run(data, T0 + 50 * MIN);
     expect(second).toMatchObject({ accepted: 0, stale: 2 });
     expect(published).toHaveLength(2);
+  });
+
+  describe('Intugine returns the OLDEST `limit` rows (live test 2026-11-25)', () => {
+    // Behaves like the real status API: oldest first, `limit` keeps the oldest.
+    const oldestFirst = (all: unknown[]) =>
+      vi.fn(async (_id: string, limit: number) => all.slice(0, limit));
+    const trail = (n: number) => Array.from({ length: n }, (_, i) => location(10 + i * 15));
+    const limits = (provider: { fetchLocations: { mock: { calls: unknown[][] } } }) =>
+      provider.fetchLocations.mock.calls.map(([, limit]) => limit);
+
+    it('a short answer is the whole trip: one call, step stays 1', async () => {
+      const { job, provider, steps, published } = setup();
+      provider.fetchLocations = oldestFirst(trail(30));
+      await job.run(data, T0 + 10 * 60 * MIN);
+      expect(limits(provider)).toEqual([50]);
+      expect(steps.has('INT-1')).toBe(false);
+      expect(published).toHaveLength(30);
+    });
+
+    it('a full answer is retried at once with the next step, in the same poll (501 points)', async () => {
+      const { job, provider, steps, published, cursors } = setup();
+      provider.fetchLocations = oldestFirst(trail(51)); // limit is 50 in these tests
+      const result = await job.run(data, T0 + 24 * 60 * MIN);
+      expect(limits(provider)).toEqual([50, 100]);
+      expect(result.accepted).toBe(51);
+      expect(published).toHaveLength(51);
+      expect(steps.get('INT-1')).toBe(2);
+      expect(cursors.get('INT-1')).toBe(T0 + (10 + 50 * 15) * MIN);
+    });
+
+    it('keeps climbing one step at a time until the answer is short (120 points)', async () => {
+      const { job, provider, steps, published } = setup();
+      provider.fetchLocations = oldestFirst(trail(120));
+      await job.run(data, T0 + 24 * 60 * MIN);
+      expect(limits(provider)).toEqual([50, 100, 150]);
+      expect(steps.get('INT-1')).toBe(3);
+      expect(published).toHaveLength(120);
+    });
+
+    it('later polls start at the remembered step: one call', async () => {
+      const { job, provider, steps } = setup();
+      provider.fetchLocations = oldestFirst(trail(120));
+      await job.run(data, T0 + 24 * 60 * MIN);
+      provider.fetchLocations = oldestFirst(trail(125));
+      const second = await job.run(data, T0 + 25 * 60 * MIN);
+      expect(limits(provider)).toEqual([150]);
+      expect(second).toMatchObject({ accepted: 5, stale: 120 });
+      expect(steps.get('INT-1')).toBe(3);
+    });
+
+    it('after a quiet spell the batch that filled the limit does not hide the newest points (498 -> 507)', async () => {
+      const { job, provider, published } = setup();
+      provider.fetchLocations = oldestFirst(trail(48)); // 2 short of the limit of 50
+      await job.run(data, T0 + 12 * 60 * MIN);
+      expect(published).toHaveLength(48);
+
+      provider.fetchLocations = oldestFirst(trail(57)); // nothing for a while, then 9 at once
+      const result = await job.run(data, T0 + 15 * 60 * MIN);
+      expect(limits(provider)).toEqual([50, 100]);
+      expect(result).toMatchObject({ accepted: 9, stale: 48 });
+      expect(published).toHaveLength(57);
+    });
+
+    it('stops at the highest step and reports the poll as truncated', async () => {
+      const store = new MemoryStore();
+      const provider = { fetchLocations: oldestFirst(trail(500)) };
+      const steps = new Map<string, number>();
+      const job = new SimPollJob(
+        provider,
+        store,
+        {
+          get: async () => 0,
+          set: async () => {},
+          getStep: async (id) => steps.get(id) ?? 1,
+          setStep: async (id, step) => void steps.set(id, step),
+          delete: async () => {},
+        },
+        { getTripRefsForVehicles: async () => new Map() } as unknown as ActiveTripIndex,
+        { publish: async () => {} } as unknown as PointPublisher,
+        { limit: 50, maxStep: 3 },
+      );
+      const result = await job.run(data, T0 + 100 * 60 * MIN);
+      expect(limits(provider)).toEqual([50, 100, 150]);
+      expect(result.accepted).toBe(150);
+      expect(steps.get('INT-1')).toBe(3);
+    });
   });
 
   it('returns nothing before consent is approved and just stamps the poll', async () => {
@@ -134,6 +226,8 @@ describe('SimPollJob', () => {
       {
         get: async () => 0,
         set: async (id, ms) => void cursors.set(id, ms),
+        getStep: async () => 1,
+        setStep: async () => {},
         delete: async () => {},
       },
       { getTripRefsForVehicles: async () => new Map() } as unknown as ActiveTripIndex,

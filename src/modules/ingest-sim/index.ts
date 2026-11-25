@@ -38,7 +38,7 @@ export { SimLifecycleService } from './sim-lifecycle.service';
 export type { LifecycleResult, SimLifecycleOptions, SimMainData } from './sim-lifecycle.service';
 export { SIM_POLL_JOB, SIM_POLL_QUEUE, SimPollDispatcher } from './sim-poll.dispatcher';
 export type { SimPollDispatcherOptions } from './sim-poll.dispatcher';
-export { RedisSimCursors, SIM_CURSOR_KEY, SimPollJob } from './sim-poll.job';
+export { RedisSimCursors, SIM_CURSOR_KEY, SIM_LIMIT_STEP_KEY, SimPollJob } from './sim-poll.job';
 export type { SimCursorStore, SimPollJobData, SimPollOptions, SimPollResult } from './sim-poll.job';
 
 /** The consent thresholds from the env settings (one place, so every role reads them alike). */

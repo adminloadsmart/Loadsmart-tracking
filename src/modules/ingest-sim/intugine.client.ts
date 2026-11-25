@@ -61,7 +61,11 @@ export interface SimProvider {
   setTracking(intugineTripId: string, state: 'START' | 'STOP'): Promise<void>;
   /** The Intugine trip started with this invoice, or null. Used to find a trip whose start response was lost. */
   findTripByInvoice(invoice: string): Promise<string | null>;
-  /** Newest first. Raw rows, validated one by one by the caller. */
+  /**
+   * The OLDEST `limit` locations of the trip, oldest first (live test 2026-11-25). There is no sort
+   * or "since" parameter: unknown query parameters act as filters and return `[]`. Raw rows,
+   * validated one by one by the caller.
+   */
   fetchLocations(intugineTripId: string, limit: number): Promise<unknown[]>;
 }
 

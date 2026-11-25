@@ -66,7 +66,7 @@ export const endTripResponseSchema = z.object({
 export const loginResponseSchema = z.object({ token: z.string().min(1) });
 
 /**
- * GET /status?tripId= — newest first. `loc` is [lat, lng]; `createdAt` is when the location was
+ * GET /status?tripId= — oldest first, and `limit` keeps the oldest rows. `loc` is [lat, lng]; `createdAt` is when the location was
  * taken. No speed, heading or accuracy: SIM positions are cell-tower fixes. Rows are validated one
  * by one so a malformed one can't sink the batch.
  */

@@ -15,6 +15,11 @@ import type { SimTripStore } from './sim-trip.repository';
 
 /** Intugine trip id → last published location time (epoch ms). Keeps a re-polled location from being ingested twice. */
 export const SIM_CURSOR_KEY = 'trk:poll:cursor:sim';
+/** Intugine trip id → how many `limit`-sized steps the status call needed last time (see `pull`). */
+export const SIM_LIMIT_STEP_KEY = 'trk:poll:limitstep:sim';
+
+/** The step stops growing here: 20 × 500 = 10 000 locations, about 100 days of pings. */
+const DEFAULT_MAX_STEP = 20;
 
 // Mirrors START_GRACE_MS in ingest-roadcast/roadcast-poll.job.ts.
 const START_GRACE_MS = 10 * 60_000;
@@ -32,8 +37,13 @@ export interface SimPollJobData {
 }
 
 export interface SimPollOptions {
-  /** Newest locations asked for per poll. */
+  /**
+   * Size of one limit step: the first status call asks for `limit × step` locations (step starts
+   * at 1 per trip). Intugine returns the OLDEST locations first, so see `SimPollJob.pull`.
+   */
   limit: number;
+  /** Highest step. Default 20. */
+  maxStep?: number;
 }
 
 export type RowResult = 'accepted' | 'stale' | 'no_fix' | 'invalid';
@@ -43,7 +53,10 @@ export type SimPollResult = Record<RowResult, number>;
 export interface SimCursorStore {
   get(intugineTripId: string): Promise<number>;
   set(intugineTripId: string, ms: number): Promise<void>;
-  /** Forget a finished trip. */
+  /** The limit step the last poll of this trip ended on (1 when unknown). */
+  getStep(intugineTripId: string): Promise<number>;
+  setStep(intugineTripId: string, step: number): Promise<void>;
+  /** Forget a finished trip (cursor and step). */
   delete(intugineTripId: string): Promise<void>;
 }
 
@@ -55,8 +68,15 @@ export class RedisSimCursors implements SimCursorStore {
   async set(intugineTripId: string, ms: number): Promise<void> {
     await this.redis.hset(SIM_CURSOR_KEY, intugineTripId, String(ms));
   }
+  async getStep(intugineTripId: string): Promise<number> {
+    return Number(await this.redis.hget(SIM_LIMIT_STEP_KEY, intugineTripId)) || 1;
+  }
+  async setStep(intugineTripId: string, step: number): Promise<void> {
+    await this.redis.hset(SIM_LIMIT_STEP_KEY, intugineTripId, String(step));
+  }
   async delete(intugineTripId: string): Promise<void> {
     await this.redis.hdel(SIM_CURSOR_KEY, intugineTripId);
+    await this.redis.hdel(SIM_LIMIT_STEP_KEY, intugineTripId);
   }
 }
 
@@ -70,6 +90,11 @@ const apiSeconds = new Histogram({
   name: 'tracking_intugine_api_seconds',
   help: 'Intugine status call latency',
   buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20],
+  registers: [metricsRegistry],
+});
+const truncated = new Counter({
+  name: 'tracking_intugine_truncated_total',
+  help: 'Polls whose status response was still full at the highest limit step (newest points missing)',
   registers: [metricsRegistry],
 });
 const rowsTotal = new Counter({
@@ -161,10 +186,28 @@ export class SimPollJob {
     return counts;
   }
 
+  /**
+   * Intugine returns the OLDEST `limit` locations of the trip, oldest first, and has no sort or
+   * "since" parameter (live test, 2026-11-25). So a response as long as the limit may have newer
+   * locations behind it. The call asks for `limit × step` rows; when the answer fills that exactly,
+   * the step goes up by one and the call is repeated at once, until the answer is shorter (the
+   * whole trip is in hand) or the highest step is reached (counted as `truncated`). The step a
+   * trip ended on is remembered, so later polls normally need one call.
+   */
   private async pull(intugineTripId: string): Promise<unknown[]> {
+    const size = this.options.limit;
+    const maxStep = Math.max(1, this.options.maxStep ?? DEFAULT_MAX_STEP);
+    const startStep = Math.min(Math.max(1, await this.cursors.getStep(intugineTripId)), maxStep);
     const end = apiSeconds.startTimer();
     try {
-      const rows = await this.provider.fetchLocations(intugineTripId, this.options.limit);
+      let step = startStep;
+      let rows = await this.provider.fetchLocations(intugineTripId, size * step);
+      while (rows.length >= size * step && step < maxStep) {
+        step++;
+        rows = await this.provider.fetchLocations(intugineTripId, size * step);
+      }
+      if (rows.length >= size * step) truncated.inc();
+      if (step !== startStep) await this.cursors.setStep(intugineTripId, step);
       apiCalls.inc({ outcome: 'ok' });
       return rows;
     } catch (err) {

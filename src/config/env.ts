@@ -87,8 +87,10 @@ export const env = {
   // How often a trip on SIM is polled. Intugine only has a new location once per its own ping
   // rate, so keep this in step with the rate set on their side.
   intuginePollIntervalMin: numberWithDefault('INTUGINE_POLL_INTERVAL_MIN', 20),
-  // Newest locations asked for per poll. Whether Intugine caps this, or returns history, is not known yet.
-  intugineStatusLimit: numberWithDefault('INTUGINE_STATUS_LIMIT', 50),
+  // Size of one limit step of the status call. Intugine returns the OLDEST locations first and has
+  // no sort/since parameter, so a poll asks for `limit × step` and raises the step (kept per trip)
+  // while the answer is full. See SimPollJob.pull.
+  intugineStatusLimit: numberWithDefault('INTUGINE_STATUS_LIMIT', 500),
   // How often a pending consent is re-checked. The consent call may re-send the driver's SMS, so
   // keep this slow.
   intugineConsentCheckMin: numberWithDefault('INTUGINE_CONSENT_CHECK_MIN', 60),
