@@ -1,12 +1,20 @@
 import type { TenantScope } from '../../shared/auth/staff-token';
-import { NotFoundError, ValidationError } from '../../shared/errors';
+import { ConflictError, NotFoundError, ValidationError } from '../../shared/errors';
 import type { AddressResolver } from '../geocoding';
 import type { PointSource } from '../points';
 import { decodePolyline } from '../routes';
+import type { Geocoder } from '../routes';
 import type { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
 import { statsWindowStart, vehicleStats } from './vehicle-stats';
-import type { CreateTripBody, EndTripBody } from './tracking-api.validators';
+import type {
+  CreateTripBody,
+  EndTripBody,
+  TripListState,
+  UpdateTripBody,
+} from './tracking-api.validators';
 import {
+  CreatedTripPatch,
+  isActiveTruckConflict,
   PlannedRouteRow,
   TrackingApiRepository,
   TrackPoint,
@@ -150,6 +158,7 @@ function matchesQuery(trip: TripRow, query: string): boolean {
     trip.origin?.city,
     trip.destination?.name,
     trip.destination?.city,
+    trip.lr_number,
   ].some((field) => field?.toLowerCase().includes(needle));
 }
 
@@ -165,6 +174,8 @@ export class TrackingApiService {
     /** Reads the latest ETA the DELAY rule computed (trk:trip:{id}:eta). */
     private readonly readEta: (tripId: string) => Promise<Record<string, string>>,
     private readonly addresses?: AddressResolver,
+    /** Forward geocoding (Google), for a master place saved without a pin. */
+    private readonly geocoder?: Geocoder | null,
   ) {}
 
   /** Adds `address` (reverse-geocoded) to each position view; null where there's no position. */
@@ -260,12 +271,7 @@ export class TrackingApiService {
     };
   }
 
-  async listTrips(
-    scope: TenantScope,
-    state: 'pending' | 'active' | 'ended',
-    limit: number,
-    query?: string,
-  ) {
+  async listTrips(scope: TenantScope, state: TripListState, limit: number, query?: string) {
     const all = await this.repository.listTrips(scope, state, limit);
     const trips = query ? all.filter((trip) => matchesQuery(trip, query)) : all;
     const [latest, etas] = await Promise.all([
@@ -424,50 +430,182 @@ export class TrackingApiService {
     if ('allTenants' in scope) {
       throw new ValidationError('Create the trip from an organization account');
     }
+    await this.assertTruckFree(scope.tenantId, body.vehicleNumber, body.driverPhone);
     const delivery = body.delivery;
     // Decided once, as a load decides on truck assignment: which vehicle id its points carry, the
     // driver's account, and gps > driver_app > sim > fastag. A `sim` trip gets the driver's SIM
     // consent request from the SIM lifecycle on its next tick.
-    const tracking = await this.repository.truckTracking(
-      scope.tenantId,
-      body.vehicleNumber,
-      body.driverPhone,
-    );
-    const trip = await this.repository.createTrip({
-      ...tracking,
-      tenantId: scope.tenantId,
-      direction: body.direction,
-      customerId: body.customerId ?? null,
-      customerName: body.customerName ?? null,
-      originKind: body.source.kind,
-      originRefId: body.source.kind === 'address' ? null : (body.source.id ?? null),
-      originName: body.source.name,
-      originAddress: body.source.address,
-      originCity: body.source.city ?? null,
-      destinationKind: body.destination.kind,
-      destinationRefId: body.destination.kind === 'address' ? null : (body.destination.id ?? null),
-      destinationName: body.destination.name,
-      destinationAddress: body.destination.address,
-      destinationCity: body.destination.city ?? null,
-      vehicleNumber: body.vehicleNumber,
-      driverPhone: body.driverPhone,
-      driverName: body.driver?.name || null,
-      driverLicenceNumber: body.driver?.licenceNumber?.toUpperCase() || null,
-      driverDateOfBirth: body.driver?.dateOfBirth ?? null,
-      transporterId: body.transporter?.id ?? null,
-      transporterName: body.transporter?.name || null,
-      transporterPhone: body.transporter?.phone || null,
-      loadingReportingAt: body.loading?.reportingAt ?? null,
-      deliveryMode: delivery?.mode ?? null,
-      deliveryReportingAt: delivery?.mode === 'reporting' ? (delivery.reportingAt ?? null) : null,
-      appointmentRef: delivery?.mode === 'appointment' ? delivery.appointmentId || null : null,
-      appointmentFrom: delivery?.mode === 'appointment' ? (delivery.slotFrom ?? null) : null,
-      appointmentTo: delivery?.mode === 'appointment' ? (delivery.slotTo ?? null) : null,
-      ewayBillNumber: body.ewayBill?.number ?? null,
-      ewayBillValidTill: body.ewayBill?.validTill ?? null,
-      createdBy: actorId,
-    });
+    const [tracking, origin, destination] = await Promise.all([
+      this.repository.truckTracking(scope.tenantId, body.vehicleNumber, body.driverPhone),
+      this.locate(body.source),
+      this.locate(body.destination),
+    ]);
+    const save = () =>
+      this.repository.createTrip({
+        ...tracking,
+        tenantId: scope.tenantId,
+        direction: body.direction,
+        customerId: body.customerId ?? null,
+        customerName: body.customerName ?? null,
+        originKind: body.source.kind,
+        originRefId: body.source.id,
+        originName: body.source.name,
+        originAddress: body.source.address,
+        originCity: body.source.city ?? null,
+        originLat: origin?.lat ?? null,
+        originLng: origin?.lng ?? null,
+        destinationKind: body.destination.kind,
+        destinationRefId: body.destination.id,
+        destinationName: body.destination.name,
+        destinationAddress: body.destination.address,
+        destinationCity: body.destination.city ?? null,
+        destinationLat: destination?.lat ?? null,
+        destinationLng: destination?.lng ?? null,
+        arrivedPickupAt: null,
+        departedPickupAt: null,
+        arrivedDropAt: null,
+        vehicleNumber: body.vehicleNumber,
+        vahanStatus: body.vahanStatus ?? null,
+        driverPhone: body.driverPhone,
+        driverName: body.driver?.name || null,
+        driverLicenceNumber: body.driver?.licenceNumber?.toUpperCase() || null,
+        driverDateOfBirth: body.driver?.dateOfBirth ?? null,
+        dlStatus: body.driver?.licenceStatus ?? null,
+        dlFrontKey: body.driver?.licenceFrontKey ?? null,
+        dlBackKey: body.driver?.licenceBackKey ?? null,
+        rcKey: body.rcKey ?? null,
+        transporterId: body.transporter?.id ?? null,
+        transporterName: body.transporter?.name || null,
+        transporterPhone: body.transporter?.phone || null,
+        loadingReportingAt: body.loading?.reportingAt ?? null,
+        deliveryMode: delivery?.mode ?? null,
+        deliveryReportingAt: delivery?.mode === 'reporting' ? (delivery.reportingAt ?? null) : null,
+        appointmentRef: delivery?.mode === 'appointment' ? delivery.appointmentId || null : null,
+        appointmentFrom: delivery?.mode === 'appointment' ? (delivery.slotFrom ?? null) : null,
+        appointmentTo: delivery?.mode === 'appointment' ? (delivery.slotTo ?? null) : null,
+        ewayBillNumber: body.ewayBill?.number ?? null,
+        ewayBillValidTill: body.ewayBill?.validTill ?? null,
+        lrNumber: body.lrNumber || null,
+        createdBy: actorId,
+      });
+    const trip = await this.mapTruckConflict(save, scope.tenantId, body);
     return { ...tripView(trip), position: null, eta: null };
+  }
+
+  /**
+   * Edit tracking on an active created trip: the truck, the driver, the destination, the LR
+   * number. A new truck or driver number is tracked as a new one would be (vehicle id, driver
+   * account and source decided again); the SIM lifecycle ends the old driver's SIM trip on its
+   * next tick and asks the new one for consent when the trip is on SIM.
+   */
+  async updateTrip(scope: TenantScope, tripId: string, body: UpdateTripBody) {
+    if ('allTenants' in scope) {
+      throw new ValidationError('Edit the trip from an organization account');
+    }
+    const current = await this.repository.findActiveCreatedTrip(scope, tripId);
+    if (!current) {
+      const existing = await this.requireTrip(scope, tripId);
+      throw new ValidationError(
+        existing.created
+          ? `Trip ${existing.load_code} has ended — it can no longer be edited`
+          : 'A load trip is edited from the load',
+      );
+    }
+    const vehicleNumber = body.vehicleNumber ?? current.vehicleNumber;
+    const driverPhone = body.driverPhone ?? current.driverPhone;
+    const truckChanged =
+      vehicleNumber !== current.vehicleNumber || driverPhone !== current.driverPhone;
+    const patch: CreatedTripPatch = {};
+    if (truckChanged) {
+      await this.assertTruckFree(scope.tenantId, vehicleNumber, driverPhone, tripId);
+      Object.assign(
+        patch,
+        { vehicleNumber, driverPhone },
+        await this.repository.truckTracking(scope.tenantId, vehicleNumber, driverPhone),
+      );
+    }
+    if (vehicleNumber !== current.vehicleNumber) {
+      // A new truck: its own VAHAN result and RC photo (none carried over from the old one).
+      patch.vahanStatus = body.vahanStatus ?? null;
+      patch.rcKey = body.rcKey ?? null;
+    } else {
+      if (body.vahanStatus) patch.vahanStatus = body.vahanStatus;
+      if (body.rcKey) patch.rcKey = body.rcKey;
+    }
+    if (body.driver?.name !== undefined) patch.driverName = body.driver.name || null;
+    if (body.lrNumber !== undefined) patch.lrNumber = body.lrNumber || null;
+    if (body.destination) {
+      const at = await this.locate(body.destination);
+      Object.assign(patch, {
+        destinationKind: body.destination.kind,
+        destinationRefId: body.destination.id,
+        destinationName: body.destination.name,
+        destinationAddress: body.destination.address,
+        destinationCity: body.destination.city ?? null,
+        destinationLat: at?.lat ?? null,
+        destinationLng: at?.lng ?? null,
+      });
+    }
+    const trip = await this.mapTruckConflict(
+      () => this.repository.updateCreatedTrip(scope, tripId, patch),
+      scope.tenantId,
+      { vehicleNumber, driverPhone },
+    );
+    if (!trip)
+      throw new ValidationError(`Trip ${current.code} has ended — it can no longer be edited`);
+    return { ...tripView(trip), position: null, eta: null };
+  }
+
+  /** One trip at a time per truck and per driver, in an account: refuses a second running one. */
+  private async assertTruckFree(
+    tenantId: string,
+    vehicleNumber: string,
+    driverPhone: string,
+    exceptId?: string,
+  ) {
+    const running = await this.repository.activeTripOnTruck(
+      tenantId,
+      vehicleNumber,
+      driverPhone,
+      exceptId,
+    );
+    if (running) throw truckBusy(vehicleNumber, running);
+  }
+
+  /** Two saves racing past assertTruckFree meet the unique index; the loser gets the same 409. */
+  private async mapTruckConflict<T>(
+    save: () => Promise<T>,
+    tenantId: string,
+    truck: { vehicleNumber: string; driverPhone: string },
+  ): Promise<T> {
+    try {
+      return await save();
+    } catch (error) {
+      if (!isActiveTruckConflict(error)) throw error;
+      const running = await this.repository.activeTripOnTruck(
+        tenantId,
+        truck.vehicleNumber,
+        truck.driverPhone,
+      );
+      throw truckBusy(truck.vehicleNumber, running);
+    }
+  }
+
+  /** Where a master place is: as the picker sent it, else the master's saved pin, else its
+   *  address geocoded. Null when none of them knows (that end then has no arrival check). */
+  private async locate(
+    place: CreateTripBody['source'],
+  ): Promise<{ lat: number; lng: number } | null> {
+    if (place.lat !== undefined && place.lng !== undefined)
+      return { lat: place.lat, lng: place.lng };
+    const master = await this.repository.placeCoordinates(place.kind, place.id);
+    if (master || !this.geocoder) return master;
+    try {
+      return await this.geocoder.geocode(place.address);
+    } catch {
+      // Deliberately not fatal: the trip is saved without a pin for that end.
+      return null;
+    }
   }
 
   /** Ends or cancels a trip created from the tracking screen. Load trips end with their load. */
@@ -477,7 +615,7 @@ export class TrackingApiService {
     const existing = await this.requireTrip(scope, tripId);
     throw new ValidationError(
       existing.created
-        ? `Trip ${existing.load_code} has already ${existing.created.status === 'cancelled' ? 'been cancelled' : 'ended'}`
+        ? `Trip ${existing.load_code} has already ${existing.created.status === 'cancelled' ? 'been cancelled' : 'been completed'}`
         : 'A load trip ends with its load — close it from the load instead',
     );
   }
@@ -504,7 +642,13 @@ function tripView(trip: TripRow) {
     postingType: trip.posting_type,
     route: trip.route,
     trackingState: trip.tracking_state,
+    // The first ping; null while the trip waits for it.
     trackingStartedAt: trip.tracking_started_at?.toISOString() ?? null,
+    trackingSource: trip.tracking_source,
+    /** completed | cancelled once it has ended; null while it runs. */
+    outcome: trip.outcome,
+    lrNumber: trip.lr_number,
+    vehicleVerified: trip.vehicle_verified,
     trackingEndedAt: trip.tracking_ended_at?.toISOString() ?? null,
     vehicleId: trip.vehicle_id,
     vehicleNumber: trip.vehicle_number,
@@ -523,9 +667,15 @@ function tripView(trip: TripRow) {
     trackingOnly: Boolean(trip.created),
     ...(trip.created && {
       direction: trip.created.direction,
+      customerId: trip.created.customerId,
       transporterName: trip.created.transporterName,
       transporterPhone: trip.created.transporterPhone,
       loadingReportingAt: trip.created.loadingReportingAt?.toISOString() ?? null,
+      // The stage (trip.entity TRIP_STATUSES) and when each geofence step happened.
+      tripStatus: trip.created.status,
+      arrivedPickupAt: trip.created.arrivedPickupAt?.toISOString() ?? null,
+      departedPickupAt: trip.created.departedPickupAt?.toISOString() ?? null,
+      arrivedDropAt: trip.created.arrivedDropAt?.toISOString() ?? null,
       appointment: trip.created.appointment && {
         id: trip.created.appointment.ref,
         from: trip.created.appointment.from?.toISOString() ?? null,
@@ -534,4 +684,22 @@ function tripView(trip: TripRow) {
       createdAt: trip.created.createdAt.toISOString(),
     }),
   };
+}
+
+/** The 409 for a truck, or a driver, already on a running trip in this account. */
+function truckBusy(
+  vehicleNumber: string,
+  running: { id: string; code: string; kind: 'trip' | 'load'; busy: 'truck' | 'driver' } | null,
+) {
+  const where = running ? ` (${running.kind === 'load' ? 'load' : 'trip'} ${running.code})` : '';
+  const message =
+    running?.busy === 'driver'
+      ? `This driver is already on an active trip${where}. End it before starting another.`
+      : `Truck ${vehicleNumber} is already on an active trip${where}. End it before starting another.`;
+  return new ConflictError(
+    message,
+    running
+      ? { tripId: running.id, code: running.code, kind: running.kind, busy: running.busy }
+      : undefined,
+  );
 }

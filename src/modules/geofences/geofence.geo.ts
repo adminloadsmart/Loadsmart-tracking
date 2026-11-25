@@ -4,7 +4,8 @@ import type { MainGeofence } from '../main-data';
 /** Inside a geofence: within the circle's radius, or inside the drawn polygon. */
 export function containsPoint(geofence: MainGeofence, point: LatLng, defaultRadiusM = 0): boolean {
   if (geofence.shape === 'polygon') return isInsidePolygon(point, geofence.polygon ?? []);
-  return haversineMeters(point, geofence) <= (geofence.radiusM ?? defaultRadiusM);
+  // A circle saved without a radius (null or 0) uses the default: a 0 m circle is never entered.
+  return haversineMeters(point, geofence) <= (geofence.radiusM || defaultRadiusM);
 }
 
 /** Ray-casting point-in-polygon on lat/lng treated as planar — accurate for the site-sized

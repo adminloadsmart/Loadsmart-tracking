@@ -8,6 +8,7 @@ import {
   timelineSchema,
   tripParamsSchema,
   tripTrackSchema,
+  updateTripSchema,
   vehicleParamsSchema,
 } from './tracking-api.validators';
 
@@ -31,6 +32,8 @@ export function createTrackingApiRoutes(controller: TrackingApiController): Rout
   // Static path before /:tripId so "summary" is never parsed as an id.
   router.get('/trips/summary', controller.tripsSummary);
   router.get('/trips/:tripId', validate(tripParamsSchema), controller.trip);
+  // Edit tracking: a created trip's truck, driver, destination or LR number.
+  router.patch('/trips/:tripId', validate(updateTripSchema), controller.updateTrip);
   router.get('/trips/:tripId/route', validate(tripParamsSchema), controller.tripRoute);
   router.post('/trips/:tripId/end', validate(endTripSchema), controller.endTrip);
   router.get('/trips/:tripId/fastag', validate(tripParamsSchema), controller.tripFastag);

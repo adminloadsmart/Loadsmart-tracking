@@ -8,6 +8,7 @@ import {
   timelineSchema,
   tripParamsSchema,
   tripTrackSchema,
+  updateTripSchema,
   vehicleParamsSchema,
 } from './tracking-api.validators';
 
@@ -121,7 +122,7 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
         'GET /trips and /trips/{tripId} like a load trip, with `trackingOnly: true`, `direction`, ' +
         '`transporterName`/`transporterPhone`, `loadingReportingAt` and `appointment`. A picked ' +
         'loading point / customer address (`id`) gives the map its coordinates; a typed address ' +
-        '(`kind: address`) has none. Not live-tracked yet: no position, route or ETA. Organization ' +
+        '(`kind: address`) is refused: both ends are master places. Tracking starts with its first ping. Organization ' +
         'accounts only.',
     ),
     request: { body: { content: { 'application/json': { schema: createTripSchema.shape.body } } } },
@@ -129,6 +130,41 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
       201: { description: 'The created trip, in the GET /trips/{tripId} shape' },
       400: {
         description: 'Validation failed, or a platform-admin (all-tenant) caller',
+        ...errorContent,
+      },
+      409: {
+        description:
+          'The truck, or the driver number, is already on an active trip (or a load on the road) in this account',
+        ...errorContent,
+      },
+      ...authErrors,
+    },
+  });
+
+  registry.registerPath({
+    method: 'patch',
+    path: `${BASE}/trips/{tripId}`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.update',
+    ...authenticated(
+      'Edit tracking on an active trip created from the tracking screen: its truck, driver, ' +
+        'destination or LR number. A new truck or driver number is tracked as on create (vehicle, ' +
+        'driver account and tracking source decided again). Load trips are edited from the load.',
+    ),
+    request: {
+      params: updateTripSchema.shape.params,
+      body: { content: { 'application/json': { schema: updateTripSchema.shape.body } } },
+    },
+    responses: {
+      200: { description: 'The edited trip, in the GET /trips/{tripId} shape' },
+      400: {
+        description: 'Validation failed, the trip has ended, or it is a load trip',
+        ...errorContent,
+      },
+      404: { description: 'No such trip in scope', ...errorContent },
+      409: {
+        description:
+          'The new truck, or driver number, is already on another active trip in this account',
         ...errorContent,
       },
       ...authErrors,

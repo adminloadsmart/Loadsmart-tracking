@@ -64,7 +64,12 @@ export function buildContainer(deps: ContainerDeps): Container {
     logger: deps.logger,
     googleMapsApiKey: deps.googleMapsApiKey,
   });
-  const trackingApi = createTrackingApiModule(deps.dataSource, deps.redis, addresses);
+  const trackingApi = createTrackingApiModule(
+    deps.dataSource,
+    deps.redis,
+    addresses,
+    deps.googleMapsApiKey,
+  );
   const alerts = createAlertsModule(deps.dataSource, deps.redis, addresses);
   const routes = createRoutesModule({
     dataSource: deps.dataSource,

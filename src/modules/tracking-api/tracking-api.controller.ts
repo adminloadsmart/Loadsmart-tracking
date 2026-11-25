@@ -9,6 +9,7 @@ import type {
   ListTripsQuery,
   TimelineQuery,
   TripTrackQuery,
+  UpdateTripBody,
 } from './tracking-api.validators';
 
 function scopeOf(req: Request): TenantScope {
@@ -56,6 +57,17 @@ export class TrackingApiController {
       res,
       await this.service.createTrip(scopeOf(req), req.user.userId, req.body as CreateTripBody),
       201,
+    );
+  };
+
+  updateTrip = async (req: Request, res: Response) => {
+    respond(
+      res,
+      await this.service.updateTrip(
+        scopeOf(req),
+        String(req.params.tripId),
+        req.body as UpdateTripBody,
+      ),
     );
   };
 

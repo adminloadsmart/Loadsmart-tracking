@@ -1,5 +1,6 @@
 export { LOAD_TRACKING_SOURCES, MainDataRepository } from './main-data.repository';
 export type {
+  CreatedTripStep,
   LoadTrackingSource,
   MainGeofence,
   MainGpsDeviceBinding,

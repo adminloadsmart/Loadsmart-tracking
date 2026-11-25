@@ -61,7 +61,12 @@ export interface SimConsentSummary {
   /** The consent's validity date (shown with "Valid"). */
   validUntil: string | null;
   withdrawnAt: string | null;
-  /** The SMS can be sent again: only while no valid consent is available. */
+  /** The driver's mobile operator, as Intugine reported it (e.g. jio). */
+  operator: string | null;
+  /** What the driver has to do, when the operator doesn't use the SMS link — e.g. "Give a
+   *  missed call on 9982256700" (Jio). */
+  suggestion: string | null;
+  /** Resend can run: only while no valid consent is available. */
   canResend: boolean;
   /** Why not, when it can't. */
   resendBlockedReason: string | null;
@@ -107,7 +112,9 @@ export class SimConsentService {
     if (existing.consentRequestedAt || existing.state !== 'awaiting_consent') {
       return outcomeOf(existing);
     }
-    return this.check(existing, now);
+    // A new trip asks Intugine at once, even if the number was texted a moment ago for another
+    // load: the driver is told about this trip, and a consent given meanwhile is picked up.
+    return this.check(existing, now, true);
   }
 
   /** Re-checks pending rows that are due; a row past its TTL gets one last call (a late approval still counts) and then gives up. */
@@ -228,25 +235,16 @@ export class SimConsentService {
   }
 
   /**
-   * Sends the consent SMS again, by hand — only while no valid consent is available, and not
-   * within `resendGapMs` of the last send. A trip whose consent ended (timeout, repeated failures,
-   * denied or withdrawn) gets a fresh row; an operator Intugine cannot track is not retried.
+   * Resend, by hand: asks Intugine about the number's consent at once — no wait since the last
+   * send. Given: the trip is consented and nothing is sent. Not given yet: that same consent call
+   * sends the driver the consent request again (an SMS link, or for some operators an instruction
+   * such as a missed call, kept as `suggestion`). A trip whose consent ended (timeout, repeated
+   * failures, denied or withdrawn) gets a fresh row; an operator Intugine cannot track is not
+   * retried.
    */
   async resend(load: SimLoad, now = new Date()): Promise<ConsentOutcome> {
     const phone = normalizePhone(load.driverNumber);
     if (!phone) throw new ValidationError('The load has no usable driver mobile number');
-    const record = await this.consents.find(phone);
-    if (isConsentValid(record, now)) {
-      throw new ConflictError('A valid consent is already on file for this number', {
-        validUntil: record!.validUntil!.toISOString(),
-      });
-    }
-    const gap = this.options.resendGapMs ?? DEFAULT_RESEND_GAP_MS;
-    if (record?.sentAt && now.getTime() - record.sentAt.getTime() < gap) {
-      throw new ConflictError('The consent link was sent a moment ago; wait before sending again', {
-        retryAt: new Date(record.sentAt.getTime() + gap).toISOString(),
-      });
-    }
     let row = await this.store.findLiveByTrip(load.tripId);
     if (!row) {
       const latest = await this.store.findLatestByTrip(load.tripId);
@@ -273,6 +271,8 @@ export class SimConsentService {
     const empty = {
       phone: null,
       operatorStatus: null,
+      operator: null,
+      suggestion: null,
       sentAt: null,
       givenAt: null,
       validUntil: null,
@@ -291,6 +291,8 @@ export class SimConsentService {
     const base = {
       phone: `XXXXXX${phone.slice(-4)}`,
       operatorStatus: record?.status ?? trip?.consentStatus ?? null,
+      operator: record?.operator ?? null,
+      suggestion: record?.suggestion ?? null,
       sentAt: iso(record?.sentAt),
       givenAt: iso(record?.givenAt),
       validUntil: iso(record?.validUntil),

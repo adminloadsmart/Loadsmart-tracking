@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { MainDataRepository } from '../main-data';
-import { TrackingTripEntity } from '../tracking-api/trip.entity';
+import { TrackingTripEntity, RUNNING_TRIP_STATUSES } from '../tracking-api/trip.entity';
 import type { TimeProfile } from './route-time';
 import { IN_TRANSIT_STATUS } from '../trips';
 
@@ -81,7 +81,9 @@ export class RoutesRepository {
   async tripsNeedingRoute(limit: number): Promise<TripNeedingRoute[]> {
     const [active, created] = await Promise.all([
       this.mainData.activeLoads(),
-      this.dataSource.getRepository(TrackingTripEntity).find({ where: { status: 'active' } }),
+      this.dataSource
+        .getRepository(TrackingTripEntity)
+        .find({ where: { status: In([...RUNNING_TRIP_STATUSES]) } }),
     ]);
     const candidates = [
       ...active.map((load) => ({ id: load.id, startedAt: load.startedAt, load, created: null })),

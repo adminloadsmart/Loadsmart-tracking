@@ -1,7 +1,7 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import { DataSource } from 'typeorm';
-import type { MainGeofence, MainTripPoints } from '../main-data';
+import type { CreatedTripStep, MainGeofence, MainTripPoints } from '../main-data';
 import { MainDataRepository } from '../main-data';
 import type { BatchHook } from '../points';
 import type { ProcessedPoint } from '../processing/pipeline';
@@ -18,8 +18,16 @@ import {
   GeofenceTransition,
   hasPendingDwell,
   tripEventFor,
+  tripPlaceOf,
   VehicleGeofenceState,
 } from './geofence.evaluator';
+
+/** Running stages (trip.entity RUNNING_TRIP_STATUSES), for the forward-only stage steps. */
+const BEFORE_PICKUP = ['waiting_first_ping', 'heading_to_pickup'] as const;
+const BEFORE_DROP = [...BEFORE_PICKUP, 'at_pickup', 'in_transit'] as const;
+const RUNNING = [...BEFORE_DROP, 'at_drop'] as const;
+/** A created trip completes on its second fix inside the drop's geofence. */
+const COMPLETE_AFTER_FIXES = 2;
 import {
   GeofenceDwellRecord,
   GeofenceEventRecord,
@@ -75,6 +83,8 @@ export function createGeofencesModule(deps: {
   const repository = new GeofencesRepository(deps.dataSource);
   const geofenceCache = new Map<string, { at: number; value: MainGeofence[] }>();
   const tripPointsCache = new Map<string, { at: number; value: MainTripPoints | null }>();
+  // Created trips already moved past their first ping (so it is written once, not per batch).
+  const pinged = new Set<string>();
 
   const geofencesFor = async (tenantId: string, nowMs: number) => {
     const cached = geofenceCache.get(tenantId);
@@ -134,6 +144,8 @@ export function createGeofencesModule(deps: {
     const statusOf = (tripId: string | null) => (tripId ? (statuses.get(tripId) ?? null) : null);
     const pointsOf = (tripId: string | null) => (tripId ? (tripPoints.get(tripId) ?? null) : null);
 
+    // A created trip's stage follows its pickup / drop geofences (trip.entity TRIP_STATUSES).
+    const steps: CreatedTripStep[] = [];
     const records: GeofenceEventRecord[] = transitions.map((transition) => {
       const { vehicleId, tenantId, geofence, event, t, lat, lng, tripId } = transition;
       const points = pointsOf(tripId);
@@ -154,6 +166,16 @@ export function createGeofencesModule(deps: {
       ];
       const tripEvent = tripEventFor(transition, statusOf(tripId), points);
       if (tripEvent) outbox.push({ type: tripEvent, payload: base });
+      if (tripId && points?.createdTrip) {
+        const place = tripPlaceOf(geofence, points);
+        const at = new Date(t);
+        if (place === 'pickup' && event === 'enter')
+          steps.push({ tripId, to: 'at_pickup', from: [...BEFORE_PICKUP], at });
+        if (place === 'pickup' && event === 'exit')
+          steps.push({ tripId, to: 'in_transit', from: [...BEFORE_PICKUP, 'at_pickup'], at });
+        if (place === 'drop' && event === 'enter')
+          steps.push({ tripId, to: 'at_drop', from: [...BEFORE_DROP], at });
+      }
       return {
         id: uuidV5(GEOFENCE_EVENT_NAMESPACE, `${vehicleId}|${geofence.id}|${event}|${t}`),
         tenantId,
@@ -210,7 +232,43 @@ export function createGeofencesModule(deps: {
         outbox,
       };
     });
-    return { records, dwellRecords };
+    return { records, dwellRecords, steps };
+  }
+
+  /**
+   * Created trips' stage steps that don't come from an enter / exit: the first ping (waiting →
+   * heading to the pickup, or straight to the road when the pickup has no coordinates), and the
+   * second fix inside the drop's geofence (→ completed, which stops its tracking).
+   */
+  async function pingAndArrivalSteps(
+    fixesByTrip: Map<string, number>,
+    insideDrop: Array<{ tripId: string; geofence: MainGeofence; fixes: number; t: number }>,
+    nowMs: number,
+  ): Promise<CreatedTripStep[]> {
+    const ids = [...new Set([...fixesByTrip.keys(), ...insideDrop.map((d) => d.tripId)])].filter(
+      (id) => !pinged.has(id) || insideDrop.some((d) => d.tripId === id),
+    );
+    if (ids.length === 0) return [];
+    const points = await tripPointsFor(ids, nowMs);
+    const steps: CreatedTripStep[] = [];
+    for (const [tripId, t] of fixesByTrip) {
+      const trip = points.get(tripId);
+      if (!trip?.createdTrip || pinged.has(tripId)) continue;
+      pinged.add(tripId);
+      steps.push({
+        tripId,
+        to: trip.pickupLocated ? 'heading_to_pickup' : 'in_transit',
+        from: ['waiting_first_ping'],
+        at: new Date(t),
+      });
+    }
+    for (const { tripId, geofence, fixes, t } of insideDrop) {
+      const trip = points.get(tripId);
+      if (!trip?.createdTrip || fixes < COMPLETE_AFTER_FIXES) continue;
+      if (tripPlaceOf(geofence, trip) !== 'drop') continue;
+      steps.push({ tripId, to: 'completed', from: [...RUNNING], at: new Date(t) });
+    }
+    return steps;
   }
 
   async function evaluate(points: ProcessedPoint[], nowMs: number) {
@@ -231,6 +289,19 @@ export function createGeofencesModule(deps: {
       byVehicle.set(point.vehicleId, entry);
     }
     if (byVehicle.size === 0) return null;
+
+    // First fix of each trip in this batch (a created trip's first ping moves it on).
+    const fixesByTrip = new Map<string, number>();
+    for (const { fixes } of byVehicle.values()) {
+      for (const fix of fixes) {
+        if (!fix.tripId) continue;
+        const first = fixesByTrip.get(fix.tripId);
+        if (first === undefined || fix.t < first) fixesByTrip.set(fix.tripId, fix.t);
+      }
+    }
+    // Visits with their fix count, to complete a created trip at its drop.
+    const insideDrop: Array<{ tripId: string; geofence: MainGeofence; fixes: number; t: number }> =
+      [];
 
     const vehicleIds = [...byVehicle.keys()];
     const stored = await loadStates(vehicleIds);
@@ -256,6 +327,18 @@ export function createGeofencesModule(deps: {
         transitions.push({ vehicleId, tenantId, ...transition });
       }
       for (const dwell of result.dwells) dwells.push({ vehicleId, tenantId, ...dwell });
+      for (const geofenceId of result.changed) {
+        const membership = result.state[geofenceId];
+        const geofence = geofences.find((g) => g.id === geofenceId);
+        if (membership?.inside && membership.tripId && geofence) {
+          insideDrop.push({
+            tripId: membership.tripId,
+            geofence,
+            fixes: membership.fixes ?? 1,
+            t: membership.lastT,
+          });
+        }
+      }
       if (result.changed.length > 0) {
         writes.set(vehicleId, {
           fields: Object.fromEntries(
@@ -267,9 +350,13 @@ export function createGeofencesModule(deps: {
       }
     }
 
-    const { records, dwellRecords } = await recordsFor(transitions, dwells, nowMs);
+    const { records, dwellRecords, steps } = await recordsFor(transitions, dwells, nowMs);
     await repository.record(records);
     await repository.recordDwell(dwellRecords);
+    // After the events (a failure leaves the state untouched, so the batch re-raises them). The
+    // steps only move forward, so a re-run changes nothing.
+    steps.push(...(await pingAndArrivalSteps(fixesByTrip, insideDrop, nowMs)));
+    if (steps.length > 0) await mainData.advanceCreatedTrips(steps);
     return writes;
   }
 

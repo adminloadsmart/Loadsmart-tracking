@@ -111,7 +111,7 @@ describe('SimConsentApiService', () => {
     expect(result).toMatchObject({ applicable: true, status: 'link_sent' });
   });
 
-  it('resend is a conflict while a valid consent is on file', async () => {
+  it('resend with a valid consent on file answers with it (no SMS)', async () => {
     const { api, consents } = setup([]);
     await consents.save({
       phone: '9876543210',
@@ -125,7 +125,7 @@ describe('SimConsentApiService', () => {
       withdrawnAt: null,
       lastCheckedAt: null,
     });
-    await expect(api.resend(scope, ops, 'trip-1')).rejects.toThrow(/valid consent/);
+    expect(await api.resend(scope, ops, 'trip-1')).toMatchObject({ status: 'given' });
   });
 
   it('resend only while the load is being tracked, and only for SIM loads', async () => {

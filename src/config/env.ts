@@ -61,6 +61,10 @@ export const env = {
   // Google Routes + Geocoding (planned routes for DELAY/DEV rules). Optional: without it trips get
   // no planned route and the route-based rules stay inactive.
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || undefined,
+  // Planned road routes (Google Routes API, every 30 s for trips without one). Off by default since
+  // 25 Nov: the tracking screen no longer draws them. Turning it off also leaves the DELAY and
+  // route-deviation rules without a route. Geocoding and reverse geocoding are not affected.
+  routePlannerEnabled: process.env.ROUTE_PLANNER_ENABLED === 'true',
   // Roadcast GPS devices (poller role). One account for all of Loadsmart; every vehicle with a
   // gps_device_imei in main is pulled. Optional: without a key the Roadcast poller stays off.
   roadcastApiUrl: process.env.ROADCAST_API_URL || undefined,

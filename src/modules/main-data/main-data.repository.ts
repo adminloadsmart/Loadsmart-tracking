@@ -1,7 +1,11 @@
 import { DataSource, In, IsNull, Not } from 'typeorm';
 import type { TenantScope } from '../../shared/auth/staff-token';
 import { decodePolyline } from '../routes/route-geometry';
-import { TrackingTripEntity } from '../tracking-api/trip.entity';
+import {
+  RUNNING_TRIP_STATUSES,
+  TrackingTripEntity,
+  type TripStatus,
+} from '../tracking-api/trip.entity';
 import {
   ACTIVE_STATUSES,
   AFTER_DELIVERY_STATUSES,
@@ -62,6 +66,8 @@ export interface MainLoad {
   /** The load's e-way bill and when it expires (loads.eway_bill_*), shown on the control tower. */
   ewayBillNumber?: string | null;
   ewayBillExpiresAt?: Date | null;
+  /** The load's LR number (loads.elr_number), or the one typed on Create trip. */
+  lrNumber?: string | null;
   /** Tracking runs from loading confirmation… */
   startedAt: Date | null;
   /** …to delivery (or close). */
@@ -147,6 +153,10 @@ export interface MainTripPoints {
   dropLoadingPointId: string | null;
   /** Only an inbound trip created from the tracking screen starts at a customer address. */
   pickupCustomerDeliveryPointId?: string | null;
+  /** A trip created from the tracking screen (its stages differ: see createdTripLoadStatus). */
+  createdTrip?: boolean;
+  /** A created trip's pickup has coordinates (so a geofence to reach before the road to the drop). */
+  pickupLocated?: boolean;
 }
 
 export interface MainPlace {
@@ -182,6 +192,7 @@ interface LoadRow {
   promised_delivery_at: Date | null;
   eway_bill_number: string | null;
   eway_bill_expires_at: Date | null;
+  lr_number: string | null;
   truck_assigned_at: Date | null;
   loading_confirmed_at: Date | null;
   at_plant_at: Date | null;
@@ -218,6 +229,7 @@ const loadSelect = (columns: LoadColumns) => `
            p.deliver_by_at
          ) AS promised_delivery_at,
          NULLIF(btrim(l.eway_bill_number), '') AS eway_bill_number, l.eway_bill_expires_at,
+         NULLIF(btrim(l.elr_number), '') AS lr_number,
          l.truck_assigned_at, l.loading_confirmed_at, l.at_plant_at, l.in_transit_at,
          l.reached_delivery_point_at,
          l.delivered_at, l.pod_status::text AS pod_status, ${columns.departedDrop ? 'l.departed_drop_at' : 'NULL::timestamptz'} AS departed_drop_at,
@@ -276,6 +288,7 @@ function toLoad(row: LoadRow): MainLoad {
     promisedDeliveryAt: row.promised_delivery_at,
     ewayBillNumber: row.eway_bill_number,
     ewayBillExpiresAt: row.eway_bill_expires_at,
+    lrNumber: row.lr_number,
     startedAt: row.truck_assigned_at ?? row.at_plant_at ?? row.loading_confirmed_at,
     endedAt: row.delivered_at ?? row.closed_at,
     deliveredAt: row.delivered_at,
@@ -315,7 +328,7 @@ function createdTripToLoad(trip: TrackingTripEntity, deviceImei: string | null):
     tenantId: trip.tenantId,
     code: trip.code,
     title: null,
-    status: createdTripLoadStatus(trip.status),
+    status: createdTripLoadStatus(trip.status, trip.originLat !== null && trip.originLng !== null),
     // A truck that isn't in the fleet is tracked like a market truck (its plate's vehicle id).
     postingType: trip.ownFleet ? 'own_fleet' : 'market_fleet',
     route: null,
@@ -334,7 +347,9 @@ function createdTripToLoad(trip: TrackingTripEntity, deviceImei: string | null):
       trip.deliveryMode === 'appointment' ? trip.appointmentTo : trip.deliveryReportingAt,
     ewayBillNumber: trip.ewayBillNumber,
     ewayBillExpiresAt: trip.ewayBillValidTill,
-    // Tracked from the moment it is created until it is ended or cancelled.
+    lrNumber: trip.lrNumber,
+    // Points attach from the moment it is created until it is ended or cancelled (what the
+    // tracking screen calls the start is the first ping: TrackingApiRepository.firstPings).
     startedAt: trip.createdAt,
     endedAt: trip.endedAt,
     trackingSource: trip.trackingSource,
@@ -353,6 +368,22 @@ function scoped(scope: TenantScope | null, column: string, params: unknown[]): s
   params.push(scope.tenantId);
   return ` AND ${column} = $${params.length}`;
 }
+
+/** One stage step of a created trip: to `to`, at `at`, only from one of `from`. */
+export interface CreatedTripStep {
+  tripId: string;
+  to: TripStatus;
+  from: TripStatus[];
+  at: Date;
+}
+
+/** The time each stage stamps when reached. */
+const STEP_STAMP: Partial<Record<TripStatus, keyof TrackingTripEntity>> = {
+  at_pickup: 'arrivedPickupAt',
+  in_transit: 'departedPickupAt',
+  at_drop: 'arrivedDropAt',
+  completed: 'endedAt',
+};
 
 export class MainDataRepository {
   private loadColumns?: Promise<LoadColumns>;
@@ -665,7 +696,8 @@ export class MainDataRepository {
       shape: r.shape === 'polygon' ? 'polygon' : 'circle',
       lat: Number(r.latitude),
       lng: Number(r.longitude),
-      radiusM: r.radius_m,
+      // numeric columns can arrive as strings
+      radiusM: r.radius_m === null ? null : Number(r.radius_m),
       polygon: Array.isArray(r.polygon)
         ? r.polygon.map((p) => ({ lat: Number(p.latitude), lng: Number(p.longitude) }))
         : null,
@@ -722,6 +754,8 @@ export class MainDataRepository {
           dropCustomerDeliveryPointId:
             t.destinationKind === 'customer_address' ? t.destinationRefId : null,
           dropLoadingPointId: t.destinationKind === 'loading_point' ? t.destinationRefId : null,
+          createdTrip: true,
+          pickupLocated: t.originLat !== null && t.originLng !== null,
         });
       }
     }
@@ -842,15 +876,16 @@ export class MainDataRepository {
   /** Active trackable created trips — what the active-trip index and the SIM lifecycle hold. */
   async activeCreatedTrips(limit = 50_000): Promise<MainLoad[]> {
     const trips = await this.createdTrips().find({
-      where: { status: 'active', vehicleId: Not(IsNull()) },
+      where: { status: In([...RUNNING_TRIP_STATUSES]), vehicleId: Not(IsNull()) },
       order: { createdAt: 'DESC' },
       take: limit,
     });
     return this.createdTripsToLoads(trips);
   }
 
-  /** A created trip's places as typed, with the first and last point of its newest planned road
-   *  route — the coordinates of a place typed as an address (RoutePlanner geocoded it). */
+  /** A created trip's places as typed, with each end's coordinates: as saved on the trip (master
+   *  or geocoded, migration 1759790000000), else the first and last point of its newest planned
+   *  road route (trips from before, when RoutePlanner geocoded them). */
   async createdTripEnds(tripId: string): Promise<{
     start: [number, number] | null;
     end: [number, number] | null;
@@ -860,6 +895,16 @@ export class MainDataRepository {
   } | null> {
     const trip = await this.createdTrips().findOne({ where: { id: tripId } });
     if (!trip) return null;
+    const saved = (lat: number | null, lng: number | null): [number, number] | null =>
+      lat !== null && lng !== null ? [Number(lat), Number(lng)] : null;
+    const start = saved(trip.originLat, trip.originLng);
+    const end = saved(trip.destinationLat, trip.destinationLng);
+    const names = {
+      startName: trip.originName,
+      endName: trip.destinationName,
+      endAddress: trip.destinationAddress,
+    };
+    if (start && end) return { start, end, ...names };
     const route = await this.dataSource
       .createQueryBuilder()
       .select('r.polyline', 'polyline')
@@ -872,12 +917,138 @@ export class MainDataRepository {
     const first = line[0];
     const last = line.at(-1);
     return {
-      start: first ? [first.lat, first.lng] : null,
-      end: last ? [last.lat, last.lng] : null,
-      startName: trip.originName,
-      endName: trip.destinationName,
-      endAddress: trip.destinationAddress,
+      start: start ?? (first ? [first.lat, first.lng] : null),
+      end: end ?? (last ? [last.lat, last.lng] : null),
+      ...names,
     };
+  }
+
+  /**
+   * Moves created trips on to their next stage — only forward: each step names the stages it may
+   * come from, so a late or repeated event never moves a trip back. Stamps the step's time
+   * (arrived / departed / ended), and updated_at moves too, so the trip watcher re-indexes it
+   * (a completed trip leaves the index, which ends its SIM tracking).
+   */
+  async advanceCreatedTrips(steps: CreatedTripStep[]): Promise<void> {
+    for (const step of [...steps].sort((a, b) => a.at.getTime() - b.at.getTime())) {
+      const stamp = STEP_STAMP[step.to];
+      await this.createdTrips()
+        .createQueryBuilder()
+        .update()
+        .set({
+          status: step.to,
+          ...(stamp ? { [stamp]: step.at } : {}),
+        })
+        .where('id = :tripId', { tripId: step.tripId })
+        .andWhere('status IN (:...from)', { from: step.from })
+        .execute();
+    }
+  }
+
+  /**
+   * The tenant's trip already running with this truck, or with this driver number, if any: an
+   * active created trip, or a load on the road (truck assigned to unloaded). A truck can't be on
+   * two trips at once, and neither can a driver — in the same account; other accounts don't
+   * count. `busy` says which one clashed (the truck when both do). `exceptId` leaves out the trip
+   * being edited.
+   */
+  async activeTripOnTruck(
+    tenantId: string,
+    vehicleNumber: string,
+    driverPhone: string,
+    exceptId?: string,
+  ): Promise<{
+    id: string;
+    code: string;
+    kind: 'trip' | 'load';
+    busy: 'truck' | 'driver';
+  } | null> {
+    const plate = normalizePlate(vehicleNumber);
+    const phone = nationalMobile(driverPhone) ?? driverPhone.replace(/\D/g, '');
+    // At most one active trip each for the truck and the driver: two rows cover both clashes.
+    const trips = await this.createdTrips()
+      .createQueryBuilder('t')
+      .select(['t.id', 't.code', 't.vehicleNumber'])
+      .where('t.tenant_id = :tenantId', { tenantId })
+      .andWhere('t.status IN (:...running)', { running: [...RUNNING_TRIP_STATUSES] })
+      .andWhere('(t.vehicle_number = :plate OR t.driver_phone = :phone)', { plate, phone })
+      .andWhere(exceptId ? 't.id <> :exceptId' : '1=1', { exceptId })
+      .take(2)
+      .getMany();
+    const trip = trips.find((t) => t.vehicleNumber === plate) ?? trips[0];
+    if (trip) {
+      return {
+        id: trip.id,
+        code: trip.code,
+        kind: 'trip',
+        busy: trip.vehicleNumber === plate ? 'truck' : 'driver',
+      };
+    }
+    const loadPlate = "upper(regexp_replace(l.vehicle_number, '[\\s-]', '', 'g'))";
+    const loadPhone = "right(regexp_replace(l.driver_number, '\\D', '', 'g'), 10)";
+    const loads = await this.dataSource
+      .createQueryBuilder()
+      .select(['l.id AS id', 'l.code AS code'])
+      .addSelect(`${loadPlate} = :plate`, 'same_truck')
+      .from('loads.loads', 'l')
+      .where('l.tenant_id = :tenantId', { tenantId })
+      .andWhere('l.status::text IN (:...statuses)', { statuses: [...ACTIVE_STATUSES] })
+      .andWhere(`(${loadPlate} = :plate OR ${loadPhone} = :phone)`, { plate, phone })
+      .limit(20)
+      .getRawMany<{ id: string; code: string; same_truck: boolean }>();
+    const load = loads.find((l) => l.same_truck) ?? loads[0];
+    return load
+      ? { id: load.id, code: load.code, kind: 'load', busy: load.same_truck ? 'truck' : 'driver' }
+      : null;
+  }
+
+  /**
+   * Which of these trucks passed the VAHAN check with every paper in order, by trip: a fleet
+   * vehicle found on VAHAN (masters.vehicles) none of whose papers (masters.vehicle_documents) has
+   * expired, else the load's latest truck check (loads.load_verifications 'passed' — it fails on
+   * an expired paper).
+   * Created trips carry the check Create trip ran, so they are answered by the caller.
+   */
+  async vahanVerified(
+    trips: Array<{ id: string; vehicleId: string | null; ownFleet: boolean }>,
+  ): Promise<Set<string>> {
+    const verified = new Set<string>();
+    if (trips.length === 0) return verified;
+    const fleetIds = [
+      ...new Set(trips.filter((t) => t.ownFleet && t.vehicleId).map((t) => t.vehicleId!)),
+    ];
+    if (fleetIds.length > 0) {
+      const rows = await this.dataSource
+        .createQueryBuilder()
+        .select('v.id', 'id')
+        .from('masters.vehicles', 'v')
+        .where('v.id IN (:...ids)', { ids: fleetIds })
+        .andWhere("v.vahan_verification_status::text = 'verified'")
+        .andWhere(
+          `NOT EXISTS (SELECT 1 FROM masters.vehicle_documents d
+                       WHERE d.vehicle_id = v.id AND d.deleted_at IS NULL
+                         AND d.expiry_date < current_date)`,
+        )
+        .getRawMany<{ id: string }>();
+      const ok = new Set(rows.map((r) => r.id));
+      for (const t of trips)
+        if (t.ownFleet && t.vehicleId && ok.has(t.vehicleId)) verified.add(t.id);
+    }
+    const loadIds = trips.filter((t) => !verified.has(t.id)).map((t) => t.id);
+    if (loadIds.length > 0) {
+      const rows = await this.dataSource
+        .createQueryBuilder()
+        .select('DISTINCT ON (lv.load_id) lv.load_id', 'load_id')
+        .addSelect('lv.status::text', 'status')
+        .from('loads.load_verifications', 'lv')
+        .where('lv.load_id IN (:...ids)', { ids: loadIds })
+        .andWhere("lv.subject::text = 'truck'")
+        .orderBy('lv.load_id')
+        .addOrderBy('lv.checked_at', 'DESC')
+        .getRawMany<{ load_id: string; status: string }>();
+      for (const r of rows) if (r.status === 'passed') verified.add(r.load_id);
+    }
+    return verified;
   }
 
   /**

@@ -104,6 +104,64 @@ describe.skipIf(!available)('geofence check end to end (real Redis + Postgres)',
       (r: { event_type: string; payload: Record<string, unknown> }) => [r.event_type, r.payload],
     );
 
+  it('a created trip moves through its stages on its own and completes at the drop', async () => {
+    const dropPointId = randomUUID();
+    const pickupPointId = randomUUID();
+    const vehicleId = randomUUID();
+    // Its drop: a loading point 5 km north of the plant (an inbound trip ending at a plant).
+    const DROP_NORTH_M = 5000;
+    await ds.query(
+      `INSERT INTO tracking.geofences (id, tenant_id, name, type, latitude, longitude, radius_m, loading_point_id)
+       VALUES ($1, $2, 'Plant', 'loading_point', $3, $4, 300, $5),
+              ($6, $2, 'Drop', 'loading_point', $7, $4, 300, $8)`,
+      [
+        randomUUID(),
+        TENANT,
+        PLANT.lat,
+        PLANT.lng,
+        pickupPointId,
+        randomUUID(),
+        PLANT.lat + DROP_NORTH_M / 111_195,
+        dropPointId,
+      ],
+    );
+    const [{ id: tripId }] = await ds.query(
+      `INSERT INTO tracking.trips
+         (tenant_id, code, status, origin_kind, origin_ref_id, origin_name, origin_address,
+          origin_lat, origin_lng, destination_kind, destination_ref_id, destination_name,
+          destination_address, vehicle_number, driver_phone, vehicle_id, created_by)
+       VALUES ($1, 'TRP-0001', 'waiting_first_ping', 'loading_point', $2, 'Plant', 'Plot 1',
+               $3, $4, 'loading_point', $5, 'Drop', 'Plot 9', 'MH12AB1234', '9876543210', $6, $7)
+       RETURNING id`,
+      [TENANT, pickupPointId, PLANT.lat, PLANT.lng, dropPointId, vehicleId, randomUUID()],
+    );
+    const trip = { tripId, vehicleId };
+    const stage = async () =>
+      (await ds.query(`SELECT status FROM tracking.trips WHERE id = $1`, [tripId]))[0].status;
+
+    await feed(trip, [[600, 2000]]); // first ping, outside the plant
+    expect(await stage()).toBe('heading_to_pickup');
+    await feed(trip, [
+      [540, 2000],
+      [480, 100],
+    ]); // into the plant
+    expect(await stage()).toBe('at_pickup');
+    await feed(trip, [[420, 1500]]); // out of it
+    expect(await stage()).toBe('in_transit');
+    await feed(trip, [
+      [360, DROP_NORTH_M - 1000],
+      [300, DROP_NORTH_M - 50],
+    ]); // into the drop
+    expect(await stage()).toBe('at_drop');
+    await feed(trip, [[240, DROP_NORTH_M - 20]]); // a second point inside it
+    expect(await stage()).toBe('completed');
+    const [row] = await ds.query(
+      `SELECT arrived_pickup_at, departed_pickup_at, arrived_drop_at, ended_at FROM tracking.trips WHERE id = $1`,
+      [tripId],
+    );
+    expect(Object.values(row).every((at) => at !== null)).toBe(true);
+  });
+
   it('driving into the plant geofence while assigned → only geofence.entered (the arrival waits for the stop)', async () => {
     const trip = await assignedTrip();
     await feed(trip, [

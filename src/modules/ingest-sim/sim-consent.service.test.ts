@@ -143,22 +143,21 @@ describe('SimConsentService', () => {
       expect(store.rows[0].consentReused).toBe(false);
     });
 
-    it('a number texted a moment ago for another load is not texted again', async () => {
-      const { service, store, checkConsent } = setup([consent('pending')]);
+    it('a new trip asks Intugine at once, even if the number was texted for another load', async () => {
+      const { service, store, checkConsent } = setup([consent('pending'), consent('pending')]);
       await service.request(load, T0);
       expect(await service.request(other, at(5 * 60_000))).toBe('waiting');
-      expect(checkConsent).toHaveBeenCalledTimes(1);
+      expect(checkConsent).toHaveBeenCalledTimes(2);
       expect(store.rows[1].state).toBe('awaiting_consent');
     });
 
     it('a pending load picks up a consent another load got meanwhile, without a call', async () => {
       const { service, store, checkConsent } = setup([consent('pending'), consent('allowed')]);
-      await service.request(load, T0); // load 1: texted
-      await service.request(other, at(5 * 60_000)); // load 2: waits (not texted again)
-      await service.checkDue(at(2 * HOUR)); // load 1's check: allowed
-      expect(checkConsent).toHaveBeenCalledTimes(2);
+      await service.request(load, T0); // load 1: texted, still pending
+      await service.request(other, at(5 * 60_000)); // load 2: asks at once, now allowed
+      await service.checkDue(at(2 * HOUR)); // load 1: reuses that consent
       expect(store.rows.map((r) => r.state)).toEqual(['consented', 'consented']);
-      expect(checkConsent).toHaveBeenCalledTimes(2); // load 2 reused it: no third call
+      expect(checkConsent).toHaveBeenCalledTimes(2); // load 1 reused it: no third call
     });
 
     it('a consent past its validity asks again', async () => {
@@ -182,19 +181,26 @@ describe('SimConsentService', () => {
   });
 
   describe('resend', () => {
-    it('is refused while a valid consent is on file', async () => {
-      const { service } = setup([consent('allowed')]);
+    it('with a valid consent on file: the trip is consented, nothing is sent', async () => {
+      const { service, checkConsent } = setup([consent('allowed')]);
       await service.request(load, T0);
-      await expect(service.resend(load, at(HOUR))).rejects.toThrow(/valid consent/);
+      expect(await service.resend(load, at(HOUR))).toBe('ready');
+      expect(checkConsent).toHaveBeenCalledTimes(1);
     });
 
-    it('is refused within the gap after the last send, then sends and records it', async () => {
+    it('asks Intugine at once, even right after a send: given → consented', async () => {
+      const { service, checkConsent } = setup([consent('pending'), consent('allowed')]);
+      await service.request(load, T0);
+      expect(await service.resend(load, at(60_000))).toBe('ready');
+      expect(checkConsent).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks Intugine at once: not given yet → the request goes out again and is recorded', async () => {
       const { service, checkConsent, consents } = setup([consent('pending'), consent('pending')]);
       await service.request(load, T0);
-      await expect(service.resend(load, at(60_000))).rejects.toThrow(/a moment ago/);
-      expect(await service.resend(load, at(11 * 60_000))).toBe('waiting');
+      expect(await service.resend(load, at(60_000))).toBe('waiting');
       expect(checkConsent).toHaveBeenCalledTimes(2);
-      expect(consents.records.get('9876543210')!.sentAt).toEqual(at(11 * 60_000));
+      expect(consents.records.get('9876543210')!.sentAt).toEqual(at(60_000));
     });
 
     it('a trip whose consent timed out gets a fresh row and a new SMS', async () => {

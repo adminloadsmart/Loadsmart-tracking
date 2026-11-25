@@ -76,6 +76,15 @@ export const MAIN_SCHEMA_SQL = `
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS title text;
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS eway_bill_number varchar(50);
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS eway_bill_expires_at timestamptz;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS elr_number varchar(50);
+  ALTER TABLE masters.vehicles ADD COLUMN IF NOT EXISTS vahan_verification_status text NOT NULL DEFAULT 'unverified';
+  CREATE TABLE IF NOT EXISTS masters.vehicle_documents (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), vehicle_id uuid NOT NULL,
+    expiry_date date, deleted_at timestamptz);
+  CREATE TABLE IF NOT EXISTS loads.load_verifications (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, load_id uuid NOT NULL,
+    subject text NOT NULL, subject_ref varchar(30) NOT NULL, status text NOT NULL,
+    checked_at timestamptz NOT NULL DEFAULT now());
   CREATE SCHEMA IF NOT EXISTS auth;
   CREATE TABLE IF NOT EXISTS auth.organizations (
     id uuid PRIMARY KEY, late_delivery_threshold_minutes integer);

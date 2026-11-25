@@ -441,18 +441,17 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
   });
 
   it('plans a road route for a trip created from the tracking screen (typed addresses geocoded)', async () => {
-    const created = await request(app)
-      .post('/v1/trips')
-      .set('Authorization', `Bearer ${token()}`)
-      .send({
-        source: { kind: 'address', name: 'Depot', address: 'Ring Road, Delhi' },
-        destination: { kind: 'address', name: 'Warehouse', address: 'NH 58, Roorkee' },
-        direction: 'out',
-        vehicleNumber: 'UK07AB0002',
-        driverPhone: '9876543210',
-      });
-    expect(created.status).toBe(201);
-    const tripId = created.body.data.tripId;
+    // Created trips now take master places only; one saved before that, with typed addresses.
+    const [{ id: tripId }] = await ds.query(
+      `INSERT INTO tracking.trips
+         (tenant_id, code, status, origin_kind, origin_name, origin_address,
+          destination_kind, destination_name, destination_address, vehicle_number, driver_phone,
+          created_by)
+       VALUES ($1, 'TRP-0001', 'waiting_first_ping', 'address', 'Depot', 'Ring Road, Delhi',
+               'address', 'Warehouse', 'NH 58, Roorkee', 'UK07AB0002', '9876543210', $2)
+       RETURNING id`,
+      [TENANT, randomUUID()],
+    );
 
     expect(await routes.planner.planPending()).toBe(1);
     // Neither typed address has coordinates, so both were geocoded (and not cached on a place).

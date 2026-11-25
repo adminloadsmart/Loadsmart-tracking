@@ -29,6 +29,8 @@ export interface GeofenceMembership {
   arrivalAt?: number | null;
   /** Set once the detention has been raised for this visit. */
   detentionAt?: number | null;
+  /** Fixes seen inside on this visit (a created trip completes on the second one at its drop). */
+  fixes?: number;
   /** Last fix seen inside: where the truck is, and which trip it was on (for time-driven checks). */
   lat?: number;
   lng?: number;
@@ -219,6 +221,7 @@ export function evaluateVehicle(
         stoppedSince: stopped ? (wasInside ? (previous!.stoppedSince ?? fix.t) : fix.t) : null,
         arrivalAt: wasInside ? (previous!.arrivalAt ?? null) : null,
         detentionAt: wasInside ? (previous!.detentionAt ?? null) : null,
+        fixes: wasInside ? (previous!.fixes ?? 1) + 1 : 1,
         lat: fix.lat,
         lng: fix.lng,
         tripId: fix.tripId,
@@ -271,12 +274,54 @@ export function advanceDwell(
 }
 
 /**
- * The trip step a transition stands for, if any — only when the geofence is linked to this
- * trip's own pickup / drop point, and only from the status the main backend moves on from:
- * - leave the pickup's loading-point geofence once the load is loaded (still "loaded", or already
- *   in_transit_unloading) → departed pickup (LS_N_0026);
- * - enter the drop's unloading-point geofence while in_transit_unloading → entered the drop's
- *   geofence, sent at once ("will reach shortly"; the arrival itself waits, see dwellEventFor);
+ * Which of this trip's own places a geofence is: its pickup, its drop, or neither.
+ * - A load's pickup is its loading point's geofence; its drop the customer delivery point's (or,
+ *   for a posted load with no customer, the shipper's own loading point on an unloading geofence).
+ * - A trip created from the tracking screen may also start at a customer address (an inbound
+ *   trip) or end at a loading point.
+ */
+export function tripPlaceOf(
+  geofence: MainGeofence,
+  points: MainTripPoints,
+): 'pickup' | 'drop' | null {
+  const created = !!points.createdTrip;
+  const loadingPoint = geofence.loadingPointId;
+  const deliveryPoint = geofence.customerDeliveryPointId;
+  if (geofence.type === 'loading_point') {
+    if (!!loadingPoint && loadingPoint === points.pickupLoadingPointId) return 'pickup';
+    if (created && !!loadingPoint && loadingPoint === points.dropLoadingPointId) return 'drop';
+    return null;
+  }
+  if (geofence.type === 'unloading_point') {
+    if (created && !!deliveryPoint && deliveryPoint === points.pickupCustomerDeliveryPointId)
+      return 'pickup';
+    const isDrop =
+      (!!deliveryPoint && deliveryPoint === points.dropCustomerDeliveryPointId) ||
+      (!!loadingPoint && loadingPoint === points.dropLoadingPointId);
+    return isDrop ? 'drop' : null;
+  }
+  return null;
+}
+
+/** A created trip heading to, or at, its pickup (createdTripLoadStatus). */
+const CREATED_TRIP_PICKUP_STATUSES: readonly string[] = ['in_transit_loading', 'reached_loading'];
+/** Statuses a truck leaving its pickup's geofence departs from: a load once it is loaded (main
+ *  moves it on from there), a created trip — which has no loading step — while heading to it. */
+const departsPickupFrom = (created: boolean): readonly string[] =>
+  created ? CREATED_TRIP_PICKUP_STATUSES : ['loaded', IN_TRANSIT_STATUS];
+/** A created trip still counted as heading to its pickup (the truck never seen leaving it, e.g.
+ *  created mid-journey) is taken to be on the road to the drop once it gets there. */
+const towardsDropIn = (created: boolean): readonly string[] =>
+  created ? [IN_TRANSIT_STATUS, ...CREATED_TRIP_PICKUP_STATUSES] : [IN_TRANSIT_STATUS];
+
+/**
+ * The trip step a transition stands for, if any — only when the geofence is this trip's own
+ * pickup / drop (tripPlaceOf), and only from the status the main backend moves on from:
+ * - leave the pickup's geofence once the load is loaded (still "loaded", or already
+ *   in_transit_unloading) → departed pickup (LS_N_0026); a created trip departs while heading to
+ *   it, and is on the road to its drop from then on;
+ * - enter the drop's geofence while in_transit_unloading → entered the drop's geofence, sent at
+ *   once ("will reach shortly"; the arrival itself waits, see dwellEventFor);
  * - leave it once there — before the E-POD or after (a delivered load is followed until then, see
  *   trips/trip-state isIndexed) → departed drop (ends unloading detention, LS_N_0032; completes
  *   the trip with the E-POD, LS_N_0033).
@@ -288,21 +333,16 @@ export function tripEventFor(
 ): TripEventType | null {
   if (!transition.tripId || !points || !loadStatus) return null;
   const { geofence, event } = transition;
-  if (geofence.type === 'loading_point') {
-    const isPickup =
-      !!geofence.loadingPointId && geofence.loadingPointId === points.pickupLoadingPointId;
-    if (!isPickup) return null;
-    if (event === 'exit' && (loadStatus === 'loaded' || loadStatus === IN_TRANSIT_STATUS))
+  const created = !!points.createdTrip;
+  const place = tripPlaceOf(geofence, points);
+  if (place === 'pickup') {
+    if (event === 'exit' && departsPickupFrom(created).includes(loadStatus))
       return 'trip.departed_pickup';
     return null;
   }
-  if (geofence.type === 'unloading_point') {
-    const isDrop =
-      (!!geofence.customerDeliveryPointId &&
-        geofence.customerDeliveryPointId === points.dropCustomerDeliveryPointId) ||
-      (!!geofence.loadingPointId && geofence.loadingPointId === points.dropLoadingPointId);
-    if (!isDrop) return null;
-    if (event === 'enter' && loadStatus === IN_TRANSIT_STATUS) return 'trip.entered_drop_geofence';
+  if (place === 'drop') {
+    if (event === 'enter' && towardsDropIn(created).includes(loadStatus))
+      return 'trip.entered_drop_geofence';
     if (event === 'exit' && AT_OR_PAST_DROP_STATUSES.includes(loadStatus))
       return 'trip.departed_drop';
     return null;
@@ -335,10 +375,9 @@ export function dwellEventFor(
 ): { type: TripEventType; point: 'loading' | 'unloading' } | null {
   if (!dwell.tripId || !points || !loadStatus) return null;
   const { geofence, kind } = dwell;
-  if (geofence.type === 'loading_point') {
-    const isPickup =
-      !!geofence.loadingPointId && geofence.loadingPointId === points.pickupLoadingPointId;
-    if (!isPickup) return null;
+  const created = !!points.createdTrip;
+  const place = tripPlaceOf(geofence, points);
+  if (place === 'pickup') {
     if (kind === 'arrival' && isApproachStatus(loadStatus)) {
       return { type: 'trip.arrived_at_pickup', point: 'loading' };
     }
@@ -347,16 +386,14 @@ export function dwellEventFor(
     }
     return null;
   }
-  if (geofence.type === 'unloading_point') {
-    const isDrop =
-      (!!geofence.customerDeliveryPointId &&
-        geofence.customerDeliveryPointId === points.dropCustomerDeliveryPointId) ||
-      (!!geofence.loadingPointId && geofence.loadingPointId === points.dropLoadingPointId);
-    if (!isDrop) return null;
-    if (kind === 'arrival' && loadStatus === IN_TRANSIT_STATUS) {
+  if (place === 'drop') {
+    if (kind === 'arrival' && towardsDropIn(created).includes(loadStatus)) {
       return { type: 'trip.arrived_at_drop', point: 'unloading' };
     }
-    if (kind === 'detention' && AT_DROP_STATUSES.includes(loadStatus)) {
+    const atDrop = created
+      ? [...AT_DROP_STATUSES, ...CREATED_TRIP_PICKUP_STATUSES]
+      : AT_DROP_STATUSES;
+    if (kind === 'detention' && atDrop.includes(loadStatus)) {
       return { type: 'trip.detention_detected', point: 'unloading' };
     }
   }

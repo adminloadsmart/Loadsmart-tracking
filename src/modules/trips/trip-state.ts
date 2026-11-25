@@ -14,6 +14,8 @@ export const LOAD_STATUSES = [
   'invoice_generated',
   'payment',
   'closed',
+  // Called off before delivery: no longer tracked, listed under "Cancelled".
+  'cancelled',
 ] as const;
 export type LoadStatus = (typeof LOAD_STATUSES)[number];
 
@@ -140,7 +142,7 @@ export function isIndexed(
  * vehicle timeline keeps going).
  */
 export function trackingStateFor(status: LoadStatus, deleted: boolean): TrackingState {
-  if (deleted || ENDED_STATUSES.includes(status)) return 'ended';
+  if (deleted || ENDED_STATUSES.includes(status) || status === 'cancelled') return 'ended';
   if (ACTIVE_STATUSES.includes(status)) return 'active';
   return 'pending';
 }
@@ -181,10 +183,34 @@ export function initialTrackingSource(truck: {
 }
 
 /**
- * The load status a trip created from the tracking screen counts as. It has no stages of its own:
- * an active one is on the road to its destination (so the in-transit rules — halts, signal loss,
- * arrival at the drop — apply), an ended or cancelled one is closed (out of the index).
+ * The load status a trip created from the tracking screen counts as, from its stage (trip.entity
+ * TRIP_STATUSES) — what the index, the rules and the geofence check read. Before its first ping
+ * and on the way to the pickup it is heading to loading (so arriving there is seen); a trip whose
+ * pickup has no coordinates has no geofence to reach, so it is on the road to the drop from the
+ * start. Completed or cancelled is closed (out of the index).
  */
-export function createdTripLoadStatus(status: 'active' | 'ended' | 'cancelled'): LoadStatus {
-  return status === 'active' ? IN_TRANSIT_STATUS : 'closed';
+export function createdTripLoadStatus(
+  status:
+    | 'waiting_first_ping'
+    | 'heading_to_pickup'
+    | 'at_pickup'
+    | 'in_transit'
+    | 'at_drop'
+    | 'completed'
+    | 'cancelled',
+  pickupLocated = false,
+): LoadStatus {
+  switch (status) {
+    case 'waiting_first_ping':
+    case 'heading_to_pickup':
+      return pickupLocated ? 'in_transit_loading' : IN_TRANSIT_STATUS;
+    case 'at_pickup':
+      return 'reached_loading';
+    case 'in_transit':
+      return IN_TRANSIT_STATUS;
+    case 'at_drop':
+      return 'reached_unloading';
+    default:
+      return 'closed';
+  }
 }

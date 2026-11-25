@@ -162,13 +162,16 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
     leaderLoop('trip-index-rebuild', TRIP_REBUILD_MS, () => trips.watcher.rebuild()),
     leaderLoop('rules-tick', RULES_TICK_MS, () => rules.tick()),
     leaderLoop('geofence-dwell', GEOFENCE_DWELL_TICK_MS, () => geofences.tick()),
-    leaderLoop('route-planner', ROUTE_PLANNER_MS, () => routes.planner.planPending()),
     leaderLoop('point-retention', RETENTION_MS, () => retention.run()),
     leaderLoop('outbox-relay', OUTBOX_RELAY_MS, async () => {
       // Drain: keep relaying full batches until the outbox is empty.
       while ((await outbox.relay()) >= 500);
     }),
   ];
+  // Planned routes are opt-in (ROUTE_PLANNER_ENABLED): each one is a billed Google Routes call.
+  if (env.routePlannerEnabled) {
+    loops.push(leaderLoop('route-planner', ROUTE_PLANNER_MS, () => routes.planner.planPending()));
+  }
   if (roadcast) {
     loops.push(
       leaderLoop('roadcast-dispatch', env.roadcastPollIntervalMs, () => roadcast.dispatch()),

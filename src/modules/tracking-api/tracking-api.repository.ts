@@ -7,7 +7,13 @@ import { FastagCrossingRepository, type CrossingRow } from '../ingest-ulip';
 import { MainDataRepository, MainLoad, MainVehicle } from '../main-data';
 import { ACTIVE_STATUSES, LoadStatus, trackingStateFor } from '../trips';
 import type { StatsPoint } from './vehicle-stats';
-import { TrackingTripEntity, TripStatus } from './trip.entity';
+import {
+  isRunningTrip,
+  RUNNING_TRIP_STATUSES,
+  TrackingTripEntity,
+  TripStatus,
+} from './trip.entity';
+import type { TripListState } from './tracking-api.validators';
 
 export interface VehicleRow {
   id: string;
@@ -69,6 +75,15 @@ export interface TripRow {
   eway_bill_expires_at: Date | null;
   origin: PlaceRow | null;
   destination: PlaceRow | null;
+  /** How the truck is tracked (gps | driver_app | sim | fastag), as decided on the load / trip. */
+  tracking_source: string | null;
+  lr_number: string | null;
+  /** The registry (VAHAN) has verified the truck. */
+  vehicle_verified: boolean;
+  /** The trip's first location point: tracking starts there (null until it arrives). */
+  first_ping_at: Date | null;
+  /** How an ended trip ended: delivered / closed, or called off. Null while it runs. */
+  outcome: 'completed' | 'cancelled' | null;
   /** Only on trips created from the tracking screen (tracking.trips) — absent for load trips. */
   created?: CreatedTripExtras;
 }
@@ -77,12 +92,40 @@ export interface TripRow {
 export interface CreatedTripExtras {
   direction: 'in' | 'out' | null;
   status: TripStatus;
+  customerId: string | null;
   transporterName: string | null;
   transporterPhone: string | null;
   loadingReportingAt: Date | null;
   appointment: { ref: string | null; from: Date | null; to: Date | null } | null;
+  arrivedPickupAt: Date | null;
+  departedPickupAt: Date | null;
+  arrivedDropAt: Date | null;
   createdAt: Date;
 }
+
+/** What Edit tracking changes on a created trip (TrackingApiService.updateTrip). */
+export type CreatedTripPatch = Partial<
+  Pick<
+    TrackingTripEntity,
+    | 'vehicleNumber'
+    | 'driverPhone'
+    | 'driverName'
+    | 'vehicleId'
+    | 'ownFleet'
+    | 'driverId'
+    | 'trackingSource'
+    | 'vahanStatus'
+    | 'rcKey'
+    | 'destinationKind'
+    | 'destinationRefId'
+    | 'destinationName'
+    | 'destinationAddress'
+    | 'destinationCity'
+    | 'destinationLat'
+    | 'destinationLng'
+    | 'lrNumber'
+  >
+>;
 
 /** A new created trip, as the service hands it to the repository (code is assigned here). */
 export type NewCreatedTrip = Omit<
@@ -102,14 +145,28 @@ export interface TrackPoint {
 
 const PENDING_STATUSES: readonly LoadStatus[] = ['created', 'bids_received'];
 /** Created trips per list state: they start active (no pending stage — there is no load to wait on). */
-const CREATED_TRIP_STATUSES: Record<'pending' | 'active' | 'ended', TripStatus[]> = {
+const CREATED_TRIP_STATUSES: Record<TripListState, TripStatus[]> = {
   pending: [],
-  active: ['active'],
-  ended: ['ended', 'cancelled'],
+  active: [...RUNNING_TRIP_STATUSES],
+  completed: ['completed'],
+  cancelled: ['cancelled'],
+  ended: ['completed', 'cancelled'],
 };
 const CREATED_TRIP_CODE_PREFIX = 'TRP-';
 // Postgres unique_violation — two creates in one tenant raced for the same code.
 const UNIQUE_VIOLATION = '23505';
+/** One active trip per truck, and per driver number, in a tenant (migration 1759790000000). */
+const ACTIVE_TRIP_INDEXES = ['trips_active_truck_uq', 'trips_active_driver_uq'];
+
+/** The save hit a one-active-trip-per-truck / per-driver index (two creates raced). */
+export function isActiveTruckConflict(error: unknown): boolean {
+  return (
+    error instanceof QueryFailedError &&
+    (error.driverError as { code?: string; constraint?: string } | undefined)?.code ===
+      UNIQUE_VIOLATION &&
+    ACTIVE_TRIP_INDEXES.includes((error.driverError as { constraint?: string }).constraint ?? '')
+  );
+}
 const ENDED_STATUSES: readonly LoadStatus[] = [
   'delivered_ok',
   'delivered_with_issues',
@@ -117,6 +174,14 @@ const ENDED_STATUSES: readonly LoadStatus[] = [
   'payment',
   'closed',
 ];
+/** Load statuses per list state (cancelled loads only show under Cancelled / Ended). */
+const LOAD_LIST_STATUSES: Record<TripListState, readonly LoadStatus[]> = {
+  pending: PENDING_STATUSES,
+  active: ACTIVE_STATUSES,
+  completed: ENDED_STATUSES,
+  cancelled: ['cancelled'],
+  ended: [...ENDED_STATUSES, 'cancelled'],
+};
 
 function toVehicleRow(v: MainVehicle): VehicleRow {
   return {
@@ -214,17 +279,8 @@ export class TrackingApiRepository {
   }
 
   /** Created trips (newest first) ahead of load trips, `limit` in total. */
-  async listTrips(
-    scope: TenantScope,
-    state: 'pending' | 'active' | 'ended',
-    limit: number,
-  ): Promise<TripRow[]> {
-    const statuses =
-      state === 'active'
-        ? ACTIVE_STATUSES
-        : state === 'pending'
-          ? PENDING_STATUSES
-          : ENDED_STATUSES;
+  async listTrips(scope: TenantScope, state: TripListState, limit: number): Promise<TripRow[]> {
+    const statuses = LOAD_LIST_STATUSES[state];
     const createdStatuses = CREATED_TRIP_STATUSES[state];
     const created = createdStatuses.length
       ? await this.createdTrips.find({
@@ -259,9 +315,69 @@ export class TrackingApiRepository {
         const duplicate =
           error instanceof QueryFailedError &&
           (error.driverError as { code?: string } | undefined)?.code === UNIQUE_VIOLATION;
-        if (!duplicate || attempt >= 3) throw error;
+        if (!duplicate || isActiveTruckConflict(error) || attempt >= 3) throw error;
       }
     }
+  }
+
+  /** The tenant's running trip with this truck and driver number (one at a time), if any. */
+  activeTripOnTruck(
+    tenantId: string,
+    vehicleNumber: string,
+    driverPhone: string,
+    exceptId?: string,
+  ) {
+    return this.mainData.activeTripOnTruck(tenantId, vehicleNumber, driverPhone, exceptId);
+  }
+
+  /** A picked master place's coordinates (a delivery point's own, else its geocode cache). */
+  async placeCoordinates(
+    kind: 'loading_point' | 'customer_address',
+    id: string,
+  ): Promise<{ lat: number; lng: number } | null> {
+    const places = await this.mainData.places(
+      kind === 'loading_point' ? [id] : [],
+      kind === 'customer_address' ? [id] : [],
+    );
+    const place = places.get(id);
+    return place?.lat != null && place.lng != null ? { lat: place.lat, lng: place.lng } : null;
+  }
+
+  /** The caller's active created trip by id (what Edit tracking may change), else null. */
+  findActiveCreatedTrip(scope: TenantScope, id: string): Promise<TrackingTripEntity | null> {
+    return this.createdTrips.findOne({
+      where: { id, status: In([...RUNNING_TRIP_STATUSES]), ...tenantWhere(scope) },
+    });
+  }
+
+  /** Saves Edit tracking's changes on an active created trip; null if it is no longer active. */
+  async updateCreatedTrip(
+    scope: TenantScope,
+    id: string,
+    patch: CreatedTripPatch,
+  ): Promise<TripRow | null> {
+    const result = await this.createdTrips.update(
+      { id, status: In([...RUNNING_TRIP_STATUSES]), ...tenantWhere(scope) },
+      patch,
+    );
+    if (!result.affected) return null;
+    const trip = await this.createdTrips.findOneByOrFail({ id });
+    return (await this.toCreatedTripRows([trip]))[0];
+  }
+
+  /** Each trip's first location point (the first ping), via the (trip_id, recorded_at) index. */
+  private async firstPings(tripIds: string[]): Promise<Map<string, Date>> {
+    if (tripIds.length === 0) return new Map();
+    const rows: Array<{ trip_id: string; recorded_at: Date }> = await this.dataSource.query(
+      `SELECT t.id AS trip_id, p.recorded_at
+       FROM unnest($1::uuid[]) AS t(id)
+       JOIN LATERAL (
+         SELECT recorded_at FROM tracking.location_points
+         WHERE trip_id = t.id ORDER BY recorded_at LIMIT 1
+       ) p ON true`,
+      [tripIds],
+    );
+    return new Map(rows.map((r) => [r.trip_id, new Date(r.recorded_at)]));
   }
 
   /** Ends an active created trip; null when it isn't one of the caller's created trips or has
@@ -269,10 +385,10 @@ export class TrackingApiRepository {
   async endCreatedTrip(
     scope: TenantScope,
     id: string,
-    status: Exclude<TripStatus, 'active'>,
+    status: 'completed' | 'cancelled',
   ): Promise<TripRow | null> {
     const result = await this.createdTrips.update(
-      { id, status: 'active', ...tenantWhere(scope) },
+      { id, status: In([...RUNNING_TRIP_STATUSES]), ...tenantWhere(scope) },
       { status, endedAt: new Date() },
     );
     if (!result.affected) return null;
@@ -299,7 +415,7 @@ export class TrackingApiRepository {
         ...(t.originKind === kind && t.originRefId ? [t.originRefId] : []),
         ...(t.destinationKind === kind && t.destinationRefId ? [t.destinationRefId] : []),
       ]);
-    const [masters, statusRows] = await Promise.all([
+    const [masters, statusRows, firstPings, fleetVerified] = await Promise.all([
       this.mainData.places(refsOf('loading_point'), refsOf('customer_address')),
       this.dataSource
         .createQueryBuilder()
@@ -307,6 +423,11 @@ export class TrackingApiRepository {
         .from('tracking.trip_route_status', 's')
         .where('s.trip_id IN (:...ids)', { ids: trips.map((t) => t.id) })
         .getRawMany<{ trip_id: string; status: string }>(),
+      this.firstPings(trips.map((t) => t.id)),
+      // A fleet truck verified in the vehicle master counts even if Create trip's check didn't run.
+      this.mainData.vahanVerified(
+        trips.map((t) => ({ id: t.id, vehicleId: t.vehicleId, ownFleet: t.ownFleet })),
+      ),
     ]);
     // Route planning (RoutePlanner) covers created trips too: no_api_key, not_found, ok, ...
     const routeStatus = new Map(statusRows.map((r) => [r.trip_id, r.status]));
@@ -315,16 +436,17 @@ export class TrackingApiRepository {
       name: string,
       address: string,
       city: string | null,
+      saved: { lat: number | null; lng: number | null },
     ): PlaceRow => {
       const master = refId ? masters.get(refId) : undefined;
-      return {
-        id: refId ?? '',
-        name,
-        city: city ?? master?.city ?? null,
-        address,
-        lat: master?.lat ?? null,
-        lng: master?.lng ?? null,
-      };
+      // The master's current pin wins; else where the trip saved the place (a geocoded address).
+      const at =
+        master?.lat != null && master.lng != null
+          ? { lat: master.lat, lng: master.lng }
+          : saved.lat !== null && saved.lng !== null
+            ? { lat: Number(saved.lat), lng: Number(saved.lng) }
+            : { lat: null, lng: null };
+      return { id: refId ?? '', name, city: city ?? master?.city ?? null, address, ...at };
     };
     return trips.map((t) => ({
       id: t.id,
@@ -341,8 +463,9 @@ export class TrackingApiRepository {
       driver_phone: t.driverPhone,
       customer_name: t.customerName,
       planned_tonnes: null,
-      tracking_state: t.status === 'active' ? 'active' : 'ended',
-      tracking_started_at: t.createdAt,
+      tracking_state: isRunningTrip(t.status) ? 'active' : 'ended',
+      // Tracking starts with the first ping, not when the trip was saved.
+      tracking_started_at: firstPings.get(t.id) ?? null,
       tracking_ended_at: t.endedAt,
       milestones: {},
       route_status: routeStatus.get(t.id) ?? null,
@@ -350,16 +473,31 @@ export class TrackingApiRepository {
         t.deliveryMode === 'appointment' ? t.appointmentTo : t.deliveryReportingAt,
       eway_bill_number: t.ewayBillNumber,
       eway_bill_expires_at: t.ewayBillValidTill,
-      origin: place(t.originRefId, t.originName, t.originAddress, t.originCity),
+      origin: place(t.originRefId, t.originName, t.originAddress, t.originCity, {
+        lat: t.originLat,
+        lng: t.originLng,
+      }),
       destination: place(
         t.destinationRefId,
         t.destinationName,
         t.destinationAddress,
         t.destinationCity,
+        { lat: t.destinationLat, lng: t.destinationLng },
       ),
+      tracking_source: t.trackingSource,
+      lr_number: t.lrNumber,
+      // Create trip's own check when it ran, else the fleet vehicle's master record.
+      vehicle_verified: t.vahanStatus ? t.vahanStatus === 'verified' : fleetVerified.has(t.id),
+      first_ping_at: firstPings.get(t.id) ?? null,
+      outcome: isRunningTrip(t.status)
+        ? null
+        : t.status === 'cancelled'
+          ? 'cancelled'
+          : 'completed',
       created: {
         direction: t.direction,
         status: t.status,
+        customerId: t.customerId,
         transporterName: t.transporterName,
         transporterPhone: t.transporterPhone,
         loadingReportingAt: t.loadingReportingAt,
@@ -367,6 +505,9 @@ export class TrackingApiRepository {
           t.deliveryMode === 'appointment'
             ? { ref: t.appointmentRef, from: t.appointmentFrom, to: t.appointmentTo }
             : null,
+        arrivedPickupAt: t.arrivedPickupAt,
+        departedPickupAt: t.departedPickupAt,
+        arrivedDropAt: t.arrivedDropAt,
         createdAt: t.createdAt,
       },
     }));
@@ -384,6 +525,16 @@ export class TrackingApiRepository {
         )
       : [];
     const routeStatus = new Map(statusRows.map((r) => [r.trip_id, r.status]));
+    const [firstPings, verified] = await Promise.all([
+      this.firstPings(loads.map((l) => l.id)),
+      this.mainData.vahanVerified(
+        loads.map((l) => ({
+          id: l.id,
+          vehicleId: l.vehicleId,
+          ownFleet: l.postingType === 'own_fleet',
+        })),
+      ),
+    ]);
     const place = (id: string | null): PlaceRow | null => {
       const p = id ? places.get(id) : undefined;
       return p
@@ -406,7 +557,8 @@ export class TrackingApiRepository {
       customer_name: load.customerName,
       planned_tonnes: load.plannedTonnes,
       tracking_state: trackingStateFor(load.status, false),
-      tracking_started_at: load.startedAt,
+      // Tracking starts with the first ping, not when the truck was assigned.
+      tracking_started_at: firstPings.get(load.id) ?? null,
       tracking_ended_at: load.endedAt,
       milestones: load.milestones,
       route_status: routeStatus.get(load.id) ?? null,
@@ -415,6 +567,16 @@ export class TrackingApiRepository {
       eway_bill_expires_at: load.ewayBillExpiresAt ?? null,
       origin: place(load.loadingPointId),
       destination: place(load.deliveryPointId),
+      tracking_source: load.trackingSource,
+      lr_number: load.lrNumber ?? null,
+      vehicle_verified: verified.has(load.id),
+      first_ping_at: firstPings.get(load.id) ?? null,
+      outcome:
+        load.status === 'cancelled'
+          ? 'cancelled'
+          : ENDED_STATUSES.includes(load.status)
+            ? 'completed'
+            : null,
     }));
   }
 

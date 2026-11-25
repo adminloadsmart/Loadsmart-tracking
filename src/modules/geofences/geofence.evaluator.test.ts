@@ -8,6 +8,7 @@ import {
   GeofenceFix,
   GeofenceTransition,
   tripEventFor,
+  tripPlaceOf,
 } from './geofence.evaluator';
 
 const VEHICLE = '22222222-2222-4222-8222-222222222222';
@@ -392,5 +393,75 @@ describe('dwellEventFor', () => {
     expect(
       dwellEventFor(dwell('detention', { ...plant, type: 'yard' }), 'reached_loading', points),
     ).toBeNull();
+  });
+});
+
+describe('trips created from the tracking screen', () => {
+  const created: MainTripPoints = {
+    vehicleNumber: 'PB10AB1234',
+    pickupLoadingPointId: PICKUP,
+    dropCustomerDeliveryPointId: DROP,
+    dropLoadingPointId: null,
+    createdTrip: true,
+  };
+  const dropFence: MainGeofence = {
+    ...plant,
+    id: 'geo-drop',
+    type: 'unloading_point',
+    loadingPointId: null,
+    customerDeliveryPointId: DROP,
+  };
+  const transition = (
+    event: 'enter' | 'exit',
+    geofence: MainGeofence,
+    tripId: string = TRIP,
+  ): GeofenceTransition => ({ geofence, event, t: T0, lat: 30.9, lng: 75.85, tripId });
+  const dwell = (kind: 'arrival' | 'detention', geofence: MainGeofence): GeofenceDwell => ({
+    geofence,
+    kind,
+    t: T0,
+    since: T0,
+    lat: 30.9,
+    lng: 75.85,
+    tripId: TRIP,
+  });
+
+  it('arrives at and departs the pickup while heading to it', () => {
+    expect(dwellEventFor(dwell('arrival', plant), 'in_transit_loading', created)).toEqual({
+      type: 'trip.arrived_at_pickup',
+      point: 'loading',
+    });
+    expect(tripEventFor(transition('exit', plant), 'in_transit_loading', created)).toBe(
+      'trip.departed_pickup',
+    );
+  });
+
+  it('still reaches the drop if the truck was never seen leaving the pickup', () => {
+    expect(tripEventFor(transition('enter', dropFence), 'in_transit_loading', created)).toBe(
+      'trip.entered_drop_geofence',
+    );
+    expect(dwellEventFor(dwell('arrival', dropFence), 'in_transit_loading', created)).toEqual({
+      type: 'trip.arrived_at_drop',
+      point: 'unloading',
+    });
+  });
+
+  it('matches an inbound pickup at a customer address (load trips do not)', () => {
+    const inbound: MainTripPoints = {
+      ...created,
+      pickupLoadingPointId: null,
+      pickupCustomerDeliveryPointId: DROP,
+      dropCustomerDeliveryPointId: null,
+      dropLoadingPointId: PICKUP,
+    };
+    expect(tripPlaceOf(dropFence, inbound)).toBe('pickup');
+    expect(tripPlaceOf(plant, inbound)).toBe('drop');
+    expect(tripPlaceOf(dropFence, { ...inbound, createdTrip: false })).toBeNull();
+  });
+
+  it('uses the default radius for a circle saved with 0 m', () => {
+    const zero = { ...plant, radiusM: 0 };
+    const result = evaluateVehicle(VEHICLE, [fix(0, 5000), fix(60, 100)], [zero], {});
+    expect(result.transitions.map((t) => t.event)).toEqual(['enter']);
   });
 });

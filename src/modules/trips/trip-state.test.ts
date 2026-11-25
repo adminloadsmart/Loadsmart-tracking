@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createdTripLoadStatus,
   DELIVERED_FOLLOW_MS,
   isIndexed,
   marketVehicleId,
@@ -72,5 +73,25 @@ describe('isIndexed', () => {
     expect(isIndexed(load('closed', 60_000), now)).toBe(true);
     expect(isIndexed(load('delivered_ok', 60_000, true), now)).toBe(false);
     expect(isIndexed(load('delivered_ok', DELIVERED_FOLLOW_MS + 1), now)).toBe(false);
+  });
+});
+
+describe('createdTripLoadStatus', () => {
+  it('follows the stage: heading to the pickup, at it, on the road, at the drop', () => {
+    expect(createdTripLoadStatus('waiting_first_ping', true)).toBe('in_transit_loading');
+    expect(createdTripLoadStatus('heading_to_pickup', true)).toBe('in_transit_loading');
+    expect(createdTripLoadStatus('at_pickup', true)).toBe('reached_loading');
+    expect(createdTripLoadStatus('in_transit', true)).toBe('in_transit_unloading');
+    expect(createdTripLoadStatus('at_drop', true)).toBe('reached_unloading');
+  });
+
+  it('goes straight to the drop when the pickup has no coordinates (nothing to reach)', () => {
+    expect(createdTripLoadStatus('waiting_first_ping')).toBe('in_transit_unloading');
+    expect(createdTripLoadStatus('heading_to_pickup', false)).toBe('in_transit_unloading');
+  });
+
+  it('is closed once completed or cancelled', () => {
+    expect(createdTripLoadStatus('completed', true)).toBe('closed');
+    expect(createdTripLoadStatus('cancelled', true)).toBe('closed');
   });
 });
