@@ -3,7 +3,13 @@ import type { TenantScope } from '../../shared/auth/staff-token';
 import { AuthenticationError } from '../../shared/errors';
 import { respond } from '../../shared/responses/respond';
 import { TrackingApiService } from './tracking-api.service';
-import type { ListTripsQuery, TimelineQuery, TripTrackQuery } from './tracking-api.validators';
+import type {
+  CreateTripBody,
+  EndTripBody,
+  ListTripsQuery,
+  TimelineQuery,
+  TripTrackQuery,
+} from './tracking-api.validators';
 
 function scopeOf(req: Request): TenantScope {
   if (!req.tenantScope) throw new AuthenticationError('Not authenticated');
@@ -19,6 +25,10 @@ export class TrackingApiController {
 
   vehicleLocation = async (req: Request, res: Response) => {
     respond(res, await this.service.vehicleLocation(scopeOf(req), String(req.params.vehicleId)));
+  };
+
+  vehicleStats = async (req: Request, res: Response) => {
+    respond(res, await this.service.vehicleStats(scopeOf(req), String(req.params.vehicleId)));
   };
 
   vehicleTimeline = async (req: Request, res: Response) => {
@@ -38,6 +48,22 @@ export class TrackingApiController {
   listTrips = async (req: Request, res: Response) => {
     const { state, limit, q } = req.validatedQuery as ListTripsQuery;
     respond(res, await this.service.listTrips(scopeOf(req), state, limit, q));
+  };
+
+  createTrip = async (req: Request, res: Response) => {
+    if (!req.user) throw new AuthenticationError('Not authenticated');
+    respond(
+      res,
+      await this.service.createTrip(scopeOf(req), req.user.userId, req.body as CreateTripBody),
+      201,
+    );
+  };
+
+  endTrip = async (req: Request, res: Response) => {
+    respond(
+      res,
+      await this.service.endTrip(scopeOf(req), String(req.params.tripId), req.body as EndTripBody),
+    );
   };
 
   tripsSummary = async (req: Request, res: Response) => {

@@ -160,3 +160,31 @@ export function normalizePlate(plate: string): string {
 export function marketVehicleId(tenantId: string, plate: string): string {
   return uuidV5(MARKET_VEHICLE_NAMESPACE, `${tenantId.toLowerCase()}:${normalizePlate(plate)}`);
 }
+
+/**
+ * How a truck can be tracked, best first — the main backend's initialTrackingSource
+ * (loads/utils/tracking-source.ts), applied here to trips created from the tracking screen: the
+ * fleet vehicle's GPS device (has_gps + gps_enabled), else the driver's app (their account has
+ * logged in at least once), else SIM on a valid mobile number, else FASTag on the plate.
+ */
+export function initialTrackingSource(truck: {
+  hasGps: boolean;
+  hasDriverApp: boolean;
+  hasDriverNumber: boolean;
+  hasVehicleNumber: boolean;
+}): 'gps' | 'driver_app' | 'sim' | 'fastag' | null {
+  if (truck.hasGps) return 'gps';
+  if (truck.hasDriverApp) return 'driver_app';
+  if (truck.hasDriverNumber) return 'sim';
+  if (truck.hasVehicleNumber) return 'fastag';
+  return null;
+}
+
+/**
+ * The load status a trip created from the tracking screen counts as. It has no stages of its own:
+ * an active one is on the road to its destination (so the in-transit rules — halts, signal loss,
+ * arrival at the drop — apply), an ended or cancelled one is closed (out of the index).
+ */
+export function createdTripLoadStatus(status: 'active' | 'ended' | 'cancelled'): LoadStatus {
+  return status === 'active' ? IN_TRANSIT_STATUS : 'closed';
+}

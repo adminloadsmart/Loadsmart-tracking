@@ -439,4 +439,35 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     expect(row).toEqual({ route_status: 'no_api_key', route_attempts: 1 });
     expect(await offline.planner.planPending()).toBe(0); // backing off
   });
+
+  it('plans a road route for a trip created from the tracking screen (typed addresses geocoded)', async () => {
+    const created = await request(app)
+      .post('/v1/trips')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        source: { kind: 'address', name: 'Depot', address: 'Ring Road, Delhi' },
+        destination: { kind: 'address', name: 'Warehouse', address: 'NH 58, Roorkee' },
+        direction: 'out',
+        vehicleNumber: 'UK07AB0002',
+        driverPhone: '9876543210',
+      });
+    expect(created.status).toBe(201);
+    const tripId = created.body.data.tripId;
+
+    expect(await routes.planner.planPending()).toBe(1);
+    // Neither typed address has coordinates, so both were geocoded (and not cached on a place).
+    expect(geocoded).toEqual(['Depot, Ring Road, Delhi', 'Warehouse, NH 58, Roorkee']);
+
+    const route = await request(app)
+      .get(`/v1/trips/${tripId}/route`)
+      .set('Authorization', `Bearer ${token()}`);
+    expect(route.status).toBe(200);
+    expect(route.body.data).toMatchObject({
+      routeStatus: 'ok',
+      encoding: 'google-polyline-5',
+      polyline: encodePolyline(ROAD),
+    });
+    // Planned once: a second run has nothing left to do.
+    expect(await routes.planner.planPending()).toBe(0);
+  });
 });

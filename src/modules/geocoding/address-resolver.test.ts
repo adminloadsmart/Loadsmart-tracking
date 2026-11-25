@@ -50,6 +50,14 @@ describe('stripPlusCode', () => {
     expect(stripPlusCode('XR3H+5WQ')).toBeNull();
   });
 
+  it('drops "Unnamed Road" but keeps road names that merely start with it', () => {
+    expect(stripPlusCode('Unnamed Road, Madhya Pradesh 452016, India')).toBe(
+      'Madhya Pradesh 452016, India',
+    );
+    expect(stripPlusCode('NH 52, Unnamed Road, Kota')).toBe('NH 52, Kota');
+    expect(stripPlusCode('Unnamed Roadways Depot, Kota')).toBe('Unnamed Roadways Depot, Kota');
+  });
+
   it('cleans addresses already in the cache', async () => {
     const reverse = vi.fn(async () => 'XR3H+5WQ, Bhattian, Ludhiana');
     const resolver = new AddressResolver(fakeRedis(), { name: 'fake', reverse });

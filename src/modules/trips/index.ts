@@ -24,6 +24,8 @@ export type { ActiveTripRefs, OnTripDevice, TripRef } from './active-trip-index'
 export {
   ACTIVE_STATUSES,
   APPROACH_STATUSES,
+  createdTripLoadStatus,
+  initialTrackingSource,
   IN_TRANSIT_STATUS,
   isApproachStatus,
   isTrackingSource,

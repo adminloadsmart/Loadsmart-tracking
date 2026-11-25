@@ -9,8 +9,9 @@ const APPROACH_MIN_M = 1_000;
 
 /**
  * Plans each active trip's road route ONCE (Google Routes API), from the loading point to the
- * delivery point — geocoding the delivery point first if the main backend has no coordinates for
- * it (cached on the place, so each address is geocoded once). Runs on the scheduler leader;
+ * delivery point — load trips and trips created from the tracking screen alike — geocoding a
+ * point first when it has no coordinates (cached on a master place, so each address is geocoded
+ * once). Runs on the scheduler leader;
  * failures back off exponentially (5 min … 6 h) and the trip's route_status says why
  * (no_api_key, no_origin, no_destination, not_found, error).
  */
@@ -73,35 +74,28 @@ export class RoutePlanner {
       await this.repository.setRouteStatus(trip.id, 'no_api_key', true);
       return false;
     }
-    if (trip.origin_lat === null || trip.origin_lng === null) {
+    const origin = await this.locate(
+      trip.origin_lat,
+      trip.origin_lng,
+      trip.origin_id,
+      trip.origin_address,
+    );
+    if (!origin) {
       await this.repository.setRouteStatus(trip.id, 'no_origin', true);
       return false;
     }
-
-    let destination =
-      trip.destination_lat !== null && trip.destination_lng !== null
-        ? { lat: trip.destination_lat, lng: trip.destination_lng }
-        : null;
-    if (!destination && trip.destination_id && trip.destination_address && this.geocoder) {
-      destination = await this.geocoder.geocode(trip.destination_address);
-      if (destination) {
-        await this.repository.saveGeocode(
-          trip.destination_id,
-          destination.lat,
-          destination.lng,
-          this.geocoder.name,
-        );
-      }
-    }
+    const destination = await this.locate(
+      trip.destination_lat,
+      trip.destination_lng,
+      trip.destination_id,
+      trip.destination_address,
+    );
     if (!destination) {
       await this.repository.setRouteStatus(trip.id, 'no_destination', true);
       return false;
     }
 
-    const route = await this.provider.computeRoute(
-      { lat: trip.origin_lat, lng: trip.origin_lng },
-      destination,
-    );
+    const route = await this.provider.computeRoute(origin, destination);
     if (!route) {
       await this.repository.setRouteStatus(trip.id, 'not_found', true);
       return false;
@@ -119,5 +113,24 @@ export class RoutePlanner {
     });
     await this.repository.setRouteStatus(trip.id, 'ok', false);
     return true;
+  }
+
+  /**
+   * A point's coordinates: as stored, else geocoded from its address. A master place's geocode
+   * is cached on it (so each address is geocoded once); a typed-in address (no id) is not.
+   */
+  private async locate(
+    lat: number | null,
+    lng: number | null,
+    placeId: string | null,
+    address: string | null,
+  ): Promise<{ lat: number; lng: number } | null> {
+    if (lat !== null && lng !== null) return { lat, lng };
+    if (!address || !this.geocoder) return null;
+    const point = await this.geocoder.geocode(address);
+    if (point && placeId) {
+      await this.repository.saveGeocode(placeId, point.lat, point.lng, this.geocoder.name);
+    }
+    return point;
   }
 }

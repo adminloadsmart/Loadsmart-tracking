@@ -4,6 +4,8 @@ import type { AddressResolver } from '../geocoding';
 import type { PointSource } from '../points';
 import { decodePolyline } from '../routes';
 import type { LatestPosition, VehicleStateStore } from '../processing/vehicle-state.store';
+import { statsWindowStart, vehicleStats } from './vehicle-stats';
+import type { CreateTripBody, EndTripBody } from './tracking-api.validators';
 import {
   PlannedRouteRow,
   TrackingApiRepository,
@@ -139,6 +141,7 @@ function matchesQuery(trip: TripRow, query: string): boolean {
   if (!needle) return true;
   return [
     trip.load_code,
+    trip.load_title,
     trip.customer_name,
     trip.vehicle_number,
     trip.driver_name,
@@ -182,15 +185,19 @@ export class TrackingApiService {
       this.repository.activeTripsByVehicle(ids),
     ]);
     const now = Date.now();
-    return {
-      vehicles: vehicles.map((vehicle) => {
+    // Addresses come from the Redis-cached resolver (one Google call per ~110 m cell).
+    const positions = await this.withAddresses(
+      vehicles.map((vehicle) => {
         const position = latest.get(vehicle.id);
-        return {
-          ...vehicleView(vehicle),
-          activeTripId: activeTrips.get(vehicle.id) ?? null,
-          position: position ? toPositionView(position, now) : null,
-        };
+        return position ? toPositionView(position, now) : null;
       }),
+    );
+    return {
+      vehicles: vehicles.map((vehicle, i) => ({
+        ...vehicleView(vehicle),
+        activeTripId: activeTrips.get(vehicle.id) ?? null,
+        position: positions[i],
+      })),
       truncated: vehicles.length === MAX_FLEET_VEHICLES,
     };
   }
@@ -208,6 +215,17 @@ export class TrackingApiService {
       activeTripId: activeTrips.get(vehicleId) ?? null,
       position: withAddress,
     };
+  }
+
+  /** Today's running / stopped / idle time and the last 7 days' km, from the GPS device. */
+  async vehicleStats(scope: TenantScope, vehicleId: string) {
+    await this.requireVehicle(scope, vehicleId);
+    const now = Date.now();
+    const points = await this.repository.vehicleGpsPoints(
+      vehicleId,
+      new Date(statsWindowStart(now)),
+    );
+    return { vehicleId, timezone: 'Asia/Kolkata', ...vehicleStats(points, now) };
   }
 
   async vehicleTimeline(
@@ -314,7 +332,6 @@ export class TrackingApiService {
       fraudFlags: metrics.fraudFlags,
       position: tripPosition,
       routeStatus: trip.route_status,
-      promisedDeliveryAt: trip.promised_delivery_at?.toISOString() ?? null,
       route: routeView(route),
       // Route km already driven = route length − what the ETA says is left (null until both exist).
       coveredKm: routeKm !== null && eta ? round1(Math.max(0, routeKm - eta.remainingKm)) : null,
@@ -398,6 +415,73 @@ export class TrackingApiService {
     };
   }
 
+  /**
+   * Saves a trip from the Create trip drawer (tracking.trips) and returns it in the same shape as
+   * GET /trips/:tripId. A trip belongs to one tenant, so a platform admin (all-tenant scope) can't
+   * create one here.
+   */
+  async createTrip(scope: TenantScope, actorId: string, body: CreateTripBody) {
+    if ('allTenants' in scope) {
+      throw new ValidationError('Create the trip from an organization account');
+    }
+    const delivery = body.delivery;
+    // Decided once, as a load decides on truck assignment: which vehicle id its points carry, the
+    // driver's account, and gps > driver_app > sim > fastag. A `sim` trip gets the driver's SIM
+    // consent request from the SIM lifecycle on its next tick.
+    const tracking = await this.repository.truckTracking(
+      scope.tenantId,
+      body.vehicleNumber,
+      body.driverPhone,
+    );
+    const trip = await this.repository.createTrip({
+      ...tracking,
+      tenantId: scope.tenantId,
+      direction: body.direction,
+      customerId: body.customerId ?? null,
+      customerName: body.customerName ?? null,
+      originKind: body.source.kind,
+      originRefId: body.source.kind === 'address' ? null : (body.source.id ?? null),
+      originName: body.source.name,
+      originAddress: body.source.address,
+      originCity: body.source.city ?? null,
+      destinationKind: body.destination.kind,
+      destinationRefId: body.destination.kind === 'address' ? null : (body.destination.id ?? null),
+      destinationName: body.destination.name,
+      destinationAddress: body.destination.address,
+      destinationCity: body.destination.city ?? null,
+      vehicleNumber: body.vehicleNumber,
+      driverPhone: body.driverPhone,
+      driverName: body.driver?.name || null,
+      driverLicenceNumber: body.driver?.licenceNumber?.toUpperCase() || null,
+      driverDateOfBirth: body.driver?.dateOfBirth ?? null,
+      transporterId: body.transporter?.id ?? null,
+      transporterName: body.transporter?.name || null,
+      transporterPhone: body.transporter?.phone || null,
+      loadingReportingAt: body.loading?.reportingAt ?? null,
+      deliveryMode: delivery?.mode ?? null,
+      deliveryReportingAt: delivery?.mode === 'reporting' ? (delivery.reportingAt ?? null) : null,
+      appointmentRef: delivery?.mode === 'appointment' ? delivery.appointmentId || null : null,
+      appointmentFrom: delivery?.mode === 'appointment' ? (delivery.slotFrom ?? null) : null,
+      appointmentTo: delivery?.mode === 'appointment' ? (delivery.slotTo ?? null) : null,
+      ewayBillNumber: body.ewayBill?.number ?? null,
+      ewayBillValidTill: body.ewayBill?.validTill ?? null,
+      createdBy: actorId,
+    });
+    return { ...tripView(trip), position: null, eta: null };
+  }
+
+  /** Ends or cancels a trip created from the tracking screen. Load trips end with their load. */
+  async endTrip(scope: TenantScope, tripId: string, body: EndTripBody) {
+    const trip = await this.repository.endCreatedTrip(scope, tripId, body.status);
+    if (trip) return { ...tripView(trip), position: null, eta: null };
+    const existing = await this.requireTrip(scope, tripId);
+    throw new ValidationError(
+      existing.created
+        ? `Trip ${existing.load_code} has already ${existing.created.status === 'cancelled' ? 'been cancelled' : 'ended'}`
+        : 'A load trip ends with its load — close it from the load instead',
+    );
+  }
+
   private async requireVehicle(scope: TenantScope, vehicleId: string): Promise<VehicleRow> {
     const vehicle = await this.repository.findVehicle(scope, vehicleId);
     if (!vehicle) throw new NotFoundError(`Vehicle ${vehicleId} not found`);
@@ -415,6 +499,7 @@ function tripView(trip: TripRow) {
   return {
     tripId: trip.id,
     loadCode: trip.load_code,
+    loadTitle: trip.load_title,
     loadStatus: trip.load_status,
     postingType: trip.posting_type,
     route: trip.route,
@@ -431,5 +516,22 @@ function tripView(trip: TripRow) {
     origin: trip.origin,
     destination: trip.destination,
     milestones: trip.milestones,
+    promisedDeliveryAt: trip.promised_delivery_at?.toISOString() ?? null,
+    ewayBillNumber: trip.eway_bill_number,
+    ewayBillExpiresAt: trip.eway_bill_expires_at?.toISOString() ?? null,
+    // Trips created from the tracking screen carry no load; these say so and add what they hold.
+    trackingOnly: Boolean(trip.created),
+    ...(trip.created && {
+      direction: trip.created.direction,
+      transporterName: trip.created.transporterName,
+      transporterPhone: trip.created.transporterPhone,
+      loadingReportingAt: trip.created.loadingReportingAt?.toISOString() ?? null,
+      appointment: trip.created.appointment && {
+        id: trip.created.appointment.ref,
+        from: trip.created.appointment.from?.toISOString() ?? null,
+        to: trip.created.appointment.to?.toISOString() ?? null,
+      },
+      createdAt: trip.created.createdAt.toISOString(),
+    }),
   };
 }

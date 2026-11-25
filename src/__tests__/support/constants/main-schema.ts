@@ -22,6 +22,13 @@ export const MAIN_SCHEMA_SQL = `
     gps_provider text, gps_enabled boolean NOT NULL DEFAULT false, deleted_at timestamptz,
     updated_at timestamptz NOT NULL DEFAULT now());
   ALTER TABLE masters.vehicle_telemetry_meta ADD COLUMN IF NOT EXISTS gps_device_imei varchar(15);
+  ALTER TABLE masters.vehicle_telemetry_meta ADD COLUMN IF NOT EXISTS has_gps boolean NOT NULL DEFAULT false;
+  CREATE TABLE IF NOT EXISTS masters.driver_sessions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), driver_id uuid NOT NULL);
+  CREATE TABLE IF NOT EXISTS masters.drivers (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), full_name text NOT NULL,
+    phone_number text NOT NULL, deleted_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now());
   CREATE TABLE IF NOT EXISTS masters.driver_tenant_relations (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, driver_id uuid NOT NULL,
     status text NOT NULL DEFAULT 'active', deleted_at timestamptz);
@@ -66,6 +73,9 @@ export const MAIN_SCHEMA_SQL = `
   ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS customer_id uuid;
   ALTER TABLE loads.load_postings ADD COLUMN IF NOT EXISTS deliver_by_at timestamptz;
   ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS departed_drop_at timestamptz;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS title text;
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS eway_bill_number varchar(50);
+  ALTER TABLE loads.loads ADD COLUMN IF NOT EXISTS eway_bill_expires_at timestamptz;
   CREATE SCHEMA IF NOT EXISTS auth;
   CREATE TABLE IF NOT EXISTS auth.organizations (
     id uuid PRIMARY KEY, late_delivery_threshold_minutes integer);
@@ -88,6 +98,6 @@ export const MAIN_SCHEMA_SQL = `
 
 export const MAIN_TABLES =
   'loads.loads, loads.requisitions, loads.load_postings, customers.customer_delivery_points, ' +
-  'masters.driver_tenant_relations, masters.loading_points, masters.vehicle_telemetry_meta, masters.vehicles, masters.truck_types, ' +
+  'masters.driver_tenant_relations, masters.driver_sessions, masters.loading_points, masters.vehicle_telemetry_meta, masters.vehicles, masters.truck_types, ' +
   'customers.customers, tracking.geofences, tracking.geofence_vehicles, tracking.geofence_events, ' +
   'auth.organizations';

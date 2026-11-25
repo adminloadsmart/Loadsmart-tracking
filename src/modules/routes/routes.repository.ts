@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { MainDataRepository } from '../main-data';
+import { TrackingTripEntity } from '../tracking-api/trip.entity';
 import type { TimeProfile } from './route-time';
 import { IN_TRANSIT_STATUS } from '../trips';
 
@@ -9,9 +10,12 @@ export interface TripNeedingRoute {
   tenant_id: string;
   promised_delivery_at: Date | null;
   route_attempts: number;
+  /** Master place id — also the geocode cache key. Null for a typed-in address (not cached). */
   origin_id: string | null;
   origin_lat: number | null;
   origin_lng: number | null;
+  /** For geocoding a typed-in origin (created trips); null for load trips. */
+  origin_address: string | null;
   destination_id: string | null;
   destination_lat: number | null;
   destination_lng: number | null;
@@ -70,13 +74,26 @@ export class RoutesRepository {
   }
 
   /**
-   * Active trips (the main backend's loads) with no route yet, whose last planning attempt is
-   * older than their back-off — with their origin / destination from main's places.
+   * Active trips with no route yet, whose last planning attempt is older than their back-off —
+   * load trips (the main backend's loads, places from main) and trips created from the tracking
+   * screen (tracking.trips: a picked master place, or a typed address to geocode).
    */
   async tripsNeedingRoute(limit: number): Promise<TripNeedingRoute[]> {
-    const active = await this.mainData.activeLoads();
-    if (active.length === 0) return [];
-    const ids = active.map((l) => l.id);
+    const [active, created] = await Promise.all([
+      this.mainData.activeLoads(),
+      this.dataSource.getRepository(TrackingTripEntity).find({ where: { status: 'active' } }),
+    ]);
+    const candidates = [
+      ...active.map((load) => ({ id: load.id, startedAt: load.startedAt, load, created: null })),
+      ...created.map((trip) => ({
+        id: trip.id,
+        startedAt: trip.createdAt,
+        load: null,
+        created: trip,
+      })),
+    ];
+    if (candidates.length === 0) return [];
+    const ids = candidates.map((c) => c.id);
     const [routed, statuses] = await Promise.all([
       this.dataSource.query(
         `SELECT DISTINCT trip_id FROM tracking.trip_routes WHERE trip_id = ANY($1::uuid[])`,
@@ -92,10 +109,10 @@ export class RoutesRepository {
       statuses.map((r: { trip_id: string; attempts: number; checked_at: Date }) => [r.trip_id, r]),
     );
     const now = Date.now();
-    const due = active
-      .filter((load) => {
-        if (hasRoute.has(load.id)) return false;
-        const st = status.get(load.id);
+    const due = candidates
+      .filter((c) => {
+        if (hasRoute.has(c.id)) return false;
+        const st = status.get(c.id);
         if (!st) return true;
         const backoffMin = Math.min(MAX_BACKOFF_MIN, 5 * 2 ** st.attempts);
         return now - new Date(st.checked_at).getTime() > backoffMin * 60_000;
@@ -103,27 +120,53 @@ export class RoutesRepository {
       .sort((a, b) => (a.startedAt?.getTime() ?? Infinity) - (b.startedAt?.getTime() ?? Infinity))
       .slice(0, limit);
 
-    const places = await this.mainData.places(
-      due.map((l) => l.loadingPointId).filter((x): x is string => !!x),
-      due.map((l) => l.deliveryPointId).filter((x): x is string => !!x),
-    );
-    return due.map((load) => {
-      const origin = load.loadingPointId ? places.get(load.loadingPointId) : undefined;
-      const destination = load.deliveryPointId ? places.get(load.deliveryPointId) : undefined;
+    // Master ids by table: a load's loading/delivery point, or a created trip's picked place.
+    const loadingIds: string[] = [];
+    const deliveryIds: string[] = [];
+    for (const { load, created: trip } of due) {
+      if (load?.loadingPointId) loadingIds.push(load.loadingPointId);
+      if (load?.deliveryPointId) deliveryIds.push(load.deliveryPointId);
+      for (const [kind, ref] of trip
+        ? [
+            [trip.originKind, trip.originRefId],
+            [trip.destinationKind, trip.destinationRefId],
+          ]
+        : []) {
+        if (!ref) continue;
+        if (kind === 'loading_point') loadingIds.push(ref);
+        if (kind === 'customer_address') deliveryIds.push(ref);
+      }
+    }
+    const places = await this.mainData.places(loadingIds, deliveryIds);
+    const addressOf = (name: string | null | undefined, address: string | null | undefined) =>
+      [name, address].filter(Boolean).join(', ') || null;
+
+    return due.map(({ id, load, created: trip }) => {
+      const originRef = load ? load.loadingPointId : trip!.originRefId;
+      const destinationRef = load ? load.deliveryPointId : trip!.destinationRefId;
+      const origin = originRef ? places.get(originRef) : undefined;
+      const destination = destinationRef ? places.get(destinationRef) : undefined;
       return {
-        id: load.id,
-        tenant_id: load.tenantId,
-        promised_delivery_at: load.promisedDeliveryAt,
-        route_attempts: status.get(load.id)?.attempts ?? 0,
+        id,
+        tenant_id: load ? load.tenantId : trip!.tenantId,
+        promised_delivery_at: load
+          ? load.promisedDeliveryAt
+          : trip!.deliveryMode === 'appointment'
+            ? trip!.appointmentTo
+            : trip!.deliveryReportingAt,
+        route_attempts: status.get(id)?.attempts ?? 0,
         origin_id: origin?.id ?? null,
         origin_lat: origin?.lat ?? null,
         origin_lng: origin?.lng ?? null,
+        origin_address: trip ? addressOf(trip.originName, trip.originAddress) : null,
         destination_id: destination?.id ?? null,
         destination_lat: destination?.lat ?? null,
         destination_lng: destination?.lng ?? null,
         destination_address: destination
-          ? [destination.name, destination.address].filter(Boolean).join(', ')
-          : null,
+          ? addressOf(destination.name, destination.address)
+          : trip
+            ? addressOf(trip.destinationName, trip.destinationAddress)
+            : null,
       };
     });
   }

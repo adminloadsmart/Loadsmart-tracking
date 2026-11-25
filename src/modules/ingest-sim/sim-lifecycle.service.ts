@@ -18,9 +18,31 @@ export interface SimMainData {
     statuses: readonly LoadStatus[],
     limit: number,
   ): Promise<MainLoad[]>;
-  load(scope: TenantScope | null, id: string): Promise<MainLoad | null>;
+  /** A load, else a trip created from the tracking screen (in the load shape). */
+  trip(scope: TenantScope | null, id: string): Promise<MainLoad | null>;
+  /** Active trips created from the tracking screen, in the load shape. */
+  activeCreatedTrips(limit: number): Promise<MainLoad[]>;
   tripPoints(loadIds: string[]): Promise<Map<string, MainTripPoints>>;
   places(loadingPointIds: string[], deliveryPointIds: string[]): Promise<Map<string, MainPlace>>;
+  /** A created trip's places as typed, with the ends of its planned road route — for a place
+   *  typed as an address (no master, so no coordinates of its own). */
+  createdTripEnds(tripId: string): Promise<CreatedTripEnds | null>;
+}
+
+export interface CreatedTripEnds {
+  start: [number, number] | null;
+  end: [number, number] | null;
+  startName: string;
+  endName: string;
+  endAddress: string;
+}
+
+/**
+ * The invoice a trip's Intugine trip is started (and found again) with. A load's code is unique;
+ * a created trip's TRP-#### is only unique within its tenant, so its id is added.
+ */
+export function simInvoiceOf(load: Pick<MainLoad, 'code' | 'id' | 'createdTrip'>): string {
+  return load.createdTrip ? `${load.code}-${load.id.slice(0, 8)}` : load.code;
 }
 
 export interface SimLifecycleOptions {
@@ -77,7 +99,12 @@ export class SimLifecycleService {
     await this.consent.checkDue(now);
 
     // A load whose POD is accepted is done (tracking stops there), whatever stage it is in.
-    const loads = (await this.mainData.loadsByStatus(null, INDEXED_STATUSES, 50_000)).filter(
+    // Trips created from the tracking screen on SIM are asked and started the same way.
+    const [indexedLoads, createdTrips] = await Promise.all([
+      this.mainData.loadsByStatus(null, INDEXED_STATUSES, 50_000),
+      this.mainData.activeCreatedTrips(50_000),
+    ]);
+    const loads = [...indexedLoads, ...createdTrips].filter(
       (load) => load.vehicleId && load.trackingSource === 'sim' && load.podStatus !== 'accepted',
     );
     // Delivered loads keep their running SIM trip until the POD is accepted (never started anew).
@@ -176,7 +203,7 @@ export class SimLifecycleService {
 
     // A previous start call may have reached Intugine without us seeing the answer.
     if (row.startAttempted) {
-      const existing = await this.provider.findTripByInvoice(load.code);
+      const existing = await this.provider.findTripByInvoice(simInvoiceOf(load));
       if (existing) {
         await this.store.markStarted(row, existing, now);
         transitions.inc({ action: 'start_adopted' });
@@ -220,40 +247,47 @@ export class SimLifecycleService {
     const points = (await this.mainData.tripPoints([load.id])).get(load.id);
     if (!points) return null;
     const dropId = points.dropCustomerDeliveryPointId ?? points.dropLoadingPointId;
-    const pickupId = points.pickupLoadingPointId;
-    if (!pickupId || !dropId) return null;
+    // An inbound created trip can start at a customer address.
+    const pickupId = points.pickupLoadingPointId ?? points.pickupCustomerDeliveryPointId ?? null;
     const places = await this.mainData.places(
-      [pickupId, points.dropLoadingPointId].filter((id): id is string => !!id),
-      points.dropCustomerDeliveryPointId ? [points.dropCustomerDeliveryPointId] : [],
+      [points.pickupLoadingPointId, points.dropLoadingPointId].filter((id): id is string => !!id),
+      [points.pickupCustomerDeliveryPointId, points.dropCustomerDeliveryPointId].filter(
+        (id): id is string => !!id,
+      ),
     );
-    const src = places.get(pickupId);
-    const dest = places.get(dropId);
-    if (
-      !src ||
-      !dest ||
-      src.lat == null ||
-      src.lng == null ||
-      dest.lat == null ||
-      dest.lng == null
-    ) {
-      return null;
+    type End = { coords: [number, number]; place: MainPlace | null };
+    const at = (id: string | null): End | null => {
+      const place = id ? places.get(id) : undefined;
+      return place && place.lat != null && place.lng != null
+        ? { coords: [place.lat, place.lng] as [number, number], place }
+        : null;
+    };
+    let src = at(pickupId);
+    let dest = at(dropId ?? null);
+    // A created trip's place typed as an address has no master: take its end of the planned route.
+    const typed =
+      load.createdTrip && (!src || !dest) ? await this.mainData.createdTripEnds(load.id) : null;
+    if (typed) {
+      src ??= typed.start ? { coords: typed.start, place: null } : null;
+      dest ??= typed.end ? { coords: typed.end, place: null } : null;
     }
+    if (!src || !dest) return null;
     return {
       tel: row.phone,
-      src: [src.lat, src.lng],
-      srcName: src.name,
-      dest: [dest.lat, dest.lng],
-      destName: dest.name,
-      destAddress: dest.address ?? undefined,
+      src: src.coords,
+      srcName: src.place?.name ?? typed?.startName ?? 'Source',
+      dest: dest.coords,
+      destName: dest.place?.name ?? typed?.endName ?? 'Destination',
+      destAddress: dest.place?.address ?? typed?.endAddress ?? undefined,
       truckNumber: load.vehicleNumber ?? points.vehicleNumber ?? '',
-      invoice: load.code,
+      invoice: simInvoiceOf(load),
       loadId: load.id,
     };
   }
 
   /** The load left the tracked statuses, or is no longer on SIM: close the row and the Intugine trip. */
   private async endIfNoLongerSim(row: SimTripRow, now: Date): Promise<boolean> {
-    const load = await this.mainData.load(null, row.tripId);
+    const load = await this.mainData.trip(null, row.tripId);
     const tracked = load !== null && INDEXED_STATUSES.includes(load.status);
     if (load?.podStatus === 'accepted') {
       await this.endTrip(row, load, now, 'pod_accepted');
@@ -293,7 +327,7 @@ export class SimLifecycleService {
     let intugineTripId = row.intugineTripId;
     // A start whose answer was lost may still be running (and billed) on Intugine.
     if (!intugineTripId && row.startAttempted && load) {
-      intugineTripId = await this.provider.findTripByInvoice(load.code);
+      intugineTripId = await this.provider.findTripByInvoice(simInvoiceOf(load));
     }
     if (intugineTripId) {
       // False = "No trip exists" / "already ended": either way it is not running.

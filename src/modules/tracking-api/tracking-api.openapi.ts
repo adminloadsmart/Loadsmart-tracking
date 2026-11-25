@@ -2,6 +2,8 @@ import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
 import { API_VERSION_PREFIX } from '../../shared/constants/api';
 import { authenticated, authErrors, errorContent, TAGS } from '../../shared/openapi/core';
 import {
+  createTripSchema,
+  endTripSchema,
   listTripsSchema,
   timelineSchema,
   tripParamsSchema,
@@ -39,6 +41,25 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: { description: 'Vehicle item with position | null' },
       400: { description: 'Validation failed', ...errorContent },
+      ...authErrors,
+      404: { description: 'Vehicle not found or outside scope', ...errorContent },
+    },
+  });
+
+  registry.registerPath({
+    method: 'get',
+    path: `${BASE}/vehicles/{vehicleId}/stats`,
+    tags: [TAGS.VEHICLES],
+    operationId: 'vehicles.stats',
+    ...authenticated(
+      "The vehicle's day stats from its own GPS device (India days): today's distance, running / stopped / idle minutes and max / average speed, km per day for the last 7 days, and the newest fix's device readings.",
+    ),
+    request: { params: vehicleParamsSchema.shape.params },
+    responses: {
+      200: {
+        description:
+          '{ vehicleId, timezone, today { from, to, distanceKm, runningMin, stoppedMin, idleMin | null, maxSpeedKmh | null, avgSpeedKmh | null }, days [{ date, distanceKm }], device { lastFixAt, batteryPct, ignition, deviceStatus } | null }',
+      },
       ...authErrors,
       404: { description: 'Vehicle not found or outside scope', ...errorContent },
     },
@@ -90,6 +111,52 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
   });
 
   registry.registerPath({
+    method: 'post',
+    path: `${BASE}/trips`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.create',
+    ...authenticated(
+      "Creates a trip tracked without a load (the tracking screen's Create trip drawer), stored in " +
+        "tracking.trips with the tenant's next TRP-#### code. It starts active and is returned by " +
+        'GET /trips and /trips/{tripId} like a load trip, with `trackingOnly: true`, `direction`, ' +
+        '`transporterName`/`transporterPhone`, `loadingReportingAt` and `appointment`. A picked ' +
+        'loading point / customer address (`id`) gives the map its coordinates; a typed address ' +
+        '(`kind: address`) has none. Not live-tracked yet: no position, route or ETA. Organization ' +
+        'accounts only.',
+    ),
+    request: { body: { content: { 'application/json': { schema: createTripSchema.shape.body } } } },
+    responses: {
+      201: { description: 'The created trip, in the GET /trips/{tripId} shape' },
+      400: {
+        description: 'Validation failed, or a platform-admin (all-tenant) caller',
+        ...errorContent,
+      },
+      ...authErrors,
+    },
+  });
+
+  registry.registerPath({
+    method: 'post',
+    path: `${BASE}/trips/{tripId}/end`,
+    tags: [TAGS.TRIPS],
+    operationId: 'trips.end',
+    ...authenticated(
+      'Ends (`status: ended`, the default) or cancels a trip created with POST /trips; it then ' +
+        'lists under state=ended. Load trips end with their load and are refused here.',
+    ),
+    request: {
+      params: endTripSchema.shape.params,
+      body: { content: { 'application/json': { schema: endTripSchema.shape.body } } },
+    },
+    responses: {
+      200: { description: 'The trip, now ended or cancelled' },
+      400: { description: 'Validation failed, already ended, or a load trip', ...errorContent },
+      ...authErrors,
+      404: { description: 'Trip not found or outside scope', ...errorContent },
+    },
+  });
+
+  registry.registerPath({
     method: 'get',
     path: `${BASE}/trips/{tripId}`,
     tags: [TAGS.TRIPS],
@@ -99,7 +166,7 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: {
         description:
-          'tripId, loadCode, loadStatus, postingType, route, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null',
+          'tripId, loadCode, loadTitle (null when the load has no title), loadStatus, postingType, route, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null, ewayBillNumber | null, ewayBillExpiresAt | null',
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,

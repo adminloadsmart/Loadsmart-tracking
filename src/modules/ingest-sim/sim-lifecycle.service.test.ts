@@ -4,7 +4,11 @@ import type { SimProvider } from './intugine.client';
 import type { SimConsent } from './intugine.contract';
 import { MemoryConsentStore } from './sim-consent.repository';
 import { SimConsentService } from './sim-consent.service';
-import { SimLifecycleService, type SimMainData } from './sim-lifecycle.service';
+import {
+  type CreatedTripEnds,
+  SimLifecycleService,
+  type SimMainData,
+} from './sim-lifecycle.service';
 import { MemoryStore } from './sim-trip.memory-store';
 
 const MIN = 60_000;
@@ -37,9 +41,34 @@ function makeLoad(over: Record<string, unknown> = {}) {
   };
 }
 
-function setup(opts: { load?: Record<string, unknown> | null; consent?: SimConsent } = {}) {
+/** A trip created from the tracking screen, as main-data hands it over (in the load shape). */
+function makeCreatedTrip(over: Record<string, unknown> = {}) {
+  return makeLoad({
+    id: 'trip-1',
+    code: 'TRP-0001',
+    status: 'in_transit_unloading',
+    driverId: null,
+    createdTrip: true,
+    ...over,
+  });
+}
+
+function setup(
+  opts: {
+    load?: Record<string, unknown> | null;
+    consent?: SimConsent;
+    /** A created trip next to (or instead of) the load. */
+    created?: Record<string, unknown>;
+    /** The created trip's master points, when not the load's p1 → d1. */
+    createdPoints?: Record<string, unknown>;
+    createdEnds?: CreatedTripEnds | null;
+  } = {},
+) {
   let load: ReturnType<typeof makeLoad> | null =
     opts.load === null ? null : makeLoad(opts.load ?? {});
+  let created: ReturnType<typeof makeLoad> | null = opts.created
+    ? makeCreatedTrip(opts.created)
+    : null;
   const store = new MemoryStore();
   const provider = {
     checkConsent: vi.fn(
@@ -55,19 +84,22 @@ function setup(opts: { load?: Record<string, unknown> | null; consent?: SimConse
   const mainData: SimMainData = {
     loadsByStatus: async (_scope, statuses) =>
       load && statuses.includes(load.status as never) ? [load as never] : [],
-    load: async () => (load as never) ?? null,
-    tripPoints: async () =>
-      new Map([
-        [
-          'load-1',
-          {
-            vehicleNumber: 'MH42BF0711',
-            pickupLoadingPointId: 'p1',
-            dropCustomerDeliveryPointId: 'd1',
-            dropLoadingPointId: null,
-          },
-        ],
-      ]),
+    trip: async (_scope, id) => ((created && created.id === id ? created : load) as never) ?? null,
+    activeCreatedTrips: async () =>
+      created && created.status === 'in_transit_unloading' ? [created as never] : [],
+    createdTripEnds: async () => opts.createdEnds ?? null,
+    tripPoints: async () => {
+      const points = {
+        vehicleNumber: 'MH42BF0711',
+        pickupLoadingPointId: 'p1',
+        dropCustomerDeliveryPointId: 'd1',
+        dropLoadingPointId: null,
+      };
+      return new Map([
+        ['load-1', points],
+        ['trip-1', { ...points, ...opts.createdPoints }],
+      ]);
+    },
     places: async () =>
       new Map([
         ['p1', place('p1', 18.78, 74.27)],
@@ -97,6 +129,7 @@ function setup(opts: { load?: Record<string, unknown> | null; consent?: SimConse
     cursorDelete,
     consents,
     setLoad: (l: typeof load) => (load = l),
+    setCreated: (c: typeof created) => (created = c),
   };
 }
 
@@ -483,6 +516,101 @@ describe('SimLifecycleService', () => {
         status: 'denied',
         withdrawnAt: at(0),
       });
+    });
+  });
+  describe('trips created from the tracking screen', () => {
+    it('asks a created SIM trip’s driver for consent and starts it under a tenant-unique invoice', async () => {
+      const { service, store, provider } = setup({ load: null, created: {} });
+      const result = await service.run(at(0));
+      expect(result).toMatchObject({ consentRequested: 1, started: 1 });
+      expect(provider.checkConsent).toHaveBeenCalledTimes(1);
+      expect(provider.startTrip).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tel: '9876543210',
+          src: [18.78, 74.27],
+          dest: [16.81, 81.53],
+          invoice: 'TRP-0001-trip-1',
+          loadId: 'trip-1',
+        }),
+      );
+      expect(store.rows[0]).toMatchObject({ tripId: 'trip-1', state: 'active' });
+    });
+
+    it.each(['gps', 'driver_app', 'fastag'])(
+      'leaves a created trip tracked by %s alone: no SMS, no Intugine trip',
+      async (trackingSource) => {
+        const { service, store, provider } = setup({ load: null, created: { trackingSource } });
+        await service.run(at(0));
+        expect(provider.checkConsent).not.toHaveBeenCalled();
+        expect(store.rows).toHaveLength(0);
+      },
+    );
+
+    it('starts from an inbound trip’s customer address', async () => {
+      const { service, provider } = setup({
+        load: null,
+        created: {},
+        createdPoints: {
+          pickupLoadingPointId: null,
+          pickupCustomerDeliveryPointId: 'd1',
+          dropCustomerDeliveryPointId: null,
+          dropLoadingPointId: 'p1',
+        },
+      });
+      await service.run(at(0));
+      expect(provider.startTrip).toHaveBeenCalledWith(
+        expect.objectContaining({ src: [16.81, 81.53], dest: [18.78, 74.27] }),
+      );
+    });
+
+    it('takes a typed address’s coordinates from the planned route', async () => {
+      const { service, provider } = setup({
+        load: null,
+        created: {},
+        createdPoints: { dropCustomerDeliveryPointId: null },
+        createdEnds: {
+          start: [18.7, 74.2],
+          end: [12.97, 77.59],
+          startName: 'Plant',
+          endName: 'Bengaluru DC',
+          endAddress: 'Whitefield, Bengaluru',
+        },
+      });
+      await service.run(at(0));
+      expect(provider.startTrip).toHaveBeenCalledWith(
+        expect.objectContaining({
+          src: [18.78, 74.27], // the picked master keeps its own coordinates
+          dest: [12.97, 77.59],
+          destName: 'Bengaluru DC',
+          destAddress: 'Whitefield, Bengaluru',
+        }),
+      );
+    });
+
+    it('waits without starting while a typed address has no route yet', async () => {
+      const { service, store, provider } = setup({
+        load: null,
+        created: {},
+        createdPoints: { dropCustomerDeliveryPointId: null },
+      });
+      const result = await service.run(at(0));
+      expect(result.skipped).toBe(1);
+      expect(provider.startTrip).not.toHaveBeenCalled();
+      expect(store.rows[0]).toMatchObject({ state: 'consented' });
+    });
+
+    it('ends the Intugine trip when the created trip is ended', async () => {
+      const { service, store, provider, setCreated, cursorDelete } = setup({
+        load: null,
+        created: {},
+      });
+      await service.run(at(0));
+      setCreated(makeCreatedTrip({ status: 'closed' }));
+      const result = await service.run(at(30));
+      expect(result.ended).toBe(1);
+      expect(provider.endTrip).toHaveBeenCalledWith('INT-1');
+      expect(store.rows[0]).toMatchObject({ state: 'ended', endReason: 'load_ended' });
+      expect(cursorDelete).toHaveBeenCalledWith('INT-1');
     });
   });
 });

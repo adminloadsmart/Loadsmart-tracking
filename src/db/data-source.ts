@@ -2,6 +2,7 @@
 import 'reflect-metadata';
 import { DataSource } from 'typeorm';
 import { env } from '../config/env';
+import { TrackingTripEntity } from '../modules/tracking-api/trip.entity';
 
 // Metadata tables only (trip/vehicle read models, settings, trip_source_link, ...). The
 // high-volume location_points hypertable is written with raw pg bulk inserts, not TypeORM entities
@@ -13,7 +14,7 @@ export const AppDataSource = new DataSource({
   // retention policies can't be expressed by synchronize anyway.
   synchronize: false,
   logging: false,
-  entities: [], // every new module adds its entity here
+  entities: [TrackingTripEntity], // every new module adds its entity here
   // __dirname-relative + dual-ext so this resolves under ts-node (src/db) and compiled node (dist/db).
   migrations: [`${__dirname}/migrations/*.{js,ts}`],
   // Per-migration transactions: Timescale DDL like continuous aggregates must run outside one,
