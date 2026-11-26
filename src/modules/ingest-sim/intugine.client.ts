@@ -59,6 +59,9 @@ export interface SimProvider {
   /** False when Intugine had no such trip or it had already ended. */
   endTrip(intugineTripId: string): Promise<boolean>;
   setTracking(intugineTripId: string, state: 'START' | 'STOP'): Promise<void>;
+  /** Moves a running trip to another driver number (driver changed mid-trip): same trip, same
+   *  locations history, new `tel`. */
+  updateTripPhone(intugineTripId: string, tel: string): Promise<void>;
   /** The Intugine trip started with this invoice, or null. Used to find a trip whose start response was lost. */
   findTripByInvoice(invoice: string): Promise<string | null>;
   /**
@@ -136,6 +139,16 @@ export class IntugineClient implements SimProvider {
 
   async setTracking(intugineTripId: string, state: 'START' | 'STOP'): Promise<void> {
     await this.request('PUT', '/trips/', 'fast', { _id: intugineTripId, tracking_state: state });
+  }
+
+  /**
+   * ASSUMED request shape, not yet confirmed against Intugine's API docs: their console edits the
+   * number of a running trip, and `PUT /trips/` is the documented trip update (tracking_state).
+   * If Intugine expects another call, only this method changes. Slow, like start: the new number's
+   * operator may be looked up.
+   */
+  async updateTripPhone(intugineTripId: string, tel: string): Promise<void> {
+    await this.request('PUT', '/trips/', 'slow', { _id: intugineTripId, tel, sim_no: tel });
   }
 
   async findTripByInvoice(invoice: string): Promise<string | null> {

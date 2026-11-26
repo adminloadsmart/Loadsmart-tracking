@@ -113,6 +113,71 @@ describe.skipIf(!available)('SIM consent storage (real Postgres)', () => {
     expect(await trips.loadsWithFinishedConsent([{ id: tripId, phone: null }])).toEqual(new Set());
   });
 
+  it('hands a running Intugine trip over to the new driver number atomically', async () => {
+    const tripId = randomUUID();
+    const first = (await trips.insert(newTrip(tripId)))!;
+    await trips.markStarted(first, 'INT-1', new Date());
+    const running = (await trips.findLiveByTrip(tripId))!;
+
+    const next = await trips.handOver(
+      running,
+      { phone: '9123456780', driverId: null, reusedConsent: false },
+      new Date(),
+    );
+    expect(next).toMatchObject({
+      phone: '9123456780',
+      state: 'awaiting_consent',
+      intugineTripId: null,
+      carriedIntugineTripId: 'INT-1',
+    });
+    expect(await trips.findLiveByTrip(tripId)).toMatchObject({ id: next!.id });
+    const [old] = await ds.query(
+      `SELECT state, end_reason, carried_intugine_trip_id FROM tracking.sim_trips WHERE id = $1`,
+      [first.id],
+    );
+    expect(old).toEqual({
+      state: 'ended',
+      end_reason: 'driver_changed',
+      carried_intugine_trip_id: null,
+    });
+    // The old row is no longer live: a second hand-over of it does nothing.
+    expect(
+      await trips.handOver(
+        running,
+        { phone: '9000000001', driverId: null, reusedConsent: true },
+        new Date(),
+      ),
+    ).toBeNull();
+
+    // Not consented: the carried trip is listed for closing, and cleared once closed.
+    await trips.markEnded(next!, {
+      state: 'unsupported',
+      reason: 'consent_denied',
+      now: new Date(),
+    });
+    expect((await trips.finishedWithCarriedTrip()).map((r) => r.id)).toEqual([next!.id]);
+    await trips.clearCarried(next!.id);
+    expect(await trips.finishedWithCarriedTrip()).toEqual([]);
+  });
+
+  it('starting on the carried trip clears it', async () => {
+    const tripId = randomUUID();
+    const first = (await trips.insert(newTrip(tripId)))!;
+    await trips.markStarted(first, 'INT-1', new Date());
+    const next = (await trips.handOver(
+      (await trips.findLiveByTrip(tripId))!,
+      { phone: '9123456780', driverId: null, reusedConsent: true },
+      new Date(),
+    ))!;
+    expect(next.state).toBe('consented');
+    await trips.markStarted(next, 'INT-1', new Date());
+    expect(await trips.findLiveByTrip(tripId)).toMatchObject({
+      state: 'active',
+      intugineTripId: 'INT-1',
+      carriedIntugineTripId: null,
+    });
+  });
+
   it('the migration carried approved numbers over from earlier loads (given, valid 9 months)', async () => {
     // Re-run the migration's backfill statement on a row the old per-trip model would have left.
     const tripId = randomUUID();

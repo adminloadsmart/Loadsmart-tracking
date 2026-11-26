@@ -20,6 +20,9 @@ export interface SimTripRow {
   consentExpiresAt: Date | null;
   state: SimTripState;
   intugineTripId: string | null;
+  /** The running Intugine trip this row took over from the previous driver's number: once this
+   *  number consents, its `tel` is updated instead of a new trip being started. */
+  carriedIntugineTripId: string | null;
   attempts: number;
   lastError: string | null;
   /** A start-trip call was made (so Intugine may hold a trip even if we never saw its id). */
@@ -66,6 +69,19 @@ export interface SimTripStore {
   findLatestByTrip(tripId: string): Promise<SimTripRow | null>;
   /** Null if another process created the live row first. */
   insert(input: NewSimTrip): Promise<SimTripRow | null>;
+  /**
+   * The driver's number changed on a running trip: atomically ends `row` (`driver_changed`) and
+   * opens the new number's row carrying `row`'s Intugine trip. Null if `row` was no longer live.
+   */
+  handOver(
+    row: SimTripRow,
+    next: { phone: string; driverId: string | null; reusedConsent: boolean },
+    now: Date,
+  ): Promise<SimTripRow | null>;
+  /** Finished rows still holding a carried Intugine trip (the new number never consented). */
+  finishedWithCarriedTrip(): Promise<SimTripRow[]>;
+  /** The carried Intugine trip was ended. */
+  clearCarried(id: string): Promise<void>;
   updateConsent(id: string, update: ConsentUpdate): Promise<void>;
   /** Records that the consent re-check for this load stage ran. */
   setConsentStage(id: string, stage: number): Promise<void>;
@@ -108,7 +124,8 @@ const COLUMNS = `
   consent_requested_at AS "consentRequestedAt",
   consent_last_checked_at AS "consentLastCheckedAt",
   consent_expires_at AS "consentExpiresAt",
-  state, intugine_trip_id AS "intugineTripId", attempts, last_error AS "lastError",
+  state, intugine_trip_id AS "intugineTripId",
+  carried_intugine_trip_id AS "carriedIntugineTripId", attempts, last_error AS "lastError",
   (start_payload IS NOT NULL) AS "startAttempted", consent_reused AS "consentReused", consent_stage AS "consentStage",
   end_reason AS "endReason", created_at AS "createdAt"`;
 
@@ -158,6 +175,64 @@ export class SimTripRepository implements SimTripStore {
       ],
     );
     return rows[0] ?? null;
+  }
+
+  async handOver(
+    row: SimTripRow,
+    next: { phone: string; driverId: string | null; reusedConsent: boolean },
+    now: Date,
+  ): Promise<SimTripRow | null> {
+    return this.dataSource.transaction(async (manager) => {
+      // The old row must still be live; the live-row unique index then lets the new one in.
+      const ended: Array<{ id: string }> = await manager.query(
+        `WITH e AS (
+           UPDATE tracking.sim_trips
+           SET state = 'ended', ended_at = $2, end_reason = 'driver_changed',
+               -- passed on to the new row: not this row's to close any more
+               carried_intugine_trip_id = NULL, updated_at = now()
+           WHERE id = $1 AND ${LIVE}
+           RETURNING id)
+         SELECT id FROM e`,
+        [row.id, now],
+      );
+      if (ended.length === 0) return null;
+      const rows: SimTripRow[] = await manager.query(
+        `INSERT INTO tracking.sim_trips
+           (id, tenant_id, load_id, vehicle_id, driver_id, phone, consent_reused,
+            state, operator_consent_status, carried_intugine_trip_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+                 CASE WHEN $7 THEN 'consented' ELSE 'awaiting_consent' END,
+                 CASE WHEN $7 THEN 'allowed' ELSE 'pending' END,
+                 $8)
+         RETURNING ${COLUMNS}`,
+        [
+          randomUUID(),
+          row.tenantId,
+          row.tripId,
+          row.vehicleId,
+          next.driverId,
+          next.phone,
+          next.reusedConsent,
+          row.intugineTripId ?? row.carriedIntugineTripId,
+        ],
+      );
+      return rows[0] ?? null;
+    });
+  }
+
+  async finishedWithCarriedTrip(): Promise<SimTripRow[]> {
+    return this.dataSource.query(
+      `SELECT ${COLUMNS} FROM tracking.sim_trips
+       WHERE carried_intugine_trip_id IS NOT NULL AND NOT (${LIVE})`,
+    );
+  }
+
+  async clearCarried(id: string): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE tracking.sim_trips SET carried_intugine_trip_id = NULL, updated_at = now()
+       WHERE id = $1`,
+      [id],
+    );
   }
 
   async updateConsent(id: string, update: ConsentUpdate): Promise<void> {
@@ -278,7 +353,7 @@ export class SimTripRepository implements SimTripStore {
     await this.dataSource.query(
       `UPDATE tracking.sim_trips
        SET state = 'active', intugine_trip_id = $2, started_at = $3,
-           attempts = 0, last_error = NULL, updated_at = now()
+           carried_intugine_trip_id = NULL, attempts = 0, last_error = NULL, updated_at = now()
        WHERE id = $1`,
       [row.id, intugineTripId, now],
     );

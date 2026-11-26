@@ -28,12 +28,40 @@ export class MemoryStore implements SimTripStore {
       consentExpiresAt: null,
       state: reusedConsent ? 'consented' : 'awaiting_consent',
       intugineTripId: null,
+      carriedIntugineTripId: null,
       attempts: 0,
       lastError: null,
       startAttempted: false,
     };
     this.rows.push(row);
     return row;
+  }
+  async handOver(
+    row: SimTripRow,
+    next: { phone: string; driverId: string | null; reusedConsent: boolean },
+  ) {
+    const stored = this.rows.find((r) => r.id === row.id);
+    if (!stored || !this.live(stored)) return null;
+    const carried = row.intugineTripId ?? row.carriedIntugineTripId;
+    stored.state = 'ended';
+    stored.endReason = 'driver_changed';
+    stored.carriedIntugineTripId = null;
+    const created = await this.insert({
+      tenantId: row.tenantId,
+      tripId: row.tripId,
+      vehicleId: row.vehicleId,
+      driverId: next.driverId,
+      phone: next.phone,
+      reusedConsent: next.reusedConsent,
+    });
+    created.carriedIntugineTripId = carried;
+    return created;
+  }
+  async finishedWithCarriedTrip() {
+    return this.rows.filter((r) => r.carriedIntugineTripId && !this.live(r));
+  }
+  async clearCarried(id: string) {
+    this.rows.find((r) => r.id === id)!.carriedIntugineTripId = null;
   }
   async updateConsent(id: string, u: ConsentUpdate) {
     const row = this.rows.find((r) => r.id === id)!;
@@ -108,6 +136,7 @@ export class MemoryStore implements SimTripStore {
       {
         state: 'active',
         intugineTripId,
+        carriedIntugineTripId: null,
         attempts: 0,
       },
     );

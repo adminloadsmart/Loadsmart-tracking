@@ -79,6 +79,7 @@ function setup(
       consent: { status: 'allowed', operator: 'airtel', suggestion: null } as SimConsent,
     })),
     endTrip: vi.fn(async () => true),
+    updateTripPhone: vi.fn(async (_id: string, _tel: string) => {}),
     findTripByInvoice: vi.fn(async () => null as string | null),
   };
   const mainData: SimMainData = {
@@ -393,6 +394,150 @@ describe('SimLifecycleService', () => {
     expect(store.rows[0].state).toBe('ended');
     expect(store.rows[1]).toMatchObject({ phone: '9123456780', vehicleId: 'veh-2' });
     expect(provider.checkConsent).toHaveBeenLastCalledWith('9123456780');
+  });
+
+  describe('driver number changed mid-trip (same truck)', () => {
+    const NEW = '9123456780';
+    async function running(opts: Parameters<typeof setup>[0] = {}) {
+      const kit = setup(opts);
+      await kit.service.run(at(0));
+      await kit.service.run(at(1));
+      expect(kit.store.rows[0]).toMatchObject({ state: 'active', intugineTripId: 'INT-1' });
+      return kit;
+    }
+
+    it('keeps the Intugine trip and moves it to the new number once it consents', async () => {
+      const { service, store, provider, cursorDelete, setLoad } = await running();
+      setLoad(makeLoad({ driverId: 'drv-2', driverNumber: NEW }));
+      await service.run(at(10));
+
+      expect(provider.endTrip).not.toHaveBeenCalled();
+      expect(provider.startTrip).toHaveBeenCalledTimes(1); // only the original start
+      expect(provider.checkConsent).toHaveBeenLastCalledWith(NEW);
+      expect(provider.updateTripPhone).toHaveBeenCalledWith('INT-1', NEW);
+      expect(store.rows[0]).toMatchObject({ state: 'ended', endReason: 'driver_changed' });
+      expect(store.rows[1]).toMatchObject({
+        phone: NEW,
+        driverId: 'drv-2',
+        state: 'active',
+        intugineTripId: 'INT-1',
+        carriedIntugineTripId: null,
+      });
+      expect(cursorDelete).not.toHaveBeenCalled(); // polling continues from the same cursor
+    });
+
+    it('waits for a pending consent, without polling, then updates the number', async () => {
+      const { service, store, provider, setLoad } = await running();
+      provider.checkConsent.mockResolvedValue({
+        status: 'pending',
+        operator: 'airtel',
+        suggestion: null,
+      });
+      setLoad(makeLoad({ driverId: 'drv-2', driverNumber: NEW }));
+      await service.run(at(10));
+      expect(store.rows[1]).toMatchObject({
+        state: 'awaiting_consent',
+        intugineTripId: null,
+        carriedIntugineTripId: 'INT-1',
+      });
+      expect(await store.activeDue(at(10), 0, 10)).toHaveLength(0);
+      expect(provider.updateTripPhone).not.toHaveBeenCalled();
+      expect(provider.endTrip).not.toHaveBeenCalled();
+
+      provider.checkConsent.mockResolvedValue({
+        status: 'allowed',
+        operator: 'airtel',
+        suggestion: null,
+      });
+      await service.run(at(80)); // past the hourly re-check
+      expect(provider.updateTripPhone).toHaveBeenCalledWith('INT-1', NEW);
+      expect(store.rows[1]).toMatchObject({ state: 'active', intugineTripId: 'INT-1' });
+    });
+
+    it('a new number with a valid consent on file is moved at once, without an SMS', async () => {
+      const { service, provider, consents, setLoad } = await running();
+      await consents.save({
+        phone: NEW,
+        operator: 'jio',
+        status: 'allowed',
+        suggestion: null,
+        firstSentAt: at(-60),
+        sentAt: at(-60),
+        givenAt: at(-50),
+        validUntil: new Date(T0 + 90 * 24 * 60 * MIN),
+        withdrawnAt: null,
+        lastCheckedAt: at(-50),
+      });
+      provider.checkConsent.mockClear();
+      setLoad(makeLoad({ driverNumber: NEW }));
+      await service.run(at(10));
+      expect(provider.checkConsent).not.toHaveBeenCalled();
+      expect(provider.updateTripPhone).toHaveBeenCalledWith('INT-1', NEW);
+    });
+
+    it('ends the Intugine trip when the new number is denied', async () => {
+      const { service, store, provider, cursorDelete, setLoad } = await running();
+      provider.checkConsent.mockResolvedValue({
+        status: 'denied',
+        operator: 'airtel',
+        suggestion: null,
+      });
+      setLoad(makeLoad({ driverNumber: NEW }));
+      await service.run(at(10));
+      expect(store.rows[1]).toMatchObject({ state: 'unsupported', carriedIntugineTripId: null });
+      expect(provider.endTrip).toHaveBeenCalledTimes(1);
+      expect(provider.endTrip).toHaveBeenCalledWith('INT-1');
+      expect(cursorDelete).toHaveBeenCalledWith('INT-1');
+      await service.run(at(20));
+      expect(provider.endTrip).toHaveBeenCalledTimes(1);
+    });
+
+    it('ends the carried trip when the load finishes before the new number consents', async () => {
+      const { service, store, provider, setLoad } = await running();
+      provider.checkConsent.mockResolvedValue({
+        status: 'pending',
+        operator: 'airtel',
+        suggestion: null,
+      });
+      setLoad(makeLoad({ driverNumber: NEW }));
+      await service.run(at(10));
+      setLoad(makeLoad({ driverNumber: NEW, status: 'delivered' }));
+      await service.run(at(20));
+      expect(provider.endTrip).toHaveBeenCalledTimes(1);
+      expect(provider.endTrip).toHaveBeenCalledWith('INT-1');
+      expect(store.rows[1]).toMatchObject({ state: 'ended', carriedIntugineTripId: null });
+    });
+
+    it('a second change while waiting hands the same trip over again', async () => {
+      const { service, store, provider, setLoad } = await running();
+      provider.checkConsent.mockResolvedValue({
+        status: 'pending',
+        operator: 'airtel',
+        suggestion: null,
+      });
+      setLoad(makeLoad({ driverNumber: NEW }));
+      await service.run(at(10));
+      provider.checkConsent.mockResolvedValue({
+        status: 'allowed',
+        operator: 'airtel',
+        suggestion: null,
+      });
+      setLoad(makeLoad({ driverNumber: '9000000001' }));
+      await service.run(at(20));
+      expect(provider.endTrip).not.toHaveBeenCalled();
+      expect(provider.updateTripPhone).toHaveBeenCalledWith('INT-1', '9000000001');
+      expect(store.rows[2]).toMatchObject({ state: 'active', intugineTripId: 'INT-1' });
+    });
+
+    it('gives up after repeated update failures and ends the Intugine trip', async () => {
+      const { service, store, provider, setLoad } = await running();
+      provider.updateTripPhone.mockRejectedValue(new Error('Intugine 500'));
+      setLoad(makeLoad({ driverNumber: NEW }));
+      for (let i = 0; i < 7; i++) await service.run(at(10 + i));
+      expect(store.rows[1]).toMatchObject({ state: 'failed', carriedIntugineTripId: null });
+      expect(provider.endTrip).toHaveBeenCalledWith('INT-1');
+      expect(provider.startTrip).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('a denied number does not block the next driver on the same load', async () => {

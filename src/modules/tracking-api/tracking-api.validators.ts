@@ -95,6 +95,28 @@ const vahanStatusSchema = z
   .optional();
 
 /** POST /trips — the Create trip drawer's CreateTripPayload. */
+/** The driver's licence as Create trip / Edit tracking checked it on Sarathi. */
+const tripDriverSchema = z
+  .object({
+    licenceNumber: z.string().trim().max(30).optional(),
+    dateOfBirth: z.iso.date().optional(),
+    name: z.string().trim().max(150).optional(),
+    /** The Sarathi check run on the licence (POST /drivers/verify-dl in main). */
+    licenceStatus: z.enum(['verified', 'manual_review', 'not_found', 'unavailable']).optional(),
+    /** Licence photos for a manual check (manual_review), uploaded via main's storage. */
+    licenceFrontKey: driverDocumentKey.optional(),
+    licenceBackKey: driverDocumentKey.optional(),
+  })
+  .refine(
+    (driver) =>
+      driver.licenceStatus !== 'manual_review' ||
+      (!!driver.licenceFrontKey && !!driver.licenceBackKey),
+    {
+      message: 'Upload the front and back of the driving licence for a manual check',
+      path: ['licenceFrontKey'],
+    },
+  );
+
 export const createTripSchema = z.object({
   body: z
     .object({
@@ -121,29 +143,7 @@ export const createTripSchema = z.object({
           }),
         ])
         .optional(),
-      driver: z
-        .object({
-          licenceNumber: z.string().trim().max(30).optional(),
-          dateOfBirth: z.iso.date().optional(),
-          name: z.string().trim().max(150).optional(),
-          /** The Sarathi check run on the licence (POST /drivers/verify-dl in main). */
-          licenceStatus: z
-            .enum(['verified', 'manual_review', 'not_found', 'unavailable'])
-            .optional(),
-          /** Licence photos for a manual check (manual_review), uploaded via main's storage. */
-          licenceFrontKey: driverDocumentKey.optional(),
-          licenceBackKey: driverDocumentKey.optional(),
-        })
-        .refine(
-          (driver) =>
-            driver.licenceStatus !== 'manual_review' ||
-            (!!driver.licenceFrontKey && !!driver.licenceBackKey),
-          {
-            message: 'Upload the front and back of the driving licence for a manual check',
-            path: ['licenceFrontKey'],
-          },
-        )
-        .optional(),
+      driver: tripDriverSchema.optional(),
       transporter: z
         .object({
           id: z.uuid().optional(),
@@ -186,9 +186,17 @@ export const updateTripSchema = z.object({
       vahanStatus: vahanStatusSchema,
       rcKey: uploadedKey('masters/vehicle').optional(),
       driverPhone: driverPhoneSchema.optional(),
-      driver: z.object({ name: z.string().trim().max(150).optional() }).optional(),
+      /** Name alone, or a licence as re-checked on Sarathi (its photos when manual_review). */
+      driver: tripDriverSchema.optional(),
       destination: placeSchema.optional(),
       lrNumber: z.string().trim().max(50).nullable().optional(),
+      /** The e-way bill: a null number or validity clears it. */
+      ewayBill: z
+        .object({
+          number: text(30).nullable().optional(),
+          validTill: isoDateTime.nullable().optional(),
+        })
+        .optional(),
     })
     .refine((body) => Object.values(body).some((value) => value !== undefined), {
       message: 'Nothing to change',

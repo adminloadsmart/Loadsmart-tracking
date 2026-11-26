@@ -217,6 +217,26 @@ describe('IntugineClient', () => {
     });
   });
 
+  it('moves a running trip to a new number with PUT /trips/', async () => {
+    const token = jwt(Math.floor(Date.now() / 1000) + 86_400);
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json(200, { token }))
+      .mockResolvedValueOnce(json(200, { msg: 'Trip updated' }))
+      .mockResolvedValueOnce(json(400, { msg: 'Invalid tel' }));
+    const c = client();
+    await c.updateTripPhone('T1', '9123456780');
+    const [url, init] = fetch.mock.calls[1];
+    expect(url).toBe('https://sct.test/api/prod/trips/');
+    expect(init?.method).toBe('PUT');
+    expect(JSON.parse(String(init?.body))).toEqual({
+      _id: 'T1',
+      tel: '9123456780',
+      sim_no: '9123456780',
+    });
+    await expect(c.updateTripPhone('T1', 'bad')).rejects.toMatchObject({ status: 400 });
+  });
+
   it('rejects a status body that is not a list', async () => {
     const token = jwt(Math.floor(Date.now() / 1000) + 86_400);
     vi.spyOn(globalThis, 'fetch')

@@ -135,6 +135,7 @@ export class SimLifecycleService {
         this.logger.warn({ err, tripId: row.tripId }, 'Ending a SIM trip failed; will retry');
       }
     }
+    await this.closeCarriedTrips(result);
     return result;
   }
 
@@ -145,13 +146,38 @@ export class SimLifecycleService {
     now: Date,
     result: LifecycleResult,
   ) {
-    // The truck was cancelled and another assigned (or the driver changed) between two ticks: the
-    // row still holds the old driver's number and vehicle. End it (and its billed Intugine trip)
-    // so the new driver is asked for consent and the old phone is no longer polled.
+    const phone = normalizePhone(load.driverNumber);
+    // Only the driver's number changed on a running trip: keep the Intugine trip. The new number
+    // gets its own row carrying that trip and is asked for consent; once allowed, the trip's `tel`
+    // is updated in place (startTrip). Points so far stay on the trip; the old phone is no longer
+    // polled (the old row has ended).
     if (
       row &&
-      (row.vehicleId !== load.vehicleId || row.phone !== normalizePhone(load.driverNumber))
+      row.vehicleId === load.vehicleId &&
+      phone &&
+      row.phone !== phone &&
+      // Running, or itself still waiting to take over a carried trip (number changed again).
+      ((row.state === 'active' && row.intugineTripId) || row.carriedIntugineTripId)
     ) {
+      row = await this.consent.handOver(
+        row,
+        {
+          tenantId: load.tenantId,
+          tripId: load.id,
+          vehicleId: load.vehicleId!,
+          driverId: load.driverId,
+          driverNumber: load.driverNumber,
+        },
+        now,
+      );
+      transitions.inc({ action: 'driver_handover' });
+      result.consentRequested += 1;
+      if (!row) return; // the new number can't be tracked: the sweep ends the carried trip
+    }
+    // The truck was cancelled and another assigned (or the driver changed before the Intugine
+    // trip ran) between two ticks: the row still holds the old driver's number and vehicle. End it
+    // (and its billed Intugine trip) so the new driver is asked and the old phone is not polled.
+    if (row && (row.vehicleId !== load.vehicleId || row.phone !== phone)) {
       await this.endTrip(row, load, now, 'truck_changed');
       result.ended += 1;
       row = null;
@@ -198,6 +224,23 @@ export class SimLifecycleService {
         now,
       });
       transitions.inc({ action: 'start_gave_up' });
+      // A carried Intugine trip is closed by the sweep at the end of this run.
+      return;
+    }
+
+    // The driver changed mid-trip: move the running Intugine trip to the new number.
+    const carried = row.carriedIntugineTripId;
+    if (carried) {
+      try {
+        await this.provider.updateTripPhone(carried, row.phone);
+        await this.store.markStarted(row, carried, now);
+        transitions.inc({ action: 'phone_updated' });
+        result.started += 1;
+      } catch (err) {
+        await this.store.recordError(row.id, err instanceof Error ? err.message : String(err));
+        transitions.inc({ action: 'phone_update_error' });
+        result.skipped += 1;
+      }
       return;
     }
 
@@ -323,8 +366,34 @@ export class SimLifecycleService {
     return limit === 0 || !load.deliveredAt || now.getTime() - load.deliveredAt.getTime() < limit;
   }
 
+  /** Rows that finished before the new number took over a carried Intugine trip (consent denied,
+   *  unsupported, timed out, or the update kept failing): end that trip, it is still billed. */
+  private async closeCarriedTrips(result: LifecycleResult) {
+    for (const row of await this.store.finishedWithCarriedTrip()) {
+      const carried = row.carriedIntugineTripId!;
+      try {
+        await this.provider.endTrip(carried);
+        await this.store.clearCarried(row.id);
+        transitions.inc({ action: 'handover_closed' });
+        result.ended += 1;
+        await this.cursors
+          .delete(carried)
+          .catch((err) =>
+            this.logger.warn({ err, tripId: row.tripId }, 'SIM cursor cleanup failed'),
+          );
+      } catch (err) {
+        result.skipped += 1;
+        this.logger.warn(
+          { err, tripId: row.tripId },
+          'Ending a carried SIM trip failed; will retry',
+        );
+      }
+    }
+  }
+
   private async endTrip(row: SimTripRow, load: MainLoad | null, now: Date, reason: string) {
-    let intugineTripId = row.intugineTripId;
+    // A row still waiting on the new driver's consent holds the running trip as carried.
+    let intugineTripId = row.intugineTripId ?? row.carriedIntugineTripId;
     // A start whose answer was lost may still be running (and billed) on Intugine.
     if (!intugineTripId && row.startAttempted && load) {
       intugineTripId = await this.provider.findTripByInvoice(simInvoiceOf(load));
@@ -334,6 +403,7 @@ export class SimLifecycleService {
       await this.provider.endTrip(intugineTripId);
     }
     await this.store.markEnded(row, { state: 'ended', reason, now });
+    if (row.carriedIntugineTripId) await this.store.clearCarried(row.id);
     transitions.inc({ action: reason });
     if (intugineTripId) {
       // Best effort: the row is already closed, so a Redis hiccup must not fail (and so never retry) this.

@@ -95,6 +95,10 @@ export interface CreatedTripExtras {
   customerId: string | null;
   transporterName: string | null;
   transporterPhone: string | null;
+  /** The driver's licence as saved (Edit tracking opens on it). */
+  driverLicenceNumber: string | null;
+  driverDateOfBirth: string | null;
+  dlStatus: string | null;
   loadingReportingAt: Date | null;
   appointment: { ref: string | null; from: Date | null; to: Date | null } | null;
   arrivedPickupAt: Date | null;
@@ -110,6 +114,13 @@ export type CreatedTripPatch = Partial<
     | 'vehicleNumber'
     | 'driverPhone'
     | 'driverName'
+    | 'driverLicenceNumber'
+    | 'driverDateOfBirth'
+    | 'dlStatus'
+    | 'dlFrontKey'
+    | 'dlBackKey'
+    | 'ewayBillNumber'
+    | 'ewayBillValidTill'
     | 'vehicleId'
     | 'ownFleet'
     | 'driverId'
@@ -500,6 +511,9 @@ export class TrackingApiRepository {
         customerId: t.customerId,
         transporterName: t.transporterName,
         transporterPhone: t.transporterPhone,
+        driverLicenceNumber: t.driverLicenceNumber,
+        driverDateOfBirth: t.driverDateOfBirth,
+        dlStatus: t.dlStatus,
         loadingReportingAt: t.loadingReportingAt,
         appointment:
           t.deliveryMode === 'appointment'

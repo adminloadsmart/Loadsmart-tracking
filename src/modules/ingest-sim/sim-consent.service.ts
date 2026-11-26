@@ -117,6 +117,26 @@ export class SimConsentService {
     return this.check(existing, now, true);
   }
 
+  /**
+   * The driver's number changed while `row`'s Intugine trip runs: the new number gets its own row
+   * (carrying that trip) and is asked at once, like a new trip. A number with a valid consent on
+   * file starts consented, no SMS. Null if `row` had already finished.
+   */
+  async handOver(row: SimTripRow, load: SimLoad, now = new Date()): Promise<SimTripRow | null> {
+    const phone = normalizePhone(load.driverNumber);
+    if (!phone) return null;
+    const reused = isConsentValid(await this.consents.find(phone), now);
+    const next = await this.store.handOver(
+      row,
+      { phone, driverId: load.driverId, reusedConsent: reused },
+      now,
+    );
+    if (!next) return null;
+    if (reused) consentChecks.inc({ result: 'reused' });
+    else await this.check(next, now, true);
+    return this.store.findLiveByTrip(load.tripId);
+  }
+
   /** Re-checks pending rows that are due; a row past its TTL gets one last call (a late approval still counts) and then gives up. */
   async checkDue(now = new Date(), limit = 50): Promise<Record<ConsentOutcome, number>> {
     const tally: Record<ConsentOutcome, number> = {

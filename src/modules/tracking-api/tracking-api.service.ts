@@ -493,8 +493,8 @@ export class TrackingApiService {
   }
 
   /**
-   * Edit tracking on an active created trip: the truck, the driver, the destination, the LR
-   * number. A new truck or driver number is tracked as a new one would be (vehicle id, driver
+   * Edit tracking on an active created trip: the truck, the driver (and their licence), the
+   * destination, the LR number, the e-way bill. A new truck or driver number is tracked as a new one would be (vehicle id, driver
    * account and source decided again); the SIM lifecycle ends the old driver's SIM trip on its
    * next tick and asks the new one for consent when the trip is on SIM.
    */
@@ -532,7 +532,18 @@ export class TrackingApiService {
       if (body.vahanStatus) patch.vahanStatus = body.vahanStatus;
       if (body.rcKey) patch.rcKey = body.rcKey;
     }
-    if (body.driver?.name !== undefined) patch.driverName = body.driver.name || null;
+    const driver = body.driver;
+    if (driver?.name !== undefined) patch.driverName = driver.name || null;
+    if (driver?.licenceNumber !== undefined) {
+      // A licence re-checked on Sarathi: its own result and photos, none kept from the old one.
+      patch.driverLicenceNumber = driver.licenceNumber.toUpperCase() || null;
+      patch.driverDateOfBirth = driver.dateOfBirth ?? null;
+      patch.dlStatus = driver.licenceStatus ?? null;
+      patch.dlFrontKey = driver.licenceFrontKey ?? null;
+      patch.dlBackKey = driver.licenceBackKey ?? null;
+    }
+    if (body.ewayBill?.number !== undefined) patch.ewayBillNumber = body.ewayBill.number;
+    if (body.ewayBill?.validTill !== undefined) patch.ewayBillValidTill = body.ewayBill.validTill;
     if (body.lrNumber !== undefined) patch.lrNumber = body.lrNumber || null;
     if (body.destination) {
       const at = await this.locate(body.destination);
@@ -670,6 +681,9 @@ function tripView(trip: TripRow) {
       customerId: trip.created.customerId,
       transporterName: trip.created.transporterName,
       transporterPhone: trip.created.transporterPhone,
+      driverLicenceNumber: trip.created.driverLicenceNumber,
+      driverDateOfBirth: trip.created.driverDateOfBirth,
+      dlStatus: trip.created.dlStatus,
       loadingReportingAt: trip.created.loadingReportingAt?.toISOString() ?? null,
       // The stage (trip.entity TRIP_STATUSES) and when each geofence step happened.
       tripStatus: trip.created.status,
