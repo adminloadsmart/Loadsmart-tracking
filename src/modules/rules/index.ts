@@ -6,13 +6,16 @@ import type { BatchHook } from '../points';
 import type { RouteStore } from '../routes/route.store';
 import type { RoutesRepository } from '../routes/routes.repository';
 import type { ActiveTripIndex } from '../trips';
-import { InactivityMonitor } from './inactivity.monitor';
+import { InactivityMonitor, type SimTripLookup } from './inactivity.monitor';
 import { RuleEngine } from './rule-engine';
 import { AlertChange, RulesRepository } from './rules.repository';
-import { haltGpsRule, haltSimRule } from './rules/halt-gps.rule';
+import { haltGpsRule } from './rules/halt-gps.rule';
+import { haltSimRule } from './rules/halt-sim.rule';
 import { nightGpsRule } from './rules/night-gps.rule';
+import { nightSimRule } from './rules/night-sim.rule';
 import { overspeedGpsRule } from './rules/overspeed-gps.rule';
 import { deviationGpsRule } from './rules/deviation-gps.rule';
+import { deviationSimRule } from './rules/deviation-sim.rule';
 import { progressGpsRule } from './rules/progress-gps.rule';
 import { DelayMonitor } from './delay.monitor';
 import { PreTransitEtaMonitor } from './pre-transit-eta';
@@ -25,7 +28,9 @@ export const FIX_RULES: FixRule[] = [
   haltSimRule as FixRule,
   overspeedGpsRule as FixRule,
   nightGpsRule as FixRule,
+  nightSimRule as FixRule,
   deviationGpsRule as FixRule,
+  deviationSimRule as FixRule,
   progressGpsRule as FixRule,
 ];
 
@@ -39,6 +44,8 @@ export function createRulesModule(deps: {
   logger: Logger;
   /** Routes (planned/approved) — enables DEV-GPS and DELAY-GPS. */
   routes?: { repository: RoutesRepository; store: RouteStore };
+  /** SIM trips — enables INACT-SIM (silence only matters while SIM is running for the trip). */
+  simTrips?: SimTripLookup;
 }) {
   const repository = new RulesRepository(deps.dataSource);
   const engine = new RuleEngine(
@@ -62,7 +69,13 @@ export function createRulesModule(deps: {
     },
   };
 
-  const monitor = new InactivityMonitor(deps.redis, repository, engine, deps.logger);
+  const monitor = new InactivityMonitor(
+    deps.redis,
+    repository,
+    engine,
+    deps.logger,
+    deps.simTrips ?? null,
+  );
   const mainData = new MainDataRepository(deps.dataSource);
   const signalLoss = new SignalLossMonitor(deps.redis, mainData, repository, deps.logger);
   const delay = deps.routes

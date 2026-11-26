@@ -268,7 +268,7 @@ export class RulesRepository {
 
   /** What LS_N_0030 names as the main reason for a delay (see TripDelayCauses). */
   async tripDelayCauses(tripId: string): Promise<TripDelayCauses> {
-    const causeRules: RuleId[] = ['HALT-GPS', 'HALT-SIM', 'DEV-GPS'];
+    const causeRules: RuleId[] = ['HALT-GPS', 'HALT-SIM', 'DEV-GPS', 'DEV-SIM'];
     const rows: Array<{ rule_id: RuleId; minutes: string | number }> = await this.dataSource.query(
       `SELECT rule_id,
               SUM(EXTRACT(EPOCH FROM (COALESCE(ended_at, now()) - started_at)) / 60) AS minutes
@@ -283,7 +283,7 @@ export class RulesRepository {
           .filter((r) => ruleIds.includes(r.rule_id))
           .reduce((sum, r) => sum + Number(r.minutes ?? 0), 0),
       );
-    return { haltMin: minutes('HALT-GPS', 'HALT-SIM'), deviationMin: minutes('DEV-GPS') };
+    return { haltMin: minutes('HALT-GPS', 'HALT-SIM'), deviationMin: minutes('DEV-GPS', 'DEV-SIM') };
   }
 
   loadSettings(tenantId: string): Promise<RuleSettingRow[]> {

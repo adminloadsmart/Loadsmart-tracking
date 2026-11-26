@@ -12,7 +12,12 @@ import { AlertChange, RulesRepository } from './rules.repository';
 import type { ProgressState } from './rules/progress-gps.rule';
 import { DelayCause, Effects, SEVERITY_RANK, Severity } from './rule.types';
 
+/** The rule the progress / ETA belongs to (DELAY-GPS state fields) and GPS alerts are raised as. */
 const RULE = 'DELAY-GPS' as const;
+/** A delay alert is DELAY-SIM when the trip's freshest progress is a SIM ping (rule sheet). */
+type DelayRuleId = 'DELAY-GPS' | 'DELAY-SIM';
+const PROGRESS_SOURCES = ['driver_app', 'roadcast', 'sim'] as const;
+type ProgressSource = (typeof PROGRESS_SOURCES)[number];
 export const tripEtaKey = (tripId: string) => `trk:trip:${tripId}:eta`;
 const delayStateKey = (tripId: string) => `trk:delay:${tripId}`;
 const OPEN_SET = 'trk:delay:open';
@@ -28,6 +33,9 @@ interface DelayState {
   consecCrit: number;
   consecClear: number;
   severity: Severity | null;
+  /** Which rule the open alert was raised as: kept until it closes, so a trip that switches
+   *  between GPS and SIM mid-trip never has two open delay alerts. */
+  ruleId: DelayRuleId | null;
   alertId: string | null;
   episodeId: string | null;
   maxDelayMin: number;
@@ -45,6 +53,7 @@ const emptyState = (): DelayState => ({
   consecCrit: 0,
   consecClear: 0,
   severity: null,
+  ruleId: null,
   alertId: null,
   episodeId: null,
   maxDelayMin: 0,
@@ -123,14 +132,22 @@ export class DelayMonitor {
     primary: Pick<RouteVersion, 'version' | 'geometry' | 'time' | 'promisedAt'>,
     nowMs: number,
   ): Promise<AlertChange[]> {
-    const setting = (await this.engine.settings(trip.tenant_id, nowMs)).get(RULE);
-    if (!setting?.enabled) return [];
-    const p = setting.params;
-
     const state: DelayState = {
       ...emptyState(),
       ...parseState(await this.redis.hgetall(delayStateKey(trip.id))),
     };
+    const found = await this.progress(trip, primary.version);
+    const progress = found?.state ?? null;
+    // An open alert keeps its rule; otherwise the freshest progress decides (SIM → DELAY-SIM).
+    const rule: DelayRuleId =
+      state.alertId && state.ruleId
+        ? state.ruleId
+        : found?.source === 'sim'
+          ? 'DELAY-SIM'
+          : 'DELAY-GPS';
+    const setting = (await this.engine.settings(trip.tenant_id, nowMs)).get(rule);
+    if (!setting?.enabled) return [];
+    const p = setting.params;
     // The ETA refreshes every etaEveryMin; the alerting below keeps its own (slower) cadence, so
     // "2 consecutive evaluations" still means ~30 min, not 2 min.
     const alertsDue = nowMs - state.lastEvalMs >= num(p, 'evaluateEveryMin') * 60_000;
@@ -138,7 +155,6 @@ export class DelayMonitor {
     if (!alertsDue && !etaDue) return [];
     state.lastEtaMs = nowMs;
 
-    const progress = await this.progress(trip, primary.version);
     const startMs = trip.tracking_started_at?.getTime() ?? nowMs;
     const promisedMs = promisedTime(
       primary.promisedAt,
@@ -193,7 +209,17 @@ export class DelayMonitor {
 
     if (alreadyLate) {
       const severity = alreadyLateSeverity(delayMin, p);
-      this.ensureSeverity(state, trip, severity, nowMs, delayMin, true, effects);
+      this.ensureSeverity(
+        state,
+        trip,
+        rule,
+        found?.source ?? 'driver_app',
+        severity,
+        nowMs,
+        delayMin,
+        true,
+        effects,
+      );
     } else if (!stale) {
       const level =
         delayMin >= num(p, 'criticalDelayMin')
@@ -208,9 +234,29 @@ export class DelayMonitor {
       state.consecClear = level === 'clear' ? state.consecClear + 1 : 0;
       const needed = num(p, 'consecutive');
       if (state.consecCrit >= needed)
-        this.ensureSeverity(state, trip, 'critical', nowMs, delayMin, false, effects);
+        this.ensureSeverity(
+          state,
+          trip,
+          rule,
+          found?.source ?? 'driver_app',
+          'critical',
+          nowMs,
+          delayMin,
+          false,
+          effects,
+        );
       else if (state.consecWarn >= needed)
-        this.ensureSeverity(state, trip, 'warning', nowMs, delayMin, false, effects);
+        this.ensureSeverity(
+          state,
+          trip,
+          rule,
+          found?.source ?? 'driver_app',
+          'warning',
+          nowMs,
+          delayMin,
+          false,
+          effects,
+        );
       else if (state.consecClear >= needed && state.alertId) {
         this.closeOpen(state, nowMs, 'delay_cleared', effects);
         await this.redis.srem(OPEN_SET, `${trip.id}|${trip.tenant_id}|${trip.vehicle_id}`);
@@ -247,6 +293,8 @@ export class DelayMonitor {
   private ensureSeverity(
     state: DelayState,
     trip: InTransitTrip,
+    rule: DelayRuleId,
+    source: ProgressSource,
     severity: Severity,
     nowMs: number,
     delayMin: number,
@@ -255,25 +303,26 @@ export class DelayMonitor {
   ): void {
     const payload = { projectedDelayMin: delayMin, alreadyLate };
     if (!state.alertId) {
-      state.episodeId = episodeId(trip.vehicle_id, RULE, nowMs, trip.id);
+      state.ruleId = rule;
+      state.episodeId = episodeId(trip.vehicle_id, rule, nowMs, trip.id);
       effects.episode({
         op: 'open',
         id: state.episodeId,
-        ruleId: RULE,
-        source: 'driver_app',
+        ruleId: rule,
+        source,
         tripId: trip.id,
         startedAt: nowMs,
         metrics: payload,
       });
-      const dedupeKey = `${RULE}:${trip.id}`;
+      const dedupeKey = `${rule}:${trip.id}`;
       state.alertId = alertId(dedupeKey, nowMs);
       state.severity = severity;
       effects.alert({
         op: 'raise',
         id: state.alertId,
-        ruleId: RULE,
+        ruleId: rule,
         severity,
-        audience: RULE_DEFAULTS[RULE]!.audience,
+        audience: RULE_DEFAULTS[rule]!.audience,
         title: alreadyLate
           ? 'Delivery is already late'
           : `Projected delivery delay of ${delayMin} min`,
@@ -407,18 +456,23 @@ export class DelayMonitor {
   }
 
   /** The freshest progress for the trip's current route version, from any GPS source. */
-  private async progress(trip: InTransitTrip, routeVersion: number): Promise<ProgressState | null> {
+  private async progress(
+    trip: InTransitTrip,
+    routeVersion: number,
+  ): Promise<{ state: ProgressState; source: ProgressSource } | null> {
     const fields = await this.redis.hmget(
       ruleStateKey(trip.vehicle_id),
-      `${RULE}|driver_app`,
-      `${RULE}|roadcast`,
-      `${RULE}|sim`,
+      ...PROGRESS_SOURCES.map((source) => `${RULE}|${source}`),
     );
     const candidates = fields
-      .filter((v): v is string => !!v)
-      .map((v) => JSON.parse(v) as ProgressState)
-      .filter((p) => p.tripId === trip.id && p.routeVersion === routeVersion);
-    return candidates.sort((a, b) => (b.lastFixMs ?? 0) - (a.lastFixMs ?? 0))[0] ?? null;
+      .map((v, i) =>
+        v ? { state: JSON.parse(v) as ProgressState, source: PROGRESS_SOURCES[i] } : null,
+      )
+      .filter((c): c is { state: ProgressState; source: ProgressSource } => !!c)
+      .filter((c) => c.state.tripId === trip.id && c.state.routeVersion === routeVersion);
+    return (
+      candidates.sort((a, b) => (b.state.lastFixMs ?? 0) - (a.state.lastFixMs ?? 0))[0] ?? null
+    );
   }
 }
 
@@ -431,6 +485,7 @@ function parseState(raw: Record<string, string>): Partial<DelayState> {
     consecCrit: Number(raw.consecCrit),
     consecClear: Number(raw.consecClear),
     severity: (raw.severity || null) as Severity | null,
+    ruleId: (raw.ruleId || null) as DelayRuleId | null,
     alertId: raw.alertId || null,
     episodeId: raw.episodeId || null,
     maxDelayMin: Number(raw.maxDelayMin || 0),
@@ -448,6 +503,7 @@ function serializeState(s: DelayState): Record<string, string> {
     consecCrit: String(s.consecCrit),
     consecClear: String(s.consecClear),
     severity: s.severity ?? '',
+    ruleId: s.ruleId ?? '',
     alertId: s.alertId ?? '',
     episodeId: s.episodeId ?? '',
     maxDelayMin: String(s.maxDelayMin),

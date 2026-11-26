@@ -32,10 +32,8 @@ export interface HaltState {
 }
 
 /**
- * HALT-GPS / HALT-SIM (rule sheet): a trip-level stop while in transit.  One state machine, two
- * parameter sets (defaults.ts): GPS (phone, Roadcast) has a fix every 10-15 s and exact speeds; SIM
- * has a coarse fix every 10-20 min and no speed (the speed implied by two fixes is used), so its
- * radii, gaps and anchor are wider.
+ * HALT-GPS (rule sheet): a trip-level stop while in transit. GPS (phone, Roadcast) has a fix every
+ * 10-15 s. HALT-SIM has its own rule (halt-sim.rule.ts): SIM pings are too coarse for this one.
  *
  *  - Halted fix = speed < 5 km/h AND within 150 m of the halt anchor (both, not either).
  *  - Anchor = median of the first 3 halted fixes; distances are from the anchor, not fix to fix,
@@ -50,7 +48,7 @@ export interface HaltState {
  *  - Buffered/old fixes are recorded but raise no alert.
  */
 function createHaltRule(
-  ruleId: 'HALT-GPS' | 'HALT-SIM',
+  ruleId: 'HALT-GPS',
   sources: PointSource[],
 ): FixRule<HaltState> {
   const RULE: RuleId = ruleId;
@@ -182,7 +180,6 @@ function createHaltRule(
 }
 
 export const haltGpsRule = createHaltRule('HALT-GPS', ['driver_app', 'roadcast']);
-export const haltSimRule = createHaltRule('HALT-SIM', ['sim']);
 
 function point(fix: RuleFix) {
   return { t: fix.t, lat: fix.lat, lng: fix.lng };

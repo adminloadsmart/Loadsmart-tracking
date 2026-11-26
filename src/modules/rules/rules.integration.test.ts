@@ -142,7 +142,7 @@ describe.skipIf(!available)('rules engine end to end (real Redis + Postgres)', (
       northM,
     ]);
 
-  it('a SIM truck parked across 20-minute pings → HALT-SIM alert once past 30 minutes (SIM pings are old when they arrive)', async () => {
+  it('a SIM truck parked across 20-minute pings → HALT-SIM alert on the 2nd in-radius ping (SIM pings are old when they arrive)', async () => {
     const trip = await startTrip();
     const simPoint = (offsetS: number, northM: number): NormalizedPoint => ({
       tenantId: trip.tenantId,

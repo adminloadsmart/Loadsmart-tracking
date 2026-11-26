@@ -73,6 +73,7 @@ export const startSchedulerRole: RoleStarter = async ({ dataSource, health, logg
     activeTrips: trips.activeTrips,
     logger,
     routes,
+    simTrips: new SimTripRepository(dataSource),
   });
   const mainRedis = createRedisConnection(env.mainRedisUrl, 'main-backend-events');
   const outbox = new OutboxRelay(dataSource, mainRedis);

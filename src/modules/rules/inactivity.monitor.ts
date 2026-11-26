@@ -1,6 +1,7 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import type { PointSource } from '../points';
+import type { SimTripRow } from '../ingest-sim';
 import { isGeofenceOnly, tripRefKey, vehicleActiveTripKey } from '../trips';
 import { RULE_DEFAULTS } from './defaults';
 import { inactiveFlagKey, lastSeenKey, RuleEngine } from './rule-engine';
@@ -18,11 +19,24 @@ const SOURCES: Array<{
   // silent is a real problem → High (INACT-GPS).
   { source: 'driver_app', ruleId: 'INACT-GPS', severity: 'medium', label: 'driver phone' },
   { source: 'roadcast', ruleId: 'INACT-GPS', severity: 'high', label: 'GPS device' },
+  // SIM: a phone off at night or in a dead zone is common → Medium (rule sheet, INACT-SIM).
+  { source: 'sim', ruleId: 'INACT-SIM', severity: 'medium', label: 'SIM location' },
 ];
 const MIN_THRESHOLD_MIN = 30; // the smallest possible threshold (tanker rule) bounds the scan
 const SCAN_LIMIT = 2000;
 
+/** The one SIM-trip lookup the SIM silence rule needs (SimTripRepository satisfies it). */
+export interface SimTripLookup {
+  findLiveByTrip(tripId: string): Promise<SimTripRow | null>;
+}
+
 /**
+ * INACT-SIM (rule sheet, docs/simrules.md): no SIM ping for 60 min. Only while the trip is on the
+ * road AND its SIM row is `active` (consent given, Intugine trip running, being polled). Where
+ * SIM is not running — waiting for consent, consent ended or revoked, the trip handed back to
+ * GPS — silence is expected or belongs to CONSENT-SIM, so no alert (one story, not two). The
+ * episode and alert carry a reason: `vendor_error` (the last poll failed) or `phone_unreachable`.
+ *
  * INACT-GPS (rule sheet): no packet from a source for 60 min (30 for tankers) — run on the
  * scheduler leader's tick, since silence produces no fixes to react to.
  * Opens an episode back-dated to the last packet (it shows on the trip timeline as "No data",
@@ -36,6 +50,8 @@ export class InactivityMonitor {
     private readonly repository: RulesRepository,
     private readonly engine: RuleEngine,
     private readonly logger: Logger,
+    /** Without it INACT-SIM is not evaluated (the SIM row decides whether silence matters). */
+    private readonly simTrips: SimTripLookup | null = null,
   ) {}
 
   async tick(nowMs = Date.now()): Promise<AlertChange[]> {
@@ -101,10 +117,23 @@ export class InactivityMonitor {
     }
     tripId = tripId ?? null;
 
+    let reason: string | null = null;
+    if (source === 'sim') {
+      if (!this.simTrips) return [];
+      const row = tripId ? await this.simTrips.findLiveByTrip(tripId) : null;
+      if (!row) {
+        // Trip over, or SIM no longer running for it: stop watching until the next SIM ping.
+        await this.redis.zrem(lastSeenKey(source), member);
+        return [];
+      }
+      if (row.state !== 'active') return []; // no consent yet / paused: silence is expected
+      reason = row.lastError ? 'vendor_error' : 'phone_unreachable';
+    }
+
     const setting = (await this.engine.settings(tenantId, nowMs)).get(ruleId);
     if (!setting?.enabled) return [];
     const profiles = await this.repository.loadVehicleProfiles([vehicleId]);
-    const tanker = /tank/i.test(profiles.get(vehicleId)?.bodyType ?? '');
+    const tanker = source !== 'sim' && /tank/i.test(profiles.get(vehicleId)?.bodyType ?? '');
     const thresholdMin = num(
       setting.params,
       tanker ? 'tankerInactiveAfterMin' : 'inactiveAfterMin',
@@ -122,8 +151,8 @@ export class InactivityMonitor {
       source,
       tripId,
       startedAt: lastSeenMs,
-      metrics: { kind: 'no_data' },
-      tags: ['no_data'],
+      metrics: { kind: 'no_data', ...(reason ? { reason } : {}) },
+      tags: reason ? ['no_data', reason] : ['no_data'],
     });
     effects.alert({
       op: 'raise',
@@ -136,7 +165,12 @@ export class InactivityMonitor {
       episodeId: id,
       dedupeKey,
       occurredAt: lastSeenMs,
-      payload: { source, lastSeenAt: new Date(lastSeenMs).toISOString(), thresholdMin },
+      payload: {
+        source,
+        lastSeenAt: new Date(lastSeenMs).toISOString(),
+        thresholdMin,
+        ...(reason ? { reason } : {}),
+      },
     });
     const changes = await this.repository.applyEffects([
       {

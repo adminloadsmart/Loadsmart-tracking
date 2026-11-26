@@ -193,16 +193,22 @@ export const deviationGpsRule: FixRule<DeviationState> = {
   },
 };
 
-/** LS_N_0028: far off route for long enough and moving away from the drop → one notice. */
-function offRouteNotice(
-  state: DeviationState,
+/** LS_N_0028: far off route for long enough and moving away from the drop → one notice.
+ *  Shared by DEV-GPS and DEV-SIM. */
+export function offRouteNotice<
+  S extends Pick<
+    DeviationState,
+    'episodeId' | 'startMs' | 'farSinceMs' | 'dropSamples' | 'notified'
+  >,
+>(
+  state: S,
   fix: RuleFix,
   d: number,
   gap: boolean,
   drop: { lat: number; lng: number },
   ctx: RuleContext,
   effects: Effects,
-): DeviationState {
+): S {
   const p = ctx.params;
   const s = { ...state };
   const toDropM = distanceM(fix, drop);

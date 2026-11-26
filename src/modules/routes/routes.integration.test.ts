@@ -371,6 +371,32 @@ describe.skipIf(!available)('routes, DELAY-GPS and DEV-GPS end to end (fixture G
     expect(alert).toEqual({ severity: 'warning', title: 'Delivery is already late' });
   });
 
+  it('a SIM-tracked trip that is already late raises DELAY-SIM (source sim), not DELAY-GPS', async () => {
+    const trip = await setup(-30, 300);
+    await routes.planner.planPending();
+    await promise(trip.tripId, trip.promisedInMin);
+    await feed(trip, [{ minAgo: 1, alongM: 90_000 }], 'sim');
+    await rules.tick(Date.now());
+    const alerts = await ds.query(`SELECT rule_id, severity, title FROM tracking.alerts`);
+    expect(alerts).toEqual([
+      { rule_id: 'DELAY-SIM', severity: 'warning', title: 'Delivery is already late' },
+    ]);
+    const [episode] = await ds.query(`SELECT rule_id, source FROM tracking.episodes`);
+    expect(episode).toEqual({ rule_id: 'DELAY-SIM', source: 'sim' });
+  });
+
+  it('an open DELAY-SIM alert keeps its rule when the trip later reports on GPS: no second alert', async () => {
+    const trip = await setup(-30, 300);
+    await routes.planner.planPending();
+    await promise(trip.tripId, trip.promisedInMin);
+    await feed(trip, [{ minAgo: 10, alongM: 80_000 }], 'sim');
+    await rules.tick(Date.now());
+    await feed(trip, [{ minAgo: 1, alongM: 90_000 }]); // GPS is now the freshest
+    await rules.tick(Date.now() + 16 * 60_000);
+    const alerts = await ds.query(`SELECT rule_id, status FROM tracking.alerts`);
+    expect(alerts).toEqual([{ rule_id: 'DELAY-SIM', status: 'open' }]);
+  });
+
   it('"already late" alerts at once: Critical when 240+ min late', async () => {
     const trip = await setup(-300, 600); // promised 5 h ago
     await routes.planner.planPending();
