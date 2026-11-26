@@ -67,6 +67,7 @@ export class TrackingApiController {
         scopeOf(req),
         String(req.params.tripId),
         req.body as UpdateTripBody,
+        req.user?.userId ?? null,
       ),
     );
   };

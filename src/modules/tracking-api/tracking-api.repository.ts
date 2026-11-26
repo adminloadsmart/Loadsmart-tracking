@@ -108,6 +108,28 @@ export interface CreatedTripExtras {
 }
 
 /** What Edit tracking changes on a created trip (TrackingApiService.updateTrip). */
+/** A driver number change saved with Edit tracking (tracking.trip_driver_changes). */
+export interface DriverChangeInput {
+  tenantId: string;
+  fromPhone: string;
+  toPhone: string;
+  fromName: string | null;
+  toName: string | null;
+  changedBy: string | null;
+}
+
+export interface DriverChangeRow {
+  changed_at: Date;
+  from_phone: string;
+  to_phone: string;
+  from_name: string | null;
+  to_name: string | null;
+  /** The truck's last point at or before the change; null before the first ping. */
+  lat: number | null;
+  lng: number | null;
+  recorded_at: Date | null;
+}
+
 export type CreatedTripPatch = Partial<
   Pick<
     TrackingTripEntity,
@@ -361,17 +383,40 @@ export class TrackingApiRepository {
     });
   }
 
-  /** Saves Edit tracking's changes on an active created trip; null if it is no longer active. */
+  /**
+   * Saves Edit tracking's changes on an active created trip, and the driver change with them when
+   * the number changed (one transaction); null if it is no longer active.
+   */
   async updateCreatedTrip(
     scope: TenantScope,
     id: string,
     patch: CreatedTripPatch,
+    driverChange?: DriverChangeInput,
   ): Promise<TripRow | null> {
-    const result = await this.createdTrips.update(
-      { id, status: In([...RUNNING_TRIP_STATUSES]), ...tenantWhere(scope) },
-      patch,
-    );
-    if (!result.affected) return null;
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const result = await manager
+        .getRepository(TrackingTripEntity)
+        .update({ id, status: In([...RUNNING_TRIP_STATUSES]), ...tenantWhere(scope) }, patch);
+      if (!result.affected) return false;
+      if (driverChange) {
+        await manager.query(
+          `INSERT INTO tracking.trip_driver_changes
+             (tenant_id, trip_id, from_phone, to_phone, from_name, to_name, changed_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            driverChange.tenantId,
+            id,
+            driverChange.fromPhone,
+            driverChange.toPhone,
+            driverChange.fromName,
+            driverChange.toName,
+            driverChange.changedBy,
+          ],
+        );
+      }
+      return true;
+    });
+    if (!saved) return null;
     const trip = await this.createdTrips.findOneByOrFail({ id });
     return (await this.toCreatedTripRows([trip]))[0];
   }
@@ -618,6 +663,27 @@ export class TrackingApiRepository {
       .andWhere('a.polyline IS NOT NULL')
       .getRawOne<ApproachRouteRow>();
     return row ?? null;
+  }
+
+  /**
+   * The trip's driver number changes, oldest first, each with the truck's last accepted point at
+   * or before the change (null when it had not reported yet).
+   */
+  driverChanges(tripId: string): Promise<DriverChangeRow[]> {
+    return this.dataSource.query(
+      `SELECT c.changed_at, c.from_phone, c.to_phone, c.from_name, c.to_name,
+              p.lat, p.lng, p.recorded_at
+       FROM tracking.trip_driver_changes c
+       LEFT JOIN LATERAL (
+         SELECT lat, lng, recorded_at FROM tracking.location_points
+         WHERE trip_id = c.trip_id AND recorded_at <= c.changed_at
+           AND NOT (coalesce(flags, '{}'::jsonb) ? 'rejected')
+         ORDER BY recorded_at DESC LIMIT 1
+       ) p ON true
+       WHERE c.trip_id = $1
+       ORDER BY c.changed_at`,
+      [tripId],
+    );
   }
 
   /** Raw trip points in time order (playback). */

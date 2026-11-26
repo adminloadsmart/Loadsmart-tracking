@@ -262,6 +262,64 @@ describe.skipIf(!available)('created trips — POST /trips (real Postgres)', () 
     expect(late.status).toBe(400);
   });
 
+  it('keeps each driver number change, with where the truck was then', async () => {
+    const { loadingPointId } = await seedLoad(ds, { tenantId: TENANT_A });
+    const created = await auth(request(app).post('/v1/trips')).send({
+      ...body(loadingPointId),
+      driver: { name: 'Ramesh' },
+    });
+    const { tripId, vehicleId } = created.body.data;
+    const point = async (minutesAgo: number, lat: number, lng: number, flags = {}) =>
+      ds.query(
+        `INSERT INTO tracking.location_points
+           (tenant_id, vehicle_id, trip_id, source, source_ref, recorded_at, received_at,
+            lat, lng, flags)
+         VALUES ($1, $2, $3, 'sim', 'INT-1', now() - make_interval(mins => $4), now(), $5, $6, $7)`,
+        [TENANT_A, vehicleId, tripId, minutesAgo, lat, lng, JSON.stringify(flags)],
+      );
+    await point(30, 19.0, 73.0);
+    await point(10, 19.5, 73.5);
+    await point(5, 25.0, 80.0, { rejected: 'jump' }); // a rejected fix is not where the truck was
+
+    // Edits that keep the number add nothing.
+    await auth(request(app).patch(`/v1/trips/${tripId}`)).send({ lrNumber: 'LR-1' });
+    const changed = await auth(request(app).patch(`/v1/trips/${tripId}`)).send({
+      driverPhone: '9123456780',
+      driver: { name: 'Suresh' },
+    });
+    expect(changed.status).toBe(200);
+
+    const trip = (await auth(request(app).get(`/v1/trips/${tripId}`))).body.data;
+    expect(trip.driverPhone).toBe('9123456780');
+    expect(trip.driverChanges).toHaveLength(1);
+    expect(trip.driverChanges[0]).toMatchObject({
+      fromPhone: body(loadingPointId).driverPhone,
+      toPhone: '9123456780',
+      fromName: 'Ramesh',
+      toName: 'Suresh',
+      position: { lat: 19.5, lng: 73.5 },
+    });
+    expect(Date.parse(trip.driverChanges[0].changedAt)).toBeGreaterThan(Date.now() - 60_000);
+
+    // A second change, without a name: the name carries over; listed oldest first.
+    await auth(request(app).patch(`/v1/trips/${tripId}`)).send({ driverPhone: '9000000001' });
+    const again = (await auth(request(app).get(`/v1/trips/${tripId}`))).body.data.driverChanges;
+    expect(again.map((c: { toPhone: string }) => c.toPhone)).toEqual(['9123456780', '9000000001']);
+    expect(again[1]).toMatchObject({ fromName: 'Suresh', toName: 'Suresh' });
+
+    // A trip changed before its first ping has no position for the change.
+    const other = await auth(request(app).post('/v1/trips')).send({
+      ...body(loadingPointId),
+      vehicleNumber: 'MH12AB9999',
+      driverPhone: '9876500077',
+    });
+    await auth(request(app).patch(`/v1/trips/${other.body.data.tripId}`)).send({
+      driverPhone: '9876500078',
+    });
+    const early = (await auth(request(app).get(`/v1/trips/${other.body.data.tripId}`))).body.data;
+    expect(early.driverChanges).toEqual([expect.objectContaining({ position: null })]);
+  });
+
   it('ends a created trip, which then lists as ended', async () => {
     const { loadingPointId } = await seedLoad(ds, { tenantId: TENANT_A });
     const { tripId } = (await auth(request(app).post('/v1/trips')).send(body(loadingPointId))).body

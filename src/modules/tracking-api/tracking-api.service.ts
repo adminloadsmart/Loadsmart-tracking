@@ -14,6 +14,7 @@ import type {
 } from './tracking-api.validators';
 import {
   CreatedTripPatch,
+  DriverChangeRow,
   isActiveTruckConflict,
   PlannedRouteRow,
   TrackingApiRepository,
@@ -310,11 +311,13 @@ export class TrackingApiService {
 
   async trip(scope: TenantScope, tripId: string) {
     const trip = await this.requireTrip(scope, tripId);
-    const [metrics, latest, rawEta, routes] = await Promise.all([
+    const [metrics, latest, rawEta, routes, driverChanges] = await Promise.all([
       this.positions.readTripMetrics(tripId),
       trip.vehicle_id ? this.positions.readLatest([trip.vehicle_id]) : Promise.resolve(new Map()),
       this.readEta(tripId),
       this.repository.currentRoutes([tripId]),
+      // Only created trips are edited here; a load's driver changes in the main backend.
+      trip.created ? this.repository.driverChanges(tripId) : Promise.resolve([]),
     ]);
     const route = routes.get(tripId);
     const eta = etaView(rawEta);
@@ -342,6 +345,7 @@ export class TrackingApiService {
       // Route km already driven = route length − what the ETA says is left (null until both exist).
       coveredKm: routeKm !== null && eta ? round1(Math.max(0, routeKm - eta.remainingKm)) : null,
       eta,
+      driverChanges: driverChanges.map(driverChangeView),
     };
   }
 
@@ -498,7 +502,12 @@ export class TrackingApiService {
    * account and source decided again); the SIM lifecycle ends the old driver's SIM trip on its
    * next tick and asks the new one for consent when the trip is on SIM.
    */
-  async updateTrip(scope: TenantScope, tripId: string, body: UpdateTripBody) {
+  async updateTrip(
+    scope: TenantScope,
+    tripId: string,
+    body: UpdateTripBody,
+    actorId: string | null = null,
+  ) {
     if ('allTenants' in scope) {
       throw new ValidationError('Edit the trip from an organization account');
     }
@@ -557,8 +566,20 @@ export class TrackingApiService {
         destinationLng: at?.lng ?? null,
       });
     }
+    // A new driver number is kept as history: the trip page marks where it changed.
+    const driverChange =
+      driverPhone !== current.driverPhone
+        ? {
+            tenantId: current.tenantId,
+            fromPhone: current.driverPhone,
+            toPhone: driverPhone,
+            fromName: current.driverName,
+            toName: patch.driverName !== undefined ? patch.driverName : current.driverName,
+            changedBy: actorId,
+          }
+        : undefined;
     const trip = await this.mapTruckConflict(
-      () => this.repository.updateCreatedTrip(scope, tripId, patch),
+      () => this.repository.updateCreatedTrip(scope, tripId, patch, driverChange),
       scope.tenantId,
       { vehicleNumber, driverPhone },
     );
@@ -642,6 +663,25 @@ export class TrackingApiService {
     if (!trip) throw new NotFoundError(`Trip ${tripId} not found`);
     return trip;
   }
+}
+
+/** A driver number change, with where the truck was then (its last point; null before any). */
+function driverChangeView(change: DriverChangeRow) {
+  return {
+    changedAt: new Date(change.changed_at).toISOString(),
+    fromPhone: change.from_phone,
+    toPhone: change.to_phone,
+    fromName: change.from_name,
+    toName: change.to_name,
+    position:
+      change.lat !== null && change.lng !== null && change.recorded_at
+        ? {
+            lat: Number(change.lat),
+            lng: Number(change.lng),
+            recordedAt: new Date(change.recorded_at).toISOString(),
+          }
+        : null,
+  };
 }
 
 function tripView(trip: TripRow) {

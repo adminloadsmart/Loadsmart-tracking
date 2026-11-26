@@ -202,7 +202,7 @@ export function registerTrackingApiOpenApi(registry: OpenAPIRegistry): void {
     responses: {
       200: {
         description:
-          'tripId, loadCode, loadTitle (null when the load has no title), loadStatus, postingType, route, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null, ewayBillNumber | null, ewayBillExpiresAt | null',
+          "tripId, loadCode, loadTitle (null when the load has no title), loadStatus, postingType, route, trackingState, trackingStartedAt, trackingEndedAt, vehicleId, vehicleNumber, driverId, driverName, driverPhone, customerName, plannedTonnes, origin, destination (each { id, name, city, address, lat, lng }), milestones, distanceKm, distanceKmBySource, fraudFlags, position, routeStatus, promisedDeliveryAt, route { kind, version, distanceKm, durationMin } | null, coveredKm | null, eta | null, ewayBillNumber | null, ewayBillExpiresAt | null, driverChanges (created trips: [{ changedAt, fromPhone, toPhone, fromName, toName, position { lat, lng, recordedAt } | null }], oldest first; position = the truck's last point at or before the change)",
       },
       400: { description: 'Validation failed', ...errorContent },
       ...authErrors,
