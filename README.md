@@ -35,6 +35,26 @@ One codebase and one Docker image. The `ROLE` env var picks what a process runs:
 | `processor` | Point stream partitions (leased, rebalanced across instances): clean → movement → motion → distance → Timescale                                                    | —                      |
 | `scheduler` | Single leader through a Redis lock; runs the dispatcher, retention and outbox jobs, and the TripWatcher that polls main's `loads` table into the active-trip index | —                      |
 
+In production, run the roles as separate deployments, at least `processor` apart from `api`. Each process has one Postgres pool, and every role in it shares that pool. With `ROLE=all`, a burst of heavy API reads waits behind the processor's batch transactions, and the processor waits behind the reads. The database is shared with the main backend, so size the pools per deployment:
+
+| Env                       | Default | Guidance                                                                                                                                                                                                              |
+| ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DB_POOL_MAX`             | 10      | Processor: about the partitions it owns (≤ 16) plus a few. API: by request concurrency. Scheduler and poller: 5 is plenty. Keep the sum over all pods under Postgres `max_connections` minus the main backend's share |
+| `DB_CONNECT_TIMEOUT_MS`   | 0 (off) | e.g. 5000: a saturated pool fails fast instead of queueing forever                                                                                                                                                    |
+| `DB_STATEMENT_TIMEOUT_MS` | 0 (off) | e.g. 30000 on API pods. The running service applies it, and the migration CLI never does                                                                                                                              |
+| `POINT_STREAM_MAXLEN`     | 200000  | Per partition, about 400 B each (16 × 200k ≈ 1.3 GB of Redis). Alert on `tracking_stream_lag`; `tracking_stream_trimmed_total` > 0 means points were lost                                                             |
+
+Lowering `POINT_STREAM_MAXLEN` trims the existing streams on their next write, so deploy that change only while `tracking_stream_lag` is about 0.
+
+### Changing `POINT_PARTITIONS`
+
+At most `POINT_PARTITIONS` processor instances can do work, one per partition. Raising the count (16 → 64) moves vehicles to other partitions. If points left in the old layout were processed next to newer ones on the new layout, a vehicle's points would run out of order. Processors record the count in Redis (`trk:points:partitions`) and refuse to start with a different count while any old partition still holds unprocessed points. The ingest roles log an error when their count differs from that record. To change it:
+
+1. Stop ingest: scale `realtime` and `poller` to 0 (phones buffer offline and resend; Roadcast is polled again later).
+2. Wait until `tracking_stream_lag` and `tracking_stream_pending` are 0 on every partition.
+3. Deploy every role with the new `POINT_PARTITIONS`, processors first.
+4. Start ingest again.
+
 Every process also serves these on `OPS_PORT` (9100):
 
 - `/healthz`: liveness.

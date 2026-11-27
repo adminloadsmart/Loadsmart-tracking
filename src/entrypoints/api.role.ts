@@ -4,6 +4,7 @@ import { buildContainer } from '../composition-root';
 import { env } from '../config/env';
 import { redisManager } from '../db/redis';
 import { IntugineClient, simConsentOptionsFromEnv } from '../modules/ingest-sim';
+import { geocodeLimitsFromEnv } from '../modules/geocoding';
 import { createRedisConnection } from '../db/redis-connection';
 import { closeServer, listen } from '../shared/lifecycle/http-server';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
@@ -22,6 +23,7 @@ export const startApiRole: RoleStarter = async ({ dataSource, health, logger }) 
       jwtSecret: env.jwtSecret,
       logger,
       googleMapsApiKey: env.googleMapsApiKey,
+      geocodeLimits: geocodeLimitsFromEnv(env),
       // Only to send a consent SMS again by hand; the status is readable without it.
       simProvider:
         env.intugineApiUrl && env.intugineUsername && env.intuginePassword

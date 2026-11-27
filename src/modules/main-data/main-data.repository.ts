@@ -127,6 +127,8 @@ export interface MainGeofence {
   vehicleIds: string[];
   loadingPointId: string | null;
   customerDeliveryPointId: string | null;
+  /** When the geofence was drawn (epoch ms) — a truck already inside it then hasn't "entered". */
+  createdAtMs?: number;
 }
 
 interface GeofenceRow {
@@ -143,6 +145,7 @@ interface GeofenceRow {
   loading_point_id: string | null;
   customer_delivery_point_id: string | null;
   vehicle_ids: string[];
+  created_at: Date;
 }
 
 export interface MainTripPoints {
@@ -679,7 +682,7 @@ export class MainDataRepository {
     const rows: GeofenceRow[] = await this.dataSource.query(
       `SELECT g.id, g.tenant_id, g.name, g.type::text AS type, g.shape::text AS shape,
               g.latitude, g.longitude, g.radius_m, g.polygon, g.applies_to_all_vehicles,
-              g.loading_point_id, g.customer_delivery_point_id,
+              g.loading_point_id, g.customer_delivery_point_id, g.created_at,
               COALESCE(array_agg(v.vehicle_id) FILTER (WHERE v.vehicle_id IS NOT NULL), '{}')
                 AS vehicle_ids
        FROM tracking.geofences g
@@ -705,6 +708,7 @@ export class MainDataRepository {
       vehicleIds: r.vehicle_ids,
       loadingPointId: r.loading_point_id,
       customerDeliveryPointId: r.customer_delivery_point_id,
+      createdAtMs: new Date(r.created_at).getTime(),
     }));
   }
 

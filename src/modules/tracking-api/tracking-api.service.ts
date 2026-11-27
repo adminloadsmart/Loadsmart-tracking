@@ -197,7 +197,9 @@ export class TrackingApiService {
       this.repository.activeTripsByVehicle(ids),
     ]);
     const now = Date.now();
-    // Addresses come from the Redis-cached resolver (one Google call per ~110 m cell).
+    // Addresses come from the Redis-cached resolver (one Google call per ~110 m cell). On a cold
+    // cache only the first GEOCODE_MAX_LOOKUPS_PER_REQUEST misses are looked up now; the others are
+    // null this time and warmed in the background for the next refresh.
     const positions = await this.withAddresses(
       vehicles.map((vehicle) => {
         const position = latest.get(vehicle.id);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ActiveTripIndex, TripRef } from '../trips';
 import { toNormalizedPoint } from './driver-point.contract';
+import { Limiter, LimiterBusyError } from '../../shared/utils/concurrency';
 import { TripResolver } from './trip-resolver';
 import type { TripRepository } from './trip.repository';
 
@@ -158,5 +159,42 @@ describe('TripResolver', () => {
         geofenceTripId: 'trip-9',
       });
     });
+  });
+});
+
+describe('TripResolver Postgres fallback under a reconnect storm', () => {
+  it('runs a few at once and refuses the rest at once (the app retries)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let running = 0;
+    let peak = 0;
+    const repository = {
+      findTripsForDriverAt: async () => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await gate;
+        running -= 1;
+        return [];
+      },
+    } as unknown as TripRepository;
+    const resolver = new TripResolver(
+      { getTripRefForDriver: async () => null } as unknown as ActiveTripIndex,
+      repository,
+      new Limiter('test', 2, 2),
+    );
+    const now = Date.now();
+    const old = [new Date(now - 60 * 60_000).toISOString()]; // offline batch: goes to the fallback
+    const flushes = Array.from({ length: 6 }, (_, i) =>
+      resolver.resolve(`driver-${i}`, [TENANT], old, now),
+    );
+    const settled = Promise.allSettled(flushes);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    const results = await settled;
+    expect(peak).toBe(2);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(4);
+    const refused = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(refused).toHaveLength(2);
+    expect(refused[0].reason).toBeInstanceOf(LimiterBusyError);
   });
 });

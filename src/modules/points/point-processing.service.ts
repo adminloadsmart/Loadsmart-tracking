@@ -20,15 +20,24 @@ export interface BatchHook {
   }>;
 }
 
+type HookResult = Awaited<ReturnType<BatchHook['run']>>;
+
 /**
- * Several hooks as one (rules engine, geofence check), run in order: each one's state writes join
- * the same Redis transaction, and every after-commit step runs — one failing doesn't skip the rest.
+ * Several hooks as one (rules engine, geofence check, trip start), run together: each one's state
+ * writes join the same Redis transaction, and every after-commit step runs — one failing doesn't
+ * skip the rest.
  */
+
 export function composeHooks(...hooks: BatchHook[]): BatchHook {
   return {
     async run(points, nowMs) {
-      const results: Array<Awaited<ReturnType<BatchHook['run']>>> = [];
-      for (const hook of hooks) results.push(await hook.run(points, nowMs));
+      // Concurrently: the hooks read and write their own keys and tables, and none sees another's
+      // Redis state before the batch's MULTI anyway. allSettled, so a failing hook fails the batch
+      // only once the others are done (their writes are idempotent and re-run on redelivery).
+      const settled = await Promise.allSettled(hooks.map((hook) => hook.run(points, nowMs)));
+      const failed = settled.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (failed) throw failed.reason;
+      const results = settled.map((r) => (r as PromiseFulfilledResult<HookResult>).value);
       return {
         writeState: (multi) => {
           for (const result of results) result.writeState?.(multi);

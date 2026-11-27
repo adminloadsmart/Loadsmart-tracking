@@ -1,7 +1,14 @@
 import type Redis from 'ioredis';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { infraAvailable, silentLogger, testRedis, waitFor } from '../__tests__/support/infra';
-import { BatchHandler, deadLetterKey, GroupConsumer, StreamEntry } from './stream-consumer';
+import { streamLag, streamLength, streamTrimmed } from '../shared/metrics';
+import {
+  BatchHandler,
+  deadLetterKey,
+  GroupConsumer,
+  groupInfo,
+  StreamEntry,
+} from './stream-consumer';
 
 const available = await infraAvailable();
 
@@ -128,5 +135,95 @@ describe.skipIf(!available)('GroupConsumer (real Redis)', () => {
       seen.push(...entries.map((e) => e.fields.n));
     });
     await waitFor(async () => seen.includes('orphan') && (await pendingCount()) === 0);
+  });
+
+  it('a slow stream does not hold up the others, and each stream stays in order', async () => {
+    const other = 'test:stream:other';
+    const seen: Record<string, string[]> = { [stream]: [], [other]: [] };
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    consumer = new GroupConsumer({
+      name: 'test',
+      redis,
+      blockingRedis: blocking,
+      group: 'g',
+      consumer: 'c1',
+      streams: () => [stream, other],
+      handler: async (s, entries) => {
+        if (s === stream) await slow;
+        seen[s].push(...entries.map((e) => e.fields.n));
+      },
+      logger: silentLogger,
+      blockMs: 50,
+      batchSize: 2,
+    });
+    consumer.start();
+    for (let i = 0; i < 6; i += 1) {
+      await redis.xadd(stream, '*', 'n', String(i));
+      await redis.xadd(other, '*', 'n', String(i));
+    }
+    // The other stream is fully handled, batch after batch, while the first is still stuck.
+    await waitFor(async () => seen[other].length === 6);
+    expect(seen[stream]).toEqual([]);
+    expect(consumer.health().oldestTaskAgoMs).not.toBeNull();
+    release();
+    await waitFor(async () => seen[stream].length === 6);
+    expect(seen[stream]).toEqual(['0', '1', '2', '3', '4', '5']);
+    expect(seen[other]).toEqual(['0', '1', '2', '3', '4', '5']);
+  });
+
+  it('stop() waits for batches in flight and acks them', async () => {
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    startConsumer(async () => slow);
+    await redis.xadd(stream, '*', 'n', '1');
+    await waitFor(async () => (await pendingCount()) === 1);
+    const stopped = consumer!.stop();
+    release();
+    await stopped;
+    consumer = null;
+    expect(await pendingCount()).toBe(0);
+  });
+
+  const gauge = async (metric: { get(): Promise<{ values: any[] }> }) =>
+    (await metric.get()).values.find((v) => v.labels.stream === stream)?.value;
+
+  it('reports the backlog: lag and length while entries wait, lag 0 once read', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    await redis.xgroup('CREATE', stream, 'g', '0', 'MKSTREAM');
+    for (let i = 0; i < 5; i += 1) await redis.xadd(stream, '*', 'n', String(i));
+    startConsumer(async () => gate);
+    // The first iteration samples before reading: all 5 are still undelivered.
+    await waitFor(async () => (await gauge(streamLag)) === 5);
+    expect(await gauge(streamLength)).toBe(5);
+    release();
+    await waitFor(async () => (await gauge(streamLag)) === 0, { timeoutMs: 10_000 });
+  }, 15_000);
+
+  it('counts pending entries trimmed by MAXLEN before processing', async () => {
+    const before = (await gauge(streamTrimmed)) ?? 0;
+    await redis.xgroup('CREATE', stream, 'g', '0', 'MKSTREAM');
+    await redis.xadd(stream, '*', 'n', 'lost');
+    await redis.xreadgroup('GROUP', 'g', 'dead-consumer', 'COUNT', 10, 'STREAMS', stream, '>');
+    await redis.xtrim(stream, 'MAXLEN', 0);
+    startConsumer(async () => {});
+    await waitFor(async () => (await pendingCount()) === 0);
+    expect(await gauge(streamTrimmed)).toBe(before + 1);
+  });
+});
+
+describe('groupInfo', () => {
+  it('reads one group out of an XINFO GROUPS reply', () => {
+    const reply = [
+      ['name', 'other', 'pending', 9, 'lag', 9],
+      ['name', 'g', 'consumers', 1, 'pending', 3, 'last-delivered-id', '1-0', 'lag', 7],
+    ];
+    expect(groupInfo(reply, 'g')).toEqual({ pending: 3, lag: 7 });
+    expect(groupInfo([['name', 'g', 'pending', 0, 'lag', null]], 'g')).toEqual({
+      pending: 0,
+      lag: null,
+    });
+    expect(groupInfo(reply, 'missing')).toBeUndefined();
   });
 });

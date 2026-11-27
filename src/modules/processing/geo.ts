@@ -1,4 +1,4 @@
-const EARTH_RADIUS_M = 6_371_008.8;
+export const EARTH_RADIUS_M = 6_371_008.8;
 
 export interface LatLng {
   lat: number;

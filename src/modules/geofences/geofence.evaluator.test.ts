@@ -10,6 +10,7 @@ import {
   tripEventFor,
   tripPlaceOf,
 } from './geofence.evaluator';
+import { containsPoint, mayContain } from './geofence.geo';
 
 const VEHICLE = '22222222-2222-4222-8222-222222222222';
 const TRIP = '33333333-3333-4333-8333-333333333333';
@@ -63,7 +64,10 @@ describe('evaluateVehicle', () => {
       ['enter', T0 + 60_000],
       ['exit', T0 + 600_000],
     ]);
-    expect(result.state[plant.id]).toEqual({ inside: false, enteredAt: null, lastT: T0 + 600_000 });
+    // Only visits in progress are kept: the ended one is deleted, the vehicle's lastT moves on.
+    expect(result.state).toEqual({});
+    expect(result.removed).toEqual([plant.id]);
+    expect(result.meta.lastT).toBe(T0 + 600_000);
     expect(result.dwells).toEqual([]);
   });
 
@@ -463,5 +467,150 @@ describe('trips created from the tracking screen', () => {
     const zero = { ...plant, radiusM: 0 };
     const result = evaluateVehicle(VEHICLE, [fix(0, 5000), fix(60, 100)], [zero], {});
     expect(result.transitions.map((t) => t.event)).toEqual(['enter']);
+  });
+});
+
+describe('evaluateVehicle: sparse state (only visits in progress are stored)', () => {
+  const LIST_AT = T0 - 3600_000;
+  const far = { ...plant, id: 'geo-far', lat: 28.6, lng: 77.2 }; // Delhi, hundreds of km away
+
+  it('outside → outside writes no memberships, only the vehicle meta', () => {
+    const result = evaluateVehicle(
+      VEHICLE,
+      [fix(0, 1000), fix(60, 1200)],
+      [plant, far],
+      {},
+      undefined,
+      {},
+      LIST_AT,
+    );
+    expect(result.changed).toEqual([]);
+    expect(result.state).toEqual({});
+    expect(result.meta).toEqual({ lastT: T0 + 60_000, listAt: LIST_AT });
+  });
+
+  it('a geofence with no entry, already in the last evaluated list, is known outside: entering it is an enter', () => {
+    const first = evaluateVehicle(VEHICLE, [fix(0, 1000)], [plant], {}, undefined, {}, LIST_AT);
+    const later = evaluateVehicle(
+      VEHICLE,
+      [fix(60, 0)],
+      [plant],
+      first.state,
+      undefined,
+      first.meta,
+      LIST_AT,
+    );
+    expect(later.transitions.map((t) => t.event)).toEqual(['enter']);
+  });
+
+  it('a geofence drawn after the last evaluated list is a first sighting: no enter for a truck already inside', () => {
+    const first = evaluateVehicle(VEHICLE, [fix(0, 1000)], [far], {}, undefined, {}, LIST_AT);
+    const drawnLater = { ...plant, createdAtMs: LIST_AT + 1000 };
+    const later = evaluateVehicle(
+      VEHICLE,
+      [fix(60, 0)],
+      [far, drawnLater],
+      first.state,
+      undefined,
+      first.meta,
+      LIST_AT + 2000,
+    );
+    expect(later.transitions).toEqual([]);
+    expect(later.state[plant.id]).toMatchObject({ inside: true });
+  });
+
+  it("a fix older than the vehicle's newest (a second source arriving late) raises no false enter / exit", () => {
+    const inside = evaluateVehicle(
+      VEHICLE,
+      [fix(0, 1000), fix(100, 0)],
+      [plant],
+      {},
+      undefined,
+      {},
+      LIST_AT,
+    );
+    expect(inside.transitions.map((t) => t.event)).toEqual(['enter']);
+    // Phone fix recorded at t=90 (outside, before the Roadcast t=100 that is already applied).
+    const late = evaluateVehicle(
+      VEHICLE,
+      [fix(90, 1000)],
+      [plant],
+      inside.state,
+      undefined,
+      inside.meta,
+      LIST_AT,
+    );
+    expect(late.transitions).toEqual([]);
+    expect(late.changed).toEqual([]);
+    expect(late.state[plant.id]).toMatchObject({ inside: true });
+  });
+
+  it('state in the old format (an entry per geofence) still reads right, and its outside entries are dropped', () => {
+    const old = {
+      [plant.id]: { inside: false, enteredAt: null, lastT: T0 },
+      [far.id]: { inside: false, enteredAt: null, lastT: T0 },
+    };
+    const result = evaluateVehicle(
+      VEHICLE,
+      [fix(60, 0)],
+      [plant, far],
+      old,
+      undefined,
+      {},
+      LIST_AT,
+    );
+    expect(result.transitions.map((t) => t.event)).toEqual(['enter']);
+    expect(result.removed).toEqual([far.id]);
+    expect(result.changed).toEqual([plant.id]);
+  });
+});
+
+describe('mayContain (bounding-box prefilter)', () => {
+  it('never rules out a point containsPoint accepts — circles of every radius, at the border', () => {
+    for (const radiusM of [50, 300, 2000, 25_000]) {
+      for (const lat of [8.5, 22, 30.9, 34.1]) {
+        const g: MainGeofence = { ...plant, lat, lng: 77, radiusM };
+        for (let deg = 0; deg < 360; deg += 7.5) {
+          const rad = (deg * Math.PI) / 180;
+          // Just inside the border, with a destination-point formula on the sphere.
+          const d = (radiusM - 0.01) / 6_371_008.8;
+          const φ1 = (lat * Math.PI) / 180;
+          const φ2 = Math.asin(
+            Math.sin(φ1) * Math.cos(d) + Math.cos(φ1) * Math.sin(d) * Math.cos(rad),
+          );
+          const λ2 =
+            (77 * Math.PI) / 180 +
+            Math.atan2(
+              Math.sin(rad) * Math.sin(d) * Math.cos(φ1),
+              Math.cos(d) - Math.sin(φ1) * Math.sin(φ2),
+            );
+          const p = { lat: (φ2 * 180) / Math.PI, lng: (λ2 * 180) / Math.PI };
+          expect(containsPoint(g, p)).toBe(true);
+          expect(mayContain(g, p)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('uses the default radius for a circle without one, and the vertices for a polygon', () => {
+    const noRadius: MainGeofence = { ...plant, radiusM: null };
+    expect(mayContain(noRadius, { lat: 30.9 + 1900 * M, lng: 75.85 }, 2000)).toBe(true);
+    expect(mayContain(noRadius, { lat: 30.9 + 2100 * M, lng: 75.85 }, 2000)).toBe(false);
+    const square: MainGeofence = {
+      ...plant,
+      shape: 'polygon',
+      polygon: [
+        { lat: 30.899, lng: 75.849 },
+        { lat: 30.901, lng: 75.849 },
+        { lat: 30.901, lng: 75.851 },
+        { lat: 30.899, lng: 75.851 },
+      ],
+    };
+    expect(mayContain(square, { lat: 30.901, lng: 75.851 })).toBe(true);
+    expect(mayContain(square, { lat: 30.91, lng: 75.85 })).toBe(false);
+  });
+
+  it('rules out far-away geofences', () => {
+    expect(mayContain(plant, { lat: 28.6, lng: 77.2 })).toBe(false);
   });
 });

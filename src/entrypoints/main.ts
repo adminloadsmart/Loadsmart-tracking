@@ -46,6 +46,16 @@ async function bootstrap() {
   await listen(opsServer, env.opsPort);
   logger.info({ port: env.opsPort }, 'Ops server listening (/healthz, /readyz, /metrics)');
 
+  // Only the running service gets the statement timeout: the migration CLI uses the same data
+  // source and must not have long Timescale DDL cut off.
+  if (env.dbStatementTimeoutMs > 0) {
+    AppDataSource.setOptions({
+      extra: {
+        ...(AppDataSource.options.extra as object),
+        statement_timeout: env.dbStatementTimeoutMs,
+      },
+    });
+  }
   await AppDataSource.initialize();
   await redisManager.connect();
 

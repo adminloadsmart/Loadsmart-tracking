@@ -7,10 +7,11 @@ import { createIngestPhoneModule, DRIVER_SOCKET_MAX_MESSAGE_BYTES } from '../mod
 import { createLiveModule } from '../modules/live';
 import { createPointsModule } from '../modules/points';
 import { createTripsModule } from '../modules/trips';
-import { createAddressResolver } from '../modules/geocoding';
+import { createAddressResolver, geocodeLimitsFromEnv } from '../modules/geocoding';
 import { createTrackingApiModule } from '../modules/tracking-api';
 import { closeServer, listen } from '../shared/lifecycle/http-server';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
+import { checkPartitionCount } from '../streams/partition-layout';
 
 export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logger }) => {
   // Driver tokens are issued by the main backend; without its secret nobody could connect.
@@ -37,6 +38,7 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
     partitions: env.pointPartitions,
     maxLen: env.pointStreamMaxLen,
   });
+  await checkPartitionCount(redis, env.pointPartitions, logger);
   const { activeTrips } = createTripsModule(dataSource, redis, logger);
   createIngestPhoneModule({
     dataSource,
@@ -56,7 +58,12 @@ export const startRealtimeRole: RoleStarter = async ({ dataSource, health, logge
     service: createTrackingApiModule(
       dataSource,
       redis,
-      createAddressResolver({ redis, logger, googleMapsApiKey: env.googleMapsApiKey }),
+      createAddressResolver({
+        redis,
+        logger,
+        googleMapsApiKey: env.googleMapsApiKey,
+        limits: geocodeLimitsFromEnv(env),
+      }),
     ).service,
     jwtSecret: env.jwtSecret,
     logger,

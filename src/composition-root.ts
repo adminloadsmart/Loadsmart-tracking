@@ -3,7 +3,7 @@ import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import { DataSource } from 'typeorm';
 import { createAlertsModule } from './modules/alerts';
-import { createAddressResolver } from './modules/geocoding';
+import { createAddressResolver, type AddressResolverOptions } from './modules/geocoding';
 import {
   createSimConsentRoutes,
   SimConsentApiService,
@@ -47,6 +47,8 @@ export interface ContainerDeps {
   jwtSecret: string;
   logger: Logger;
   googleMapsApiKey?: string;
+  /** Reverse-geocoding caps (env GEOCODE_*); defaults in AddressResolver. */
+  geocodeLimits?: AddressResolverOptions;
   /** Test override for route planning (fixture provider). */
   routeProvider?: RouteProvider | null;
   /** Intugine, for sending the SIM consent SMS again; without it the consent status is still shown. */
@@ -63,6 +65,7 @@ export function buildContainer(deps: ContainerDeps): Container {
     redis: deps.redis,
     logger: deps.logger,
     googleMapsApiKey: deps.googleMapsApiKey,
+    limits: deps.geocodeLimits,
   });
   const trackingApi = createTrackingApiModule(
     deps.dataSource,

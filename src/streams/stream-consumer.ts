@@ -1,5 +1,12 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
+import {
+  streamDeadLettered,
+  streamLag,
+  streamLength,
+  streamPending,
+  streamTrimmed,
+} from '../shared/metrics';
 
 export interface StreamEntry {
   id: string;
@@ -37,6 +44,8 @@ export interface GroupConsumerOptions {
   claimIdleMs?: number;
   maxDeliveries?: number;
   dlqMaxLen?: number;
+  /** Most streams handled at once (each stream is still handled one batch at a time). */
+  concurrency?: number;
 }
 
 type RawEntries = Array<[string, string[]]>;
@@ -69,12 +78,21 @@ export class GroupConsumer {
   private readonly groupsReady = new Set<string>();
   private lastClaimAt = 0;
   private lastBatchAt = 0;
+  /** The one task (a read batch or a re-claim) running per stream: a stream's entries are handled
+   *  in order, while other streams go on without waiting for it. */
+  private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly taskStartedAt = new Map<string, number>();
+  /** Resolves the loop's wait when a stream task finishes, so its stream is read again at once. */
+  private wake: (() => void) | null = null;
+  /** Streams whose gauges this consumer set, so a stream it stops reading drops its series. */
+  private readonly sampled = new Set<string>();
 
   private readonly batchSize: number;
   private readonly blockMs: number;
   private readonly claimIdleMs: number;
   private readonly maxDeliveries: number;
   private readonly dlqMaxLen: number;
+  private readonly concurrency: number;
 
   constructor(private readonly options: GroupConsumerOptions) {
     this.batchSize = options.batchSize ?? 500;
@@ -82,6 +100,7 @@ export class GroupConsumer {
     this.claimIdleMs = options.claimIdleMs ?? 30_000;
     this.maxDeliveries = options.maxDeliveries ?? 5;
     this.dlqMaxLen = options.dlqMaxLen ?? 100_000;
+    this.concurrency = Math.max(1, options.concurrency ?? 16);
   }
 
   start(): void {
@@ -92,16 +111,22 @@ export class GroupConsumer {
 
   async stop(): Promise<void> {
     this.running = false;
-    // The in-flight XREADGROUP returns within blockMs; the current batch finishes and is acked.
+    // The in-flight XREADGROUP returns within blockMs; batches in flight finish and are acked.
+    this.wake?.();
     await this.loop;
+    await Promise.all(this.inFlight.values());
     this.loop = null;
   }
 
   /** For readiness: the loop is alive and has completed an iteration recently. */
-  health(): { running: boolean; lastBatchAgoMs: number | null } {
+  health(): { running: boolean; lastBatchAgoMs: number | null; oldestTaskAgoMs: number | null } {
+    const now = Date.now();
+    const oldest = Math.min(...this.taskStartedAt.values());
     return {
       running: this.running,
-      lastBatchAgoMs: this.lastBatchAt ? Date.now() - this.lastBatchAt : null,
+      lastBatchAgoMs: this.lastBatchAt ? now - this.lastBatchAt : null,
+      // A stuck batch no longer stalls the loop (other streams go on), so it shows here instead.
+      oldestTaskAgoMs: Number.isFinite(oldest) ? now - oldest : null,
     };
   }
 
@@ -110,25 +135,72 @@ export class GroupConsumer {
     while (this.running) {
       try {
         const streams = this.options.streams();
+        this.lastBatchAt = Date.now();
         if (streams.length === 0) {
-          this.lastBatchAt = Date.now();
-          await sleep(Math.min(this.blockMs, 500));
+          await this.idle(Math.min(this.blockMs, 500));
           continue;
         }
         await this.ensureGroups(streams);
 
         if (Date.now() - this.lastClaimAt >= Math.min(this.claimIdleMs, 5000)) {
           this.lastClaimAt = Date.now();
-          for (const stream of streams) await this.reclaimPending(stream);
+          await this.sampleStreams(streams);
+          // Re-claims run as the stream's task, so they never overlap a batch of the same stream.
+          for (const stream of this.free(streams)) {
+            this.dispatch(stream, () => this.reclaimPending(stream));
+          }
         }
 
-        await this.readNew(streams);
-        this.lastBatchAt = Date.now();
+        const free = this.free(streams);
+        if (free.length === 0) {
+          await this.idle(this.blockMs); // every stream busy, or the concurrency limit reached
+          continue;
+        }
+        await this.readNew(free);
       } catch (err) {
         logger.error({ err, consumer: this.options.name }, 'Stream consumer iteration failed');
         await sleep(1000);
       }
     }
+  }
+
+  /** Streams with no task running, up to the concurrency limit. */
+  private free(streams: string[]): string[] {
+    const slots = this.concurrency - this.inFlight.size;
+    if (slots <= 0) return [];
+    return streams.filter((stream) => !this.inFlight.has(stream)).slice(0, slots);
+  }
+
+  /** Runs one task for a stream in the background; the loop moves on to the other streams. */
+  private dispatch(stream: string, task: () => Promise<void>): void {
+    const run = task()
+      .catch((err: unknown) => {
+        this.options.logger.error(
+          { err, consumer: this.options.name, stream },
+          'Stream task failed; its entries stay pending and are re-claimed',
+        );
+      })
+      .finally(() => {
+        this.inFlight.delete(stream);
+        this.taskStartedAt.delete(stream);
+        this.lastBatchAt = Date.now();
+        this.wake?.();
+      });
+    this.inFlight.set(stream, run);
+    this.taskStartedAt.set(stream, Date.now());
+  }
+
+  /** Waits up to `ms`, or until a stream task finishes or the consumer stops. */
+  private async idle(ms: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, ms);
+      function done() {
+        clearTimeout(timer);
+        resolve();
+      }
+      this.wake = done;
+    });
+    this.wake = null;
   }
 
   private async ensureGroups(streams: string[]): Promise<void> {
@@ -145,6 +217,9 @@ export class GroupConsumer {
 
   private async readNew(streams: string[]): Promise<void> {
     const { blockingRedis, group, consumer } = this.options;
+    // While other streams are busy, block only briefly: when one of them finishes it must be read
+    // again soon, and this read can't be woken early.
+    const blockMs = this.inFlight.size > 0 ? Math.min(this.blockMs, 100) : this.blockMs;
     const reply = (await blockingRedis.xreadgroup(
       'GROUP',
       group,
@@ -152,16 +227,53 @@ export class GroupConsumer {
       'COUNT',
       this.batchSize,
       'BLOCK',
-      this.blockMs,
+      blockMs,
       'STREAMS',
       ...streams,
       ...streams.map(() => '>'),
     )) as RawStreams | null;
     if (!reply) return;
 
-    // Streams are independent (different vehicles) — handle them concurrently; order within a
-    // stream is preserved because each stream's batch is handled sequentially.
-    await Promise.all(reply.map(([stream, raw]) => this.handleBatch(stream, toEntries(raw))));
+    // Streams are independent (different vehicles): each batch runs as its stream's task, so a
+    // slow partition holds up only itself. Order within a stream holds: a stream with a task
+    // running is not read again until it finishes.
+    for (const [stream, raw] of reply) {
+      const entries = toEntries(raw);
+      this.dispatch(stream, () => this.handleBatch(stream, entries));
+    }
+  }
+
+  /** Backlog gauges: undelivered (lag), unacked (pending) and stored (length) per stream. */
+  private async sampleStreams(streams: string[]): Promise<void> {
+    const { redis, group } = this.options;
+    try {
+      const pipeline = redis.pipeline();
+      for (const stream of streams) pipeline.xinfo('GROUPS', stream).xlen(stream);
+      const replies = (await pipeline.exec()) ?? [];
+      streams.forEach((stream, i) => {
+        const [groupsErr, groups] = replies[i * 2] ?? [];
+        const [lengthErr, length] = replies[i * 2 + 1] ?? [];
+        if (!lengthErr) streamLength.set({ stream }, Number(length));
+        const info = groupsErr ? undefined : groupInfo(groups, group);
+        if (!info) return;
+        streamPending.set({ stream, group }, info.pending);
+        // Redis reports no lag when it can't tell (entries deleted mid-stream): leave the last value.
+        if (info.lag !== null) streamLag.set({ stream, group }, info.lag);
+      });
+      for (const stream of this.sampled) {
+        if (streams.includes(stream)) continue;
+        streamLag.remove({ stream, group });
+        streamPending.remove({ stream, group });
+        streamLength.remove({ stream });
+      }
+      this.sampled.clear();
+      for (const stream of streams) this.sampled.add(stream);
+    } catch (err) {
+      this.options.logger.warn(
+        { err, consumer: this.options.name },
+        'Stream metrics sample failed',
+      );
+    }
   }
 
   /** Re-delivers entries stuck pending (failed batches, crashed/rebalanced consumers). */
@@ -195,7 +307,15 @@ export class GroupConsumer {
     // Entries trimmed away by MAXLEN can't be claimed but stay in the PEL forever — drop them.
     const claimedIds = new Set(claimed.map((entry) => entry.id));
     const vanished = retryIds.filter((id) => !claimedIds.has(id));
-    if (vanished.length > 0) await redis.xack(stream, group, ...vanished);
+    if (vanished.length > 0) {
+      await redis.xack(stream, group, ...vanished);
+      // These were never processed: the consumers fell further behind than MAXLEN allows.
+      streamTrimmed.inc({ stream, group }, vanished.length);
+      this.options.logger.error(
+        { consumer: this.options.name, stream, count: vanished.length },
+        'Pending stream entries were trimmed by MAXLEN before processing; they are lost',
+      );
+    }
 
     if (claimed.length > 0) {
       this.options.logger.warn(
@@ -257,11 +377,32 @@ export class GroupConsumer {
       new Date().toISOString(),
     );
     await redis.xack(stream, group, id);
+    streamDeadLettered.inc({ stream, group });
     this.options.logger.error(
       { consumer: this.options.name, stream, id, reason },
       'Stream entry moved to dead-letter stream',
     );
   }
+}
+
+/** One group's `pending` and `lag` from an XINFO GROUPS reply (flat field/value arrays). */
+export function groupInfo(
+  reply: unknown,
+  group: string,
+): { pending: number; lag: number | null } | undefined {
+  if (!Array.isArray(reply)) return undefined;
+  for (const flat of reply) {
+    if (!Array.isArray(flat)) continue;
+    const fields = new Map<string, unknown>();
+    for (let i = 0; i + 1 < flat.length; i += 2) fields.set(String(flat[i]), flat[i + 1]);
+    if (fields.get('name') !== group) continue;
+    const lag = fields.get('lag');
+    return {
+      pending: Number(fields.get('pending') ?? 0),
+      lag: lag === null || lag === undefined ? null : Number(lag),
+    };
+  }
+  return undefined;
 }
 
 function sleep(ms: number): Promise<void> {

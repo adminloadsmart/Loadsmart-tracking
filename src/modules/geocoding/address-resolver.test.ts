@@ -7,6 +7,7 @@ function fakeRedis() {
   return {
     mget: async (keys: string[]) => keys.map((k) => store.get(k) ?? null),
     set: async (k: string, v: string) => void store.set(k, v),
+    exists: async (k: string) => (store.has(k) ? 1 : 0),
   } as unknown as Redis;
 }
 
@@ -62,5 +63,66 @@ describe('stripPlusCode', () => {
     const reverse = vi.fn(async () => 'XR3H+5WQ, Bhattian, Ludhiana');
     const resolver = new AddressResolver(fakeRedis(), { name: 'fake', reverse });
     expect(await resolver.resolve([{ lat: 30.9, lng: 75.8 }])).toEqual(['Bhattian, Ludhiana']);
+  });
+});
+
+describe('AddressResolver limits', () => {
+  // Distinct ~110 m cells.
+  const cells = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ lat: 20 + i * 0.01, lng: 75 }));
+  const counting = (ms = 0) => {
+    const reverse = vi.fn(async (p: { lat: number }) => {
+      if (ms) await new Promise((resolve) => setTimeout(resolve, ms));
+      return `cell ${p.lat.toFixed(2)}`;
+    });
+    return { geocoder: { name: 'fake', reverse } as ReverseGeocoder, reverse };
+  };
+
+  it('a big list starts only maxLookupsPerRequest lookups; the rest is warmed for the next load', async () => {
+    const { geocoder, reverse } = counting();
+    const resolver = new AddressResolver(fakeRedis(), geocoder, undefined, {
+      maxLookupsPerRequest: 3,
+    });
+    const points = cells(10);
+    const first = await resolver.resolve(points);
+    expect(first.filter(Boolean)).toHaveLength(3);
+    expect(first.slice(3).every((a) => a === null)).toBe(true);
+    await vi.waitFor(() => expect(reverse).toHaveBeenCalledTimes(10));
+    await vi.waitFor(async () =>
+      expect((await resolver.resolve(points)).every(Boolean)).toBe(true),
+    );
+    expect(reverse).toHaveBeenCalledTimes(10); // the second load was served from cache
+  });
+
+  it('waits at most requestBudgetMs; a slow answer is still cached for the next request', async () => {
+    const { geocoder, reverse } = counting(80);
+    const resolver = new AddressResolver(fakeRedis(), geocoder, undefined, {
+      requestBudgetMs: 10,
+    });
+    const [point] = cells(1);
+    expect(await resolver.resolve([point])).toEqual([null]);
+    await vi.waitFor(async () => expect(await resolver.resolve([point])).toEqual(['cell 20.00']));
+    expect(reverse).toHaveBeenCalledTimes(1);
+  });
+
+  it('concurrent requests for the same cell share one Google call', async () => {
+    const { geocoder, reverse } = counting(20);
+    const resolver = new AddressResolver(fakeRedis(), geocoder);
+    const [point] = cells(1);
+    const answers = await Promise.all([1, 2, 3].map(() => resolver.resolve([point])));
+    expect(answers).toEqual([['cell 20.00'], ['cell 20.00'], ['cell 20.00']]);
+    expect(reverse).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops calling Google past maxLookupsPerMinute (null, not cached, retried later)', async () => {
+    const { geocoder, reverse } = counting();
+    const resolver = new AddressResolver(fakeRedis(), geocoder, undefined, {
+      maxLookupsPerMinute: 2,
+      maxLookupsPerRequest: 5,
+      warmQueueMax: 0,
+    });
+    const result = await resolver.resolve(cells(5));
+    expect(result.filter(Boolean)).toHaveLength(2);
+    expect(reverse).toHaveBeenCalledTimes(2);
   });
 });

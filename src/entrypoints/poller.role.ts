@@ -27,6 +27,7 @@ import {
 import { createPointsModule } from '../modules/points';
 import { createTripsModule } from '../modules/trips';
 import { RoleStarter } from '../shared/lifecycle/role-runner';
+import { checkPartitionCount } from '../streams/partition-layout';
 
 interface ProviderHealth {
   lastSuccessAt: string | null;
@@ -64,6 +65,7 @@ export const startPollerRole: RoleStarter = async ({ dataSource, health, logger 
     partitions: env.pointPartitions,
     maxLen: env.pointStreamMaxLen,
   });
+  await checkPartitionCount(redis, env.pointPartitions, logger);
   const { activeTrips } = createTripsModule(dataSource, redis, logger);
 
   const workers: Worker[] = [];

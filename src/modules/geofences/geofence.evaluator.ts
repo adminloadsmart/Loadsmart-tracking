@@ -1,7 +1,7 @@
 import type { MainGeofence, MainTripPoints } from '../main-data';
 import { AFTER_DELIVERY_STATUSES, IN_TRANSIT_STATUS, isApproachStatus } from '../trips/trip-state';
 import { haversineMeters } from '../processing/geo';
-import { containsPoint } from './geofence.geo';
+import { containsPoint, mayContain } from './geofence.geo';
 
 /** One accepted, non-late fix as the geofence check sees it (device time). */
 export interface GeofenceFix {
@@ -74,8 +74,20 @@ export interface GeofenceDwell {
   tripId: string | null;
 }
 
-/** Per vehicle: geofence id → membership. */
+/** Per vehicle: geofence id → membership. Only visits in progress (inside) are kept: a geofence
+ *  with no entry is outside, or not yet seen (see VehicleGeofenceMeta). State written before that
+ *  also holds outside entries; they read the same and are dropped as the vehicle is evaluated. */
 export type VehicleGeofenceState = Record<string, GeofenceMembership>;
+
+/** Per vehicle, beside the memberships. */
+export interface VehicleGeofenceMeta {
+  /** Device time of the newest evaluated fix: older ones are late / duplicates and skipped. */
+  lastT: number | null;
+  /** When the geofence list of the last evaluation was loaded: every geofence created before it
+   *  was evaluated then, so having no entry means it is known to be outside. One created later
+   *  is still unseen — its first sighting raises no event. */
+  listAt: number | null;
+}
 
 export interface GeofenceTransition {
   geofence: MainGeofence;
@@ -180,27 +192,51 @@ export function evaluateVehicle(
   geofences: MainGeofence[],
   stored: VehicleGeofenceState,
   options: DwellOptions = DEFAULT_DWELL_OPTIONS,
+  meta: Partial<VehicleGeofenceMeta> = {},
+  /** When `geofences` was loaded — stored as the next evaluation's `meta.listAt`. */
+  listAt: number | null = null,
 ): {
   transitions: GeofenceTransition[];
   dwells: GeofenceDwell[];
+  /** Visits in progress only. */
   state: VehicleGeofenceState;
+  /** Memberships to write. */
   changed: string[];
+  /** Entries to delete: visits that ended, and outside entries of the old state format. */
+  removed: string[];
+  meta: VehicleGeofenceMeta;
 } {
-  const state: VehicleGeofenceState = { ...stored };
+  const state: VehicleGeofenceState = {};
+  let lastT = meta.lastT ?? null;
+  for (const [id, membership] of Object.entries(stored)) {
+    if (membership.inside) state[id] = membership;
+    // The old format kept a per-geofence lastT: the newest of them is the vehicle's.
+    lastT = lastT === null ? membership.lastT : Math.max(lastT, membership.lastT);
+  }
   const transitions: GeofenceTransition[] = [];
   const dwells: GeofenceDwell[] = [];
   const changed = new Set<string>();
+  const removed = new Set(Object.keys(stored).filter((id) => !stored[id].inside));
+  // Outside geofences known from before: old-format entries, or created before the last list.
+  const knownOutside = (geofence: MainGeofence) =>
+    geofence.id in stored || (meta.listAt != null && (geofence.createdAtMs ?? 0) < meta.listAt);
+  let evaluated = false;
 
   for (const fix of fixes) {
+    if (lastT !== null && fix.t <= lastT) continue;
     for (const geofence of geofences) {
       if (!appliesTo(geofence, vehicleId)) continue;
       const previous = state[geofence.id];
-      if (previous && previous.lastT >= fix.t) continue;
-      const inside = containsPoint(geofence, fix, options.defaultRadiusM);
-      changed.add(geofence.id);
+      const wasInside = previous?.inside ?? false;
+      // Cheap bounding-box test first: most geofences are nowhere near the truck.
+      const inside =
+        (wasInside || mayContain(geofence, fix, options.defaultRadiusM)) &&
+        containsPoint(geofence, fix, options.defaultRadiusM);
       if (!inside) {
-        state[geofence.id] = { inside: false, enteredAt: null, lastT: fix.t };
-        if (previous?.inside) {
+        if (wasInside) {
+          delete state[geofence.id];
+          changed.delete(geofence.id);
+          removed.add(geofence.id);
           transitions.push({
             geofence,
             event: 'exit',
@@ -212,7 +248,6 @@ export function evaluateVehicle(
         }
         continue;
       }
-      const wasInside = previous?.inside ?? false;
       const stopped = isStopped(fix, previous, options);
       const next: GeofenceMembership = {
         inside: true,
@@ -227,7 +262,10 @@ export function evaluateVehicle(
         tripId: fix.tripId,
       };
       state[geofence.id] = next;
-      if (previous && !wasInside) {
+      changed.add(geofence.id);
+      removed.delete(geofence.id);
+      // The first sighting of a geofence records where the truck is but is no "enter".
+      if (!wasInside && (evaluated || knownOutside(geofence))) {
         transitions.push({
           geofence,
           event: 'enter',
@@ -239,8 +277,17 @@ export function evaluateVehicle(
       }
       dwells.push(...reachedDwells(geofence, next, fix.t, options));
     }
+    lastT = fix.t;
+    evaluated = true;
   }
-  return { transitions, dwells, state, changed: [...changed] };
+  return {
+    transitions,
+    dwells,
+    state,
+    changed: [...changed],
+    removed: [...removed],
+    meta: { lastT, listAt: evaluated ? listAt : (meta.listAt ?? null) },
+  };
 }
 
 /**

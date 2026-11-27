@@ -5,6 +5,7 @@ import {
   isTrackingSource,
   type ActiveTripIndex,
 } from '../trips';
+import { Limiter } from '../../shared/utils/concurrency';
 import { TripRepository } from './trip.repository';
 
 export interface ResolvedTrip {
@@ -33,6 +34,11 @@ const START_GRACE_MS = 10 * 60_000;
 // have none for these points either — skip the DB fallback (a phone left on between trips would
 // otherwise query Postgres every 15s).
 const LIVE_WINDOW_MS = 2 * 60_000;
+// The Postgres fallback per process: after a network blip thousands of phones flush their offline
+// batches at once. Past this many waiting, a batch is refused at once (ack `unavailable`: the app
+// keeps the points and retries later) instead of queueing on the pool until the acks time out.
+const FALLBACK_CONCURRENCY = 8;
+const FALLBACK_MAX_QUEUE = 32;
 
 /**
  * Maps a driver's points to the trip (and so the vehicle and tenant) they belong to.
@@ -44,6 +50,11 @@ export class TripResolver {
   constructor(
     private readonly index: ActiveTripIndex,
     private readonly repository: TripRepository,
+    private readonly fallbackLimiter = new Limiter(
+      'driver trip fallback',
+      FALLBACK_CONCURRENCY,
+      FALLBACK_MAX_QUEUE,
+    ),
   ) {}
 
   async resolve(
@@ -106,10 +117,12 @@ export class TripResolver {
     });
 
     if (fallback.length > 0) {
-      const found = await this.repository.findTripsForDriverAt(
-        driverId,
-        tenantIds,
-        fallback.map((i) => recordedAts[i]),
+      const found = await this.fallbackLimiter.run(() =>
+        this.repository.findTripsForDriverAt(
+          driverId,
+          tenantIds,
+          fallback.map((i) => recordedAts[i]),
+        ),
       );
       const byTime = new Map(found.map((trip) => [trip.recordedAt, trip]));
       for (const i of fallback) {

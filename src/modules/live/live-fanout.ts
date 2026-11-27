@@ -17,6 +17,8 @@ const updatesEmitted = new Counter({
   registers: [metricsRegistry],
 });
 
+const PRUNE_EVERY_MS = 60_000;
+
 /**
  * Subscribes to the processors' live-positions channel and pushes `position` events to the /live
  * rooms each update belongs to (its tenant's fleet room, the vehicle room, the trip room).
@@ -27,6 +29,7 @@ const updatesEmitted = new Counter({
  */
 export class LiveFanout {
   private readonly lastEmitAt = new Map<string, number>();
+  private lastPruneAt = 0;
   private readonly pending = new Map<string, LatestPosition>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
 
@@ -67,6 +70,16 @@ export class LiveFanout {
       .catch(() => undefined);
   }
 
+  /** An emit time older than the interval throttles nothing (same as none): drop those now and
+   *  then, so the map holds only vehicles that reported recently, not every vehicle ever seen. */
+  private pruneEmitTimes(now: number): void {
+    if (now - this.lastPruneAt < PRUNE_EVERY_MS) return;
+    this.lastPruneAt = now;
+    for (const [vehicleId, at] of this.lastEmitAt) {
+      if (now - at >= this.minIntervalMs) this.lastEmitAt.delete(vehicleId);
+    }
+  }
+
   private offer(position: LatestPosition): void {
     const { vehicleId } = position;
     const current = this.pending.get(vehicleId);
@@ -95,7 +108,9 @@ export class LiveFanout {
   }
 
   private emit(position: LatestPosition): void {
-    this.lastEmitAt.set(position.vehicleId, Date.now());
+    const now = Date.now();
+    this.lastEmitAt.set(position.vehicleId, now);
+    this.pruneEmitTimes(now);
     const rooms = [
       ALL_TENANTS_ROOM,
       tenantRoom(position.tenantId),

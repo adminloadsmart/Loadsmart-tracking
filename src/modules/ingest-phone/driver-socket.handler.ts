@@ -11,6 +11,7 @@ import {
   toNormalizedPoint,
 } from './driver-point.contract';
 import { TripResolver } from './trip-resolver';
+import { LimiterBusyError } from '../../shared/utils/concurrency';
 
 const driverSockets = new Gauge({
   name: 'tracking_driver_sockets',
@@ -189,7 +190,12 @@ async function ingest(
     }
     return { ok: true, accepted: normalized.length, noTrip };
   } catch (err) {
-    log.error({ err, count: points.length }, 'Failed to ingest driver points');
+    // Shed under a reconnect storm (the Postgres fallback is full): expected, the app retries.
+    if (err instanceof LimiterBusyError) {
+      log.warn({ count: points.length }, 'Driver points refused: trip fallback busy, app retries');
+    } else {
+      log.error({ err, count: points.length }, 'Failed to ingest driver points');
+    }
     return { ok: false, error: 'unavailable' };
   }
 }

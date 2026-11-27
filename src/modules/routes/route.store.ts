@@ -1,5 +1,6 @@
 import { RoutesRepository } from './routes.repository';
 import { TripRoutes } from './trip-routes';
+import { LruMap } from '../../shared/utils/lru';
 
 const TTL_MS = 60_000;
 
@@ -9,7 +10,7 @@ const TTL_MS = 60_000;
  * the rules within that.
  */
 export class RouteStore {
-  private readonly cache = new Map<string, { at: number; routes: TripRoutes | null }>();
+  private readonly cache = new LruMap<string, { at: number; routes: TripRoutes | null }>(20_000);
 
   constructor(private readonly repository: RoutesRepository) {}
 
@@ -20,8 +21,15 @@ export class RouteStore {
     });
     if (stale.length > 0) {
       const rows = await this.repository.routesFor(stale);
+      // Grouped once (filtering the rows per trip was O(trips × rows)).
+      const byTrip = new Map<string, typeof rows>();
+      for (const row of rows) {
+        const list = byTrip.get(row.trip_id);
+        if (list) list.push(row);
+        else byTrip.set(row.trip_id, [row]);
+      }
       for (const id of stale) {
-        const tripRows = rows.filter((row) => row.trip_id === id);
+        const tripRows = byTrip.get(id) ?? [];
         this.cache.set(id, {
           at: nowMs,
           routes: tripRows.length ? new TripRoutes(tripRows) : null,

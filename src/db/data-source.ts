@@ -27,6 +27,9 @@ export const AppDataSource = new DataSource({
   extra: {
     // Bounded pool — the hot ingest paths never touch Postgres synchronously (they XADD to Redis),
     // so a small pool per process is enough and protects the DB as roles scale out horizontally.
-    max: 10,
+    // DB_POOL_MAX sizes it per deployment (shared with the main backend's database: keep the sum
+    // over all pods well under its max_connections).
+    max: env.dbPoolMax,
+    connectionTimeoutMillis: env.dbConnectTimeoutMs,
   },
 });

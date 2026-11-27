@@ -24,6 +24,7 @@ function setup(opts: { row: Partial<SimTripRow> | null; lastSeenMinAgo: number; 
     hget: vi.fn(async () => opts.status ?? 'in_transit_unloading'),
     zrem: vi.fn(async (_k: string, member: string) => void removed.push(member)),
     hset: vi.fn(async () => 1),
+    eval: vi.fn(async () => 1),
   };
   const repository = {
     loadVehicleProfiles: vi.fn(async () => new Map([[VEHICLE, { bodyType: 'Tanker' }]])),

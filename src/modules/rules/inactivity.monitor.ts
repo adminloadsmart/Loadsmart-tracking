@@ -24,6 +24,18 @@ const SOURCES: Array<{
 ];
 const MIN_THRESHOLD_MIN = 30; // the smallest possible threshold (tanker rule) bounds the scan
 const SCAN_LIMIT = 2000;
+/** Silence first noticed this late (a backlog, or the scheduler down for a day) is not alerted:
+ *  the vehicle just stops being watched until its next packet — no burst of day-old alerts. */
+const GIVE_UP_AFTER_MS = 24 * 60 * 60_000;
+
+// Stop watching a member only if it hasn't reported since the scan read it: a packet that landed
+// in between (processor ZADD GT) moved its score forward and must keep it watched.
+const UNWATCH_IF_UNCHANGED_SCRIPT = `
+local score = redis.call('zscore', KEYS[1], ARGV[1])
+if score and tonumber(score) <= tonumber(ARGV[2]) then
+  return redis.call('zrem', KEYS[1], ARGV[1])
+end
+return 0`;
 
 /** The one SIM-trip lookup the SIM silence rule needs (SimTripRepository satisfies it). */
 export interface SimTripLookup {
@@ -103,7 +115,16 @@ export class InactivityMonitor {
     member: string,
   ): Promise<AlertChange[]> {
     const flagKey = inactiveFlagKey(vehicleId, source);
-    if (await this.redis.exists(flagKey)) return []; // already inactive
+    // Already alerted. Out of the scan set, so silent vehicles can never fill SCAN_LIMIT and starve
+    // new ones; the next packet re-adds it (ZADD GT) in the MULTI that clears the flag.
+    if (await this.redis.exists(flagKey)) {
+      await this.unwatch(source, member, lastSeenMs);
+      return [];
+    }
+    if (nowMs - lastSeenMs > GIVE_UP_AFTER_MS) {
+      await this.unwatch(source, member, lastSeenMs);
+      return [];
+    }
 
     let tripId: string | null = await this.redis.get(vehicleActiveTripKey(vehicleId));
     // An assigned or delivered load is indexed only for the geofence check (the drive to the
@@ -186,6 +207,11 @@ export class InactivityMonitor {
       alertId: alert,
       startedAt: String(lastSeenMs),
     });
+    await this.unwatch(source, member, lastSeenMs);
     return changes;
+  }
+
+  private async unwatch(source: PointSource, member: string, lastSeenMs: number): Promise<void> {
+    await this.redis.eval(UNWATCH_IF_UNCHANGED_SCRIPT, 1, lastSeenKey(source), member, lastSeenMs);
   }
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import type Redis from 'ioredis';
 import { DataSource } from 'typeorm';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   infraAvailable,
   silentLogger,
@@ -196,6 +196,50 @@ describe.skipIf(!available)('TripWatcher + main-data (real Redis + Postgres)', (
     const result = await trips.watcher.rebuild();
     expect(result.removed).toBe(1);
     expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBe(load.loadId);
+  });
+
+  it('a load re-read in the overlap window, unchanged, is not written again', async () => {
+    const load = await seedLoad(ds, { tenantId: TENANT });
+    const batch = vi.spyOn(trips.activeTrips, 'batch');
+    try {
+      await trips.watcher.poll();
+      expect(batch).toHaveBeenCalledTimes(1);
+      await trips.watcher.poll(); // same load, same updated_at, still inside the overlap
+      expect(batch).toHaveBeenCalledTimes(1);
+      await updateLoad(ds, load.loadId, { status: 'in_transit_unloading' });
+      await trips.watcher.poll();
+      expect(batch).toHaveBeenCalledTimes(2);
+      expect(await redis.hget(tripRefKey(load.loadId), 'loadStatus')).toBe('in_transit_unloading');
+    } finally {
+      batch.mockRestore();
+    }
+  });
+
+  it('a poll during a rebuild waits for it, so the rebuild never deletes what the poll indexed', async () => {
+    const indexedLoads = trips.mainData.indexedLoads.bind(trips.mainData);
+    let snapshotTaken!: () => void;
+    const taken = new Promise<void>((resolve) => (snapshotTaken = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const spy = vi.spyOn(trips.mainData, 'indexedLoads').mockImplementation(async () => {
+      const snapshot = await indexedLoads();
+      snapshotTaken();
+      await gate;
+      return snapshot;
+    });
+    try {
+      const rebuilding = trips.watcher.rebuild();
+      await taken;
+      const load = await seedLoad(ds, { tenantId: TENANT }); // after the rebuild's snapshot
+      const polling = trips.watcher.poll();
+      // Unserialized, the poll would finish now and the rebuild then delete its keys.
+      await Promise.race([polling, new Promise((resolve) => setTimeout(resolve, 300))]);
+      release();
+      await Promise.all([rebuilding, polling]);
+      expect(await redis.get(vehicleActiveTripKey(load.vehicleId!))).toBe(load.loadId);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('main-data: truck type body type (tanker), promised delivery at 23:59 IST', async () => {

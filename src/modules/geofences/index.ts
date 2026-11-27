@@ -19,6 +19,7 @@ import {
   hasPendingDwell,
   tripEventFor,
   tripPlaceOf,
+  VehicleGeofenceMeta,
   VehicleGeofenceState,
 } from './geofence.evaluator';
 
@@ -33,9 +34,13 @@ import {
   GeofenceEventRecord,
   GeofencesRepository,
 } from './geofences.repository';
+import { LruMap } from '../../shared/utils/lru';
 
-/** Per-vehicle geofence state: one hash per vehicle, one field (JSON membership) per geofence. */
+/** Per-vehicle geofence state: one hash per vehicle, one field (JSON membership) per geofence the
+ *  truck is inside, plus META_FIELD. */
 export const geofenceStateKey = (vehicleId: string) => `trk:geofence:${vehicleId}`;
+/** The state hash's VehicleGeofenceMeta field (geofence ids are uuids, so it never collides). */
+const META_FIELD = '_meta';
 /** Vehicles with a visit still waiting for a dwell milestone (vehicleId → tenantId): what the
  *  time-driven check walks, so it never scans every vehicle. */
 export const GEOFENCE_DWELLING_KEY = 'trk:geofence:dwelling';
@@ -81,18 +86,25 @@ export function createGeofencesModule(deps: {
   const staleMs = deps.staleMs ?? DEFAULT_STALE_MS;
   const mainData = new MainDataRepository(deps.dataSource);
   const repository = new GeofencesRepository(deps.dataSource);
-  const geofenceCache = new Map<string, { at: number; value: MainGeofence[] }>();
-  const tripPointsCache = new Map<string, { at: number; value: MainTripPoints | null }>();
-  // Created trips already moved past their first ping (so it is written once, not per batch).
-  const pinged = new Set<string>();
+  // Bounded caches: keyed by every tenant / trip the process ever sees.
+  const geofenceCache = new LruMap<string, { at: number; value: MainGeofence[] }>(2_000);
+  const tripPointsCache = new LruMap<string, { at: number; value: MainTripPoints | null }>(20_000);
+  // Created trips already moved past their first ping (so it is written once, not per batch). An
+  // evicted trip is stepped again, which changes nothing: the step only moves forward (`from`).
+  const pinged = new LruMap<string, true>(50_000);
 
-  const geofencesFor = async (tenantId: string, nowMs: number) => {
+  /** The tenant's geofences, and when that list was loaded (taken before the query, so a
+   *  geofence created after it is never taken to have been in it). */
+  const geofenceListFor = async (tenantId: string, nowMs: number) => {
     const cached = geofenceCache.get(tenantId);
-    if (cached && nowMs - cached.at < GEOFENCES_TTL_MS) return cached.value;
-    const value = await mainData.geofences(tenantId);
-    geofenceCache.set(tenantId, { at: nowMs, value });
-    return value;
+    if (cached && nowMs - cached.at < GEOFENCES_TTL_MS) return cached;
+    const at = Date.now();
+    const entry = { at, value: await mainData.geofences(tenantId) };
+    geofenceCache.set(tenantId, entry);
+    return entry;
   };
+  const geofencesFor = async (tenantId: string, nowMs: number) =>
+    (await geofenceListFor(tenantId, nowMs)).value;
 
   const tripPointsFor = async (tripIds: string[], nowMs: number) => {
     const missing = tripIds.filter((id) => {
@@ -116,10 +128,12 @@ export function createGeofencesModule(deps: {
         const [err, value] = results[i] ?? [];
         if (err) throw err;
         const state: VehicleGeofenceState = {};
-        for (const [geofenceId, json] of Object.entries((value as Record<string, string>) ?? {})) {
-          state[geofenceId] = JSON.parse(json);
+        let meta: Partial<VehicleGeofenceMeta> = {};
+        for (const [field, json] of Object.entries((value as Record<string, string>) ?? {})) {
+          if (field === META_FIELD) meta = JSON.parse(json);
+          else state[field] = JSON.parse(json);
         }
-        return [id, state];
+        return [id, { state, meta }];
       }),
     );
   };
@@ -254,7 +268,7 @@ export function createGeofencesModule(deps: {
     for (const [tripId, t] of fixesByTrip) {
       const trip = points.get(tripId);
       if (!trip?.createdTrip || pinged.has(tripId)) continue;
-      pinged.add(tripId);
+      pinged.set(tripId, true);
       steps.push({
         tripId,
         to: trip.pickupLocated ? 'heading_to_pickup' : 'in_transit',
@@ -309,19 +323,22 @@ export function createGeofencesModule(deps: {
     const dwells: Array<WithVehicle<GeofenceDwell>> = [];
     const writes = new Map<
       string,
-      { fields: Record<string, string>; tenantId: string; dwelling: boolean }
+      { fields: Record<string, string>; removed: string[]; tenantId: string; dwelling: boolean }
     >();
 
     for (const [vehicleId, { tenantId, fixes }] of byVehicle) {
-      const geofences = await geofencesFor(tenantId, nowMs);
+      const { value: geofences, at: listAt } = await geofenceListFor(tenantId, nowMs);
       if (geofences.length === 0) continue;
       fixes.sort((a, b) => a.t - b.t);
+      const previous = stored.get(vehicleId) ?? { state: {}, meta: {} };
       const result = evaluateVehicle(
         vehicleId,
         fixes,
         geofences,
-        stored.get(vehicleId) ?? {},
+        previous.state,
         options,
+        previous.meta,
+        listAt,
       );
       for (const transition of result.transitions) {
         transitions.push({ vehicleId, tenantId, ...transition });
@@ -339,11 +356,18 @@ export function createGeofencesModule(deps: {
           });
         }
       }
-      if (result.changed.length > 0) {
+      const metaMoved =
+        result.meta.lastT !== (previous.meta.lastT ?? null) ||
+        result.meta.listAt !== (previous.meta.listAt ?? null);
+      if (result.changed.length > 0 || result.removed.length > 0 || metaMoved) {
         writes.set(vehicleId, {
-          fields: Object.fromEntries(
-            result.changed.map((id) => [id, JSON.stringify(result.state[id])]),
-          ),
+          fields: {
+            ...Object.fromEntries(
+              result.changed.map((id) => [id, JSON.stringify(result.state[id])]),
+            ),
+            [META_FIELD]: JSON.stringify(result.meta),
+          },
+          removed: result.removed,
           tenantId,
           dwelling: Object.values(result.state).some(hasPendingDwell),
         });
@@ -372,8 +396,9 @@ export function createGeofencesModule(deps: {
       if (!writes || writes.size === 0) return {};
       return {
         writeState: (multi) => {
-          for (const [vehicleId, { fields, tenantId, dwelling }] of writes) {
+          for (const [vehicleId, { fields, removed, tenantId, dwelling }] of writes) {
             multi.hset(geofenceStateKey(vehicleId), fields);
+            if (removed.length > 0) multi.hdel(geofenceStateKey(vehicleId), ...removed);
             if (dwelling) multi.hset(GEOFENCE_DWELLING_KEY, vehicleId, tenantId);
             else multi.hdel(GEOFENCE_DWELLING_KEY, vehicleId);
           }
@@ -398,7 +423,7 @@ export function createGeofencesModule(deps: {
 
     for (const vehicleId of vehicleIds) {
       const tenantId = dwelling[vehicleId];
-      const state = stored.get(vehicleId) ?? {};
+      const state = stored.get(vehicleId)?.state ?? {};
       const geofences = await geofencesFor(tenantId, nowMs);
       const result = advanceDwell(geofences, state, nowMs, staleMs, options);
       for (const dwell of result.dwells) dwells.push({ vehicleId, tenantId, ...dwell });

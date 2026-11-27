@@ -95,7 +95,8 @@ export const MAIN_SCHEMA_SQL = `
     shape text NOT NULL DEFAULT 'circle', radius_m integer, polygon jsonb,
     applies_to_all_vehicles boolean NOT NULL DEFAULT true, loading_point_id uuid,
     customer_delivery_point_id uuid, is_active boolean NOT NULL DEFAULT true,
-    deleted_at timestamptz);
+    created_at timestamptz NOT NULL DEFAULT now(), deleted_at timestamptz);
+  ALTER TABLE tracking.geofences ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
   CREATE TABLE IF NOT EXISTS tracking.geofence_vehicles (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), geofence_id uuid NOT NULL, vehicle_id uuid NOT NULL);
   CREATE TABLE IF NOT EXISTS tracking.geofence_events (

@@ -1,7 +1,8 @@
 import type Redis from 'ioredis';
 import type { Logger } from 'pino';
 import type { MainDataRepository, MainLoad } from '../main-data';
-import { ActiveTripIndex } from './active-trip-index';
+import { SerialQueue } from '../../shared/utils/concurrency';
+import { ActiveTripIndex, IndexedRef } from './active-trip-index';
 import { isAfterDelivery, isIndexed } from './trip-state';
 
 const CURSOR_KEY = 'trk:trips:cursor';
@@ -24,6 +25,13 @@ const OVERLAP_MS = 30_000;
  * updated_at.
  */
 export class TripWatcher {
+  /** poll and rebuild never overlap: a rebuild works from a snapshot of the loads and deletes
+   *  every index key not in it, so a poll landing in between would be undone. */
+  private readonly serial = new SerialQueue();
+  /** What each load was last applied as (`updatedAt|indexed`), kept for the overlap window: the
+   *  overlap re-reads the same unchanged loads on every poll, ~6 times each. */
+  private readonly applied = new Map<string, { as: string; atMs: number }>();
+
   constructor(
     private readonly mainData: MainDataRepository,
     private readonly index: ActiveTripIndex,
@@ -35,6 +43,11 @@ export class TripWatcher {
   /** Applies every load, and every trip created from the tracking screen, changed since its
    *  cursor, page by page, then advances that cursor. */
   async poll(): Promise<number> {
+    return this.serial.run(() => this.pollAll());
+  }
+
+  private async pollAll(): Promise<number> {
+    this.forgetApplied(Date.now());
     const loads = await this.pollFeed(CURSOR_KEY, (since, after) =>
       this.mainData.loadsChangedSince(since, this.pageSize, after),
     );
@@ -54,7 +67,7 @@ export class TripWatcher {
     let applied = 0;
     for (;;) {
       const loads = await page(since, after);
-      for (const load of loads) await this.apply(load);
+      await this.applyPage(loads);
       applied += loads.length;
       after = loads.at(-1) ?? after;
       if (loads.length < this.pageSize) break;
@@ -67,6 +80,12 @@ export class TripWatcher {
   /** Restores the index from the loads table and the active created trips (on takeover /
    *  periodically). */
   async rebuild(): Promise<{ set: number; removed: number }> {
+    return this.serial.run(() => this.rebuildAll());
+  }
+
+  private async rebuildAll(): Promise<{ set: number; removed: number }> {
+    // The index is rewritten whole: every load must be re-applied by the next polls.
+    this.applied.clear();
     const [loads, created] = await Promise.all([
       this.mainData.indexedLoads(),
       this.mainData.activeCreatedTrips(),
@@ -82,23 +101,52 @@ export class TripWatcher {
     return result;
   }
 
-  private async apply(load: MainLoad): Promise<void> {
-    const next = refs(load);
-    const previous = await this.index.getRef(load.id);
-    // Reassigned mid-trip, or its vehicle's GPS device changed: release the previous ones first.
-    if (
-      previous &&
-      (previous.vehicleId !== next.vehicleId ||
-        previous.driverId !== next.driverId ||
-        previous.deviceImei !== next.deviceImei)
-    ) {
-      await this.index.deactivate({ ...next, ...previous }, { endTrip: false });
+  /** One page: refs read in one round trip, every write in one pipeline (in load order, so two
+   *  loads of the same truck in a page still resolve as one after the other would). */
+  private async applyPage(loads: MainLoad[]): Promise<void> {
+    const nowMs = Date.now();
+    const due = loads.flatMap((load) => {
+      const indexed = isIndexed(load, nowMs);
+      // isIndexed depends on the clock too, so the outcome is part of what was applied.
+      const as = `${load.updatedAt.getTime()}|${indexed}`;
+      return this.applied.get(load.id)?.as === as ? [] : [{ load, indexed, as }];
+    });
+    if (due.length === 0) return;
+    const previous = await this.index.getRefs(due.map(({ load }) => load.id));
+    const batch = this.index.batch();
+    for (const { load, indexed } of due) apply(batch, load, indexed, previous.get(load.id));
+    await batch.exec();
+    for (const { load, as } of due) this.applied.set(load.id, { as, atMs: nowMs });
+  }
+
+  private forgetApplied(nowMs: number): void {
+    // Kept a little past the overlap, so a load re-read in the overlap is always still here.
+    for (const [id, { atMs }] of this.applied) {
+      if (nowMs - atMs > 2 * OVERLAP_MS) this.applied.delete(id);
     }
-    if (isIndexed(load, Date.now())) {
-      await this.index.activate(next, { ifFree: isAfterDelivery(load.status) });
-    } else if (previous) {
-      await this.index.deactivate({ ...next, ...previous });
-    }
+  }
+}
+
+function apply(
+  batch: ReturnType<ActiveTripIndex['batch']>,
+  load: MainLoad,
+  indexed: boolean,
+  previous: IndexedRef | undefined,
+): void {
+  const next = refs(load);
+  // Reassigned mid-trip, or its vehicle's GPS device changed: release the previous ones first.
+  if (
+    previous &&
+    (previous.vehicleId !== next.vehicleId ||
+      previous.driverId !== next.driverId ||
+      previous.deviceImei !== next.deviceImei)
+  ) {
+    batch.deactivate({ ...next, ...previous }, { endTrip: false });
+  }
+  if (indexed) {
+    batch.activate(next, { ifFree: isAfterDelivery(load.status) });
+  } else if (previous) {
+    batch.deactivate({ ...next, ...previous });
   }
 }
 

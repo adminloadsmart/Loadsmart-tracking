@@ -42,8 +42,22 @@ export const env = {
   // Point stream partitions (docs/ROADMAP.md §7). Fixed for the life of the stream — changing it
   // needs a drain-and-rehash, so it's sized generously up front.
   pointPartitions: numberWithDefault('POINT_PARTITIONS', 16),
-  // Approximate per-partition stream cap (XADD MAXLEN ~) — ~48h of replay at 2k vehicles.
-  pointStreamMaxLen: numberWithDefault('POINT_STREAM_MAXLEN', 1_500_000),
+  // Approximate per-partition stream cap (XADD MAXLEN ~). Entries are ~400 B, so the whole stream
+  // holds at most partitions × this × 400 B of Redis memory (16 × 200k ≈ 1.3 GB). 200k is ~4 h of
+  // a partition's share of 200 points/s: a processor outage longer than that loses the oldest
+  // points (tracking_stream_trimmed_total), so alert on tracking_stream_lag well before it.
+  pointStreamMaxLen: numberWithDefault('POINT_STREAM_MAXLEN', 200_000),
+  // Point partitions one processor handles at once (one batch per partition at a time). Each batch
+  // holds Postgres connections, so keep it in step with DB_POOL_MAX.
+  processorConcurrency: numberWithDefault('PROCESSOR_CONCURRENCY', 16),
+  // Postgres pool per process (every role in the process shares it). Size it per deployment:
+  // processor pods run up to one batch per owned partition at once, api pods serve the heavy reads.
+  dbPoolMax: numberWithDefault('DB_POOL_MAX', 10),
+  // How long a query may wait for a free pool connection before failing (0 = wait forever).
+  dbConnectTimeoutMs: numberWithDefault('DB_CONNECT_TIMEOUT_MS', 0),
+  // Server-side statement_timeout for the service's queries (0 = none). Applied by the running
+  // service only, never by the migration CLI, so long Timescale migrations are not cut off.
+  dbStatementTimeoutMs: numberWithDefault('DB_STATEMENT_TIMEOUT_MS', 0),
   // Phone GPS (docs/contracts/driver-socket.md): fixes worse than this are rejected, and a socket
   // may send at most one `loc` per PHONE_MIN_INTERVAL_MS (the app's cadence is 15s).
   phoneMaxAccuracyM: numberWithDefault('PHONE_MAX_ACCURACY_M', 50),
@@ -61,6 +75,11 @@ export const env = {
   // Google Routes + Geocoding (planned routes for DELAY/DEV rules). Optional: without it trips get
   // no planned route and the route-based rules stay inactive.
   googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || undefined,
+  // Reverse geocoding (addresses on positions and alerts, cached per ~110 m cell). A list request
+  // starts at most this many Google lookups and leaves the rest to background warming…
+  geocodeMaxLookupsPerRequest: numberWithDefault('GEOCODE_MAX_LOOKUPS_PER_REQUEST', 25),
+  // …and each process makes at most this many per minute in all (0 = no limit). ~$5 / 1000.
+  geocodeMaxLookupsPerMinute: numberWithDefault('GEOCODE_MAX_LOOKUPS_PER_MINUTE', 300),
   // Planned road routes (Google Routes API, every 30 s for trips without one). Off by default since
   // 25 Nov: the tracking screen no longer draws them. Turning it off also leaves the DELAY and
   // route-deviation rules without a route. Geocoding and reverse geocoding are not affected.

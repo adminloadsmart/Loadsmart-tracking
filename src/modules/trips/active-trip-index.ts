@@ -43,6 +43,10 @@ if redis.call('get', KEYS[3]) == ARGV[3] then
 end
 return 0`;
 
+/** Every key the index owns: vehicle / driver → trip, trip ref hashes, the device registry. */
+// Same keys the per-kind SCAN patterns matched (glob `*` = any run of characters, `:` included).
+const INDEX_KEY_RE = /^trk:(?:(?:veh|drv):.*:active_trip|trip:.*:ref|ontrip-devices:.*)$/;
+
 export const vehicleActiveTripKey = (vehicleId: string) => `trk:veh:${vehicleId}:active_trip`;
 export const driverActiveTripKey = (driverId: string) => `trk:drv:${driverId}:active_trip`;
 /** Hash {tenantId, vehicleId, driverId} for an active trip — what ingest needs to stamp a point. */
@@ -120,19 +124,39 @@ export class ActiveTripIndex {
   }
 
   /** The vehicle/driver/device a trip is currently indexed under (to release on reassignment). */
-  async getRef(tripId: string): Promise<{
-    tenantId: string;
-    vehicleId: string | null;
-    driverId: string | null;
-    deviceImei: string | null;
-  } | null> {
-    const ref = await this.redis.hgetall(tripRefKey(tripId));
-    if (!ref.tenantId) return null;
+  async getRef(tripId: string): Promise<IndexedRef | null> {
+    return (await this.getRefs([tripId])).get(tripId) ?? null;
+  }
+
+  /** getRef for many trips in one round trip (absent = not indexed). */
+  async getRefs(tripIds: string[]): Promise<Map<string, IndexedRef>> {
+    const refs = new Map<string, IndexedRef>();
+    if (tripIds.length === 0) return refs;
+    const pipeline = this.redis.pipeline();
+    for (const id of tripIds) pipeline.hgetall(tripRefKey(id));
+    const results = (await pipeline.exec()) ?? [];
+    tripIds.forEach((id, i) => {
+      const [err, hash] = results[i] ?? [];
+      if (err) throw err;
+      const ref = (hash ?? {}) as Record<string, string>;
+      if (!ref.tenantId) return;
+      refs.set(id, {
+        tenantId: ref.tenantId,
+        vehicleId: ref.vehicleId || null,
+        driverId: ref.driverId || null,
+        deviceImei: ref.deviceImei || null,
+      });
+    });
+    return refs;
+  }
+
+  /** A pipeline for batching activate / deactivate writes: run in order, one round trip. */
+  batch(): IndexBatch {
+    const pipeline = this.redis.pipeline();
     return {
-      tenantId: ref.tenantId,
-      vehicleId: ref.vehicleId || null,
-      driverId: ref.driverId || null,
-      deviceImei: ref.deviceImei || null,
+      activate: (trip, options) => addActivate(pipeline, trip, options),
+      deactivate: (trip, options) => addDeactivate(pipeline, trip, options),
+      exec: () => execOrThrow(pipeline),
     };
   }
 
@@ -191,62 +215,15 @@ export class ActiveTripIndex {
     trip: ActiveTripRefs,
     { ifFree = false }: { ifFree?: boolean } = {},
   ): Promise<void> {
-    const { tripId, vehicleId, driverId } = trip;
     const pipeline = this.redis.pipeline();
-    pipeline.del(tripRefKey(tripId));
-    pipeline.hset(tripRefKey(tripId), refHash(trip));
-    for (const key of [
-      vehicleId ? vehicleActiveTripKey(vehicleId) : null,
-      driverId ? driverActiveTripKey(driverId) : null,
-    ]) {
-      if (!key) continue;
-      if (ifFree) pipeline.eval(SET_IF_FREE_SCRIPT, 1, key, tripId);
-      else pipeline.set(key, tripId);
-    }
-    // A followed-to-exit load only registers its device while it still holds the vehicle.
-    if (vehicleId && trip.deviceImei) {
-      if (ifFree) {
-        pipeline.eval(
-          REGISTER_DEVICE_IF_OWNER_SCRIPT,
-          3,
-          onTripDevicesKey(trip.tenantId),
-          ON_TRIP_TENANTS_KEY,
-          vehicleActiveTripKey(vehicleId),
-          trip.deviceImei,
-          vehicleId,
-          tripId,
-          trip.tenantId,
-        );
-      } else {
-        pipeline.hset(onTripDevicesKey(trip.tenantId), trip.deviceImei, vehicleId);
-        pipeline.sadd(ON_TRIP_TENANTS_KEY, trip.tenantId);
-      }
-    }
+    addActivate(pipeline, trip, { ifFree });
     await execOrThrow(pipeline);
   }
 
   /** Releases the given vehicle/driver from the trip; `endTrip` also drops the trip's ref hash. */
-  async deactivate(
-    { tripId, tenantId, vehicleId, driverId, deviceImei }: ActiveTripRefs,
-    { endTrip = true }: { endTrip?: boolean } = {},
-  ): Promise<void> {
+  async deactivate(trip: ActiveTripRefs, options: { endTrip?: boolean } = {}): Promise<void> {
     const pipeline = this.redis.pipeline();
-    if (endTrip) pipeline.del(tripRefKey(tripId));
-    if (vehicleId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, vehicleActiveTripKey(vehicleId), tripId);
-    if (driverId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, driverActiveTripKey(driverId), tripId);
-    if (vehicleId && deviceImei) {
-      pipeline.eval(
-        REMOVE_DEVICE_SCRIPT,
-        3,
-        onTripDevicesKey(tenantId),
-        ON_TRIP_TENANTS_KEY,
-        vehicleActiveTripKey(vehicleId),
-        deviceImei,
-        vehicleId,
-        tenantId,
-        tripId,
-      );
-    }
+    addDeactivate(pipeline, trip, options);
     await execOrThrow(pipeline);
   }
 
@@ -289,21 +266,16 @@ export class ActiveTripIndex {
       expectedDevices.has(key) ||
       key === ON_TRIP_TENANTS_KEY;
 
+    // One pass over the keyspace for all four kinds of index key (a MATCH pattern per kind would
+    // walk every key four times: SCAN filters after iterating).
     let removed = 0;
-    for (const pattern of [
-      'trk:veh:*:active_trip',
-      'trk:drv:*:active_trip',
-      'trk:trip:*:ref',
-      'trk:ontrip-devices:*',
-    ]) {
-      let cursor = '0';
-      do {
-        const [next, keys] = await this.redis.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
-        cursor = next;
-        const stale = keys.filter((key) => !isExpected(key));
-        if (stale.length > 0) removed += await this.redis.del(...stale);
-      } while (cursor !== '0');
-    }
+    let cursor = '0';
+    do {
+      const [next, keys] = await this.redis.scan(cursor, 'MATCH', 'trk:*', 'COUNT', 2000);
+      cursor = next;
+      const stale = keys.filter((key) => INDEX_KEY_RE.test(key) && !isExpected(key));
+      if (stale.length > 0) removed += await this.redis.del(...stale);
+    } while (cursor !== '0');
 
     if (expected.size > 0 || expectedRefs.size > 0) {
       const pipeline = this.redis.pipeline();
@@ -328,6 +300,81 @@ export class ActiveTripIndex {
     if (tenants.length > 0) registry.sadd(ON_TRIP_TENANTS_KEY, ...new Set(tenants));
     await execOrThrow(registry);
     return { set: expected.size, removed };
+  }
+}
+
+type Pipeline = ReturnType<Redis['pipeline']>;
+
+export interface IndexedRef {
+  tenantId: string;
+  vehicleId: string | null;
+  driverId: string | null;
+  deviceImei: string | null;
+}
+
+export interface IndexBatch {
+  activate(trip: ActiveTripRefs, options?: { ifFree?: boolean }): void;
+  deactivate(trip: ActiveTripRefs, options?: { endTrip?: boolean }): void;
+  exec(): Promise<void>;
+}
+
+function addActivate(
+  pipeline: Pipeline,
+  trip: ActiveTripRefs,
+  { ifFree = false }: { ifFree?: boolean } = {},
+): void {
+  const { tripId, vehicleId, driverId } = trip;
+  pipeline.del(tripRefKey(tripId));
+  pipeline.hset(tripRefKey(tripId), refHash(trip));
+  for (const key of [
+    vehicleId ? vehicleActiveTripKey(vehicleId) : null,
+    driverId ? driverActiveTripKey(driverId) : null,
+  ]) {
+    if (!key) continue;
+    if (ifFree) pipeline.eval(SET_IF_FREE_SCRIPT, 1, key, tripId);
+    else pipeline.set(key, tripId);
+  }
+  // A followed-to-exit load only registers its device while it still holds the vehicle.
+  if (vehicleId && trip.deviceImei) {
+    if (ifFree) {
+      pipeline.eval(
+        REGISTER_DEVICE_IF_OWNER_SCRIPT,
+        3,
+        onTripDevicesKey(trip.tenantId),
+        ON_TRIP_TENANTS_KEY,
+        vehicleActiveTripKey(vehicleId),
+        trip.deviceImei,
+        vehicleId,
+        tripId,
+        trip.tenantId,
+      );
+    } else {
+      pipeline.hset(onTripDevicesKey(trip.tenantId), trip.deviceImei, vehicleId);
+      pipeline.sadd(ON_TRIP_TENANTS_KEY, trip.tenantId);
+    }
+  }
+}
+
+function addDeactivate(
+  pipeline: Pipeline,
+  { tripId, tenantId, vehicleId, driverId, deviceImei }: ActiveTripRefs,
+  { endTrip = true }: { endTrip?: boolean } = {},
+): void {
+  if (endTrip) pipeline.del(tripRefKey(tripId));
+  if (vehicleId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, vehicleActiveTripKey(vehicleId), tripId);
+  if (driverId) pipeline.eval(COMPARE_DEL_SCRIPT, 1, driverActiveTripKey(driverId), tripId);
+  if (vehicleId && deviceImei) {
+    pipeline.eval(
+      REMOVE_DEVICE_SCRIPT,
+      3,
+      onTripDevicesKey(tenantId),
+      ON_TRIP_TENANTS_KEY,
+      vehicleActiveTripKey(vehicleId),
+      deviceImei,
+      vehicleId,
+      tenantId,
+      tripId,
+    );
   }
 }
 

@@ -9,6 +9,7 @@ import { IN_TRANSIT_STATUS, type ActiveTripIndex } from '../trips';
 import { mergeParams, RULE_DEFAULTS } from './defaults';
 import { AlertChange, RulesRepository, VehicleEffects } from './rules.repository';
 import { Effects, FixRule, RuleContext, RuleFix, RuleId } from './rule.types';
+import { LruMap } from '../../shared/utils/lru';
 
 /** Per-vehicle rule state: one hash per vehicle, one field per rule|source. */
 export const ruleStateKey = (vehicleId: string) => `trk:rules:${vehicleId}`;
@@ -42,8 +43,13 @@ type ResolvedSettings = Map<RuleId, { enabled: boolean; params: RuleContext['par
  * Postgres in one transaction, so a redelivered batch recomputes identical, idempotent effects.
  */
 export class RuleEngine {
-  private readonly settingsCache = new Map<string, { at: number; value: ResolvedSettings }>();
-  private readonly profileCache = new Map<string, { at: number; bodyType: string | null }>();
+  // Bounded: one entry per tenant / vehicle ever seen would otherwise live for the process.
+  private readonly settingsCache = new LruMap<string, { at: number; value: ResolvedSettings }>(
+    5_000,
+  );
+  private readonly profileCache = new LruMap<string, { at: number; bodyType: string | null }>(
+    50_000,
+  );
 
   constructor(
     private readonly rules: FixRule[],
@@ -69,7 +75,9 @@ export class RuleEngine {
       .map(({ point }) => point);
     const byVehicle = new Map<string, typeof accepted>();
     for (const point of accepted) {
-      byVehicle.set(point.vehicleId, [...(byVehicle.get(point.vehicleId) ?? []), point]);
+      const list = byVehicle.get(point.vehicleId);
+      if (list) list.push(point);
+      else byVehicle.set(point.vehicleId, [point]);
     }
     if (byVehicle.size === 0) return { effects: [], writeState: writeLastSeen };
 

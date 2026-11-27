@@ -4,6 +4,7 @@ import type { MainDataRepository } from '../main-data';
 import type { RouteStore } from '../routes/route.store';
 import type { RouteVersion } from '../routes/trip-routes';
 import type { InTransitTrip, RoutesRepository } from '../routes/routes.repository';
+import { mapWithConcurrency } from '../../shared/utils/concurrency';
 import { RULE_DEFAULTS } from './defaults';
 import { alreadyLateSeverity, evaluateDelay, lateNoticeDue, promisedTime } from './delay';
 import { ruleStateKey, RuleEngine } from './rule-engine';
@@ -11,6 +12,7 @@ import { alertId, episodeId, noticeId, num } from './rule-helpers';
 import { AlertChange, RulesRepository } from './rules.repository';
 import type { ProgressState } from './rules/progress-gps.rule';
 import { DelayCause, Effects, SEVERITY_RANK, Severity } from './rule.types';
+import { LruMap } from '../../shared/utils/lru';
 
 /** The rule the progress / ETA belongs to (DELAY-GPS state fields) and GPS alerts are raised as. */
 const RULE = 'DELAY-GPS' as const;
@@ -23,6 +25,8 @@ const delayStateKey = (tripId: string) => `trk:delay:${tripId}`;
 const OPEN_SET = 'trk:delay:open';
 /** How long a company's LS_N_0030 limit (main's org setting) is cached. */
 const THRESHOLD_TTL_MS = 5 * 60_000;
+/** In-transit trips evaluated at once per tick (each a handful of Redis calls, rarely Postgres). */
+const TRIP_CONCURRENCY = 16;
 
 interface DelayState {
   /** Last alert evaluation (every evaluateEveryMin). */
@@ -78,7 +82,7 @@ const emptyState = (): DelayState => ({
  * `consecutive` evaluations, then again only each time the delay doubles since the last notice.
  */
 export class DelayMonitor {
-  private readonly thresholdCache = new Map<string, { at: number; value: number }>();
+  private readonly thresholdCache = new LruMap<string, { at: number; value: number }>(5_000);
 
   constructor(
     private readonly redis: Redis,
@@ -101,17 +105,22 @@ export class DelayMonitor {
     let evaluated = 0;
     let failed = 0;
 
-    for (const trip of trips) {
+    // Trips are independent (each has its own state, ETA and alert keys): several at once, so a
+    // minute's tick keeps up with thousands of in-transit trips. Changes keep the trips' order.
+    const perTrip = await mapWithConcurrency(trips, TRIP_CONCURRENCY, async (trip) => {
       const tripRoutes = routes.get(trip.id);
-      if (!tripRoutes) continue;
+      if (!tripRoutes) return [];
       try {
-        changes.push(...(await this.evaluateTrip(trip, tripRoutes.primary, nowMs)));
+        const result = await this.evaluateTrip(trip, tripRoutes.primary, nowMs);
         evaluated += 1;
+        return result;
       } catch (err) {
         failed += 1;
         this.logger.error({ err, tripId: trip.id }, 'Delay evaluation failed');
+        return [];
       }
-    }
+    });
+    for (const tripChanges of perTrip) changes.push(...tripChanges);
     if (trips.length > 0) {
       this.logger.info({ inTransit: trips.length, evaluated, failed }, 'Delay ETA tick');
     }
